@@ -214,8 +214,8 @@ def safety_test():
 
 
 @main.command()
-@click.option("--api-key", envvar="ANTHROPIC_API_KEY", help="Anthropic API key (or set ANTHROPIC_API_KEY)")
-@click.option("--model", default="claude-sonnet-4-20250514", help="Model to use for analysis")
+@click.option("--api-key", envvar=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], help="API key (Anthropic or OpenAI, auto-detected)")
+@click.option("--model", default=None, help="Model override (auto-detected from API key)")
 def analyze(api_key: str | None, model: str):
     """AI-powered analysis of your home screen."""
     from homeboard.analyzer import analyze as run_analysis
@@ -224,7 +224,7 @@ def analyze(api_key: str | None, model: str):
     from homeboard.scoring import compute_score
 
     if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY not set.[/red] Set it or pass --api-key.")
+        console.print("[red]No API key found.[/red] Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or pass --api-key.")
         sys.exit(1)
 
     console.print("\n[bold]HomeBoard[/bold] — AI Analysis...\n")
@@ -274,8 +274,8 @@ def analyze(api_key: str | None, model: str):
 
 
 @main.command()
-@click.option("--api-key", envvar="ANTHROPIC_API_KEY", help="Anthropic API key")
-@click.option("--model", default="claude-sonnet-4-20250514", help="Model for analysis")
+@click.option("--api-key", envvar=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], help="API key (auto-detected)")
+@click.option("--model", default=None, help="Model override (auto-detected)")
 @click.option("--apply-all", is_flag=True, help="Apply all suggestions without stepping through (Just Fix It mode)")
 def suggest(api_key: str | None, model: str, apply_all: bool):
     """AI-powered suggestions with live preview. Accept/skip each change."""
@@ -397,8 +397,8 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
 
 
 @main.command()
-@click.option("--api-key", envvar="ANTHROPIC_API_KEY", help="Anthropic API key")
-@click.option("--model", default="claude-sonnet-4-20250514", help="Model for analysis")
+@click.option("--api-key", envvar=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], help="API key (auto-detected)")
+@click.option("--model", default=None, help="Model override (auto-detected)")
 @click.option("--output", "-o", type=click.Path(), help="Output path for HTML report")
 @click.option("--open", "open_browser", is_flag=True, help="Open the report in your browser")
 def report(api_key: str | None, model: str, output: str | None, open_browser: bool):

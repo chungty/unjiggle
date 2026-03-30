@@ -151,7 +151,7 @@ def _build_context(layout: HomeScreenLayout, metadata: dict[str, dict], score: S
                     name = meta.get("name", item.app.bundle_id)
                     cat = meta.get("super_category", "?")
                     updated = meta.get("last_updated", "?")
-                    desc = meta.get("description", "")
+                    desc = meta.get("description") or ""
                     lines.append(f"  {item.app.bundle_id} ({name}) [{cat}] updated:{updated} \"{desc[:80]}\"")
                 else:
                     lines.append(f"  {item.app.bundle_id}")
@@ -175,11 +175,29 @@ def analyze(
     metadata: dict[str, dict],
     score: ScoreBreakdown,
     api_key: str | None = None,
-    model: str = "claude-sonnet-4-20250514",
+    model: str | None = None,
+    provider: str = "auto",
 ) -> AnalysisResult:
-    """Run LLM analysis on the layout. Returns structured observations."""
-    client = anthropic.Anthropic(api_key=api_key)
+    """Run LLM analysis on the layout. Returns structured observations.
+
+    provider: "anthropic", "openai", or "auto" (detect from api_key prefix).
+    """
     context = _build_context(layout, metadata, score)
+
+    if provider == "auto":
+        if api_key and api_key.startswith("sk-"):
+            provider = "openai"
+        else:
+            provider = "anthropic"
+
+    if provider == "openai":
+        return _analyze_openai(layout, context, api_key, model or "gpt-4o")
+    else:
+        return _analyze_anthropic(layout, context, api_key, model or "claude-sonnet-4-20250514")
+
+
+def _analyze_anthropic(layout, context, api_key, model) -> AnalysisResult:
+    client = anthropic.Anthropic(api_key=api_key)
 
     response = client.messages.create(
         model=model,
@@ -192,12 +210,48 @@ def analyze(
         ],
     )
 
-    # Extract tool use result
     for block in response.content:
         if block.type == "tool_use" and block.name == "submit_analysis":
             return _parse_result(block.input, layout)
 
-    raise RuntimeError("LLM did not return a submit_analysis tool call")
+    raise RuntimeError("Anthropic did not return a submit_analysis tool call")
+
+
+def _analyze_openai(layout, context, api_key, model) -> AnalysisResult:
+    import openai
+
+    client = openai.OpenAI(api_key=api_key)
+
+    # Convert Anthropic tool schema to OpenAI function calling format
+    openai_tool = {
+        "type": "function",
+        "function": {
+            "name": ANALYSIS_TOOL["name"],
+            "description": ANALYSIS_TOOL["description"],
+            "parameters": ANALYSIS_TOOL["input_schema"],
+        },
+    }
+
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=4096,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"Analyze this iPhone home screen layout:\n\n{context}"},
+        ],
+        tools=[openai_tool],
+        tool_choice={"type": "function", "function": {"name": "submit_analysis"}},
+    )
+
+    # Extract function call result
+    for choice in response.choices:
+        if choice.message.tool_calls:
+            for tc in choice.message.tool_calls:
+                if tc.function.name == "submit_analysis":
+                    data = json.loads(tc.function.arguments)
+                    return _parse_result(data, layout)
+
+    raise RuntimeError("OpenAI did not return a submit_analysis function call")
 
 
 def _parse_result(data: dict, layout: HomeScreenLayout) -> AnalysisResult:
