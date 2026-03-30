@@ -191,7 +191,7 @@ def analyze(
             provider = "anthropic"
 
     if provider == "openai":
-        return _analyze_openai(layout, context, api_key, model or "gpt-4o")
+        return _analyze_openai(layout, context, api_key, model or "gpt-4.1")
     else:
         return _analyze_anthropic(layout, context, api_key, model or "claude-sonnet-4-20250514")
 
