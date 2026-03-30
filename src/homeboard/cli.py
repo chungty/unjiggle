@@ -371,6 +371,7 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
 
     console.print()
     if click.confirm("  Apply these changes to your iPhone?", default=True):
+        from homeboard.layout_engine import apply_operations
         from homeboard.safety import pre_write_safety_check
 
         safe, backup_path = pre_write_safety_check(lockdown, layout)
@@ -378,13 +379,16 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
             console.print("  [red]Safety check failed. No changes made.[/red]\n")
             return
 
-        # Write the new layout
-        write_layout(lockdown, final_preview.raw)
+        # Build the modified raw plist using the layout engine
+        modified_raw = apply_operations(layout, accepted_ops)
+
+        # Write the modified layout to device
+        write_layout(lockdown, modified_raw)
 
         # Verify the write took effect
         from homeboard.device import read_layout as re_read
         verify = re_read(lockdown)
-        console.print(f"  [dim]Verifying write... {verify.page_count} pages read back.[/dim]")
+        console.print(f"  [dim]Verifying write... {verify.page_count} pages, {verify.total_apps} apps read back.[/dim]")
 
         console.print(f"\n  [green bold]Done![/green bold] Your iPhone has been reorganized.")
         console.print(f"  Undo anytime: [bold]homeboard restore {backup_path}[/bold]\n")
