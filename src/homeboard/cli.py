@@ -137,22 +137,80 @@ def backup():
 
 
 @main.command()
-@click.argument("backup_file", type=click.Path(exists=True))
-def restore(backup_file: str):
-    """Restore a previously backed up layout."""
-    from homeboard.device import connect, restore_layout_from_file, write_layout
+@click.argument("backup_file", type=click.Path(exists=True), required=False)
+def restore(backup_file: str | None):
+    """Restore a previously backed up layout. If no file specified, shows available backups."""
+    from homeboard.device import connect
+    from homeboard.safety import list_backups, restore_from_backup
 
-    console.print("\n[bold]HomeBoard[/bold] — Restoring layout...\n")
+    console.print("\n[bold]HomeBoard[/bold] — Restore\n")
+
+    if not backup_file:
+        backups = list_backups()
+        if not backups:
+            console.print("  No backups found. Run [bold]homeboard backup[/bold] first.\n")
+            return
+        console.print("  Available backups (newest first):\n")
+        for i, bp in enumerate(backups[:10]):
+            size = bp.stat().st_size
+            console.print(f"    {i + 1}. {bp.name} ({size:,} bytes)")
+        console.print(f"\n  Usage: [bold]homeboard restore {backups[0]}[/bold]\n")
+        return
 
     try:
-        lockdown, _ = connect()
+        lockdown, device = connect()
     except Exception as e:
         console.print(f"[red]No iPhone detected.[/red] {e}")
         sys.exit(1)
 
-    state = restore_layout_from_file(Path(backup_file))
-    write_layout(lockdown, state)
-    console.print(f"  [green]Layout restored from {backup_file}[/green]\n")
+    console.print(f"  Device: [cyan]{device.name}[/cyan] (iOS {device.ios_version})\n")
+    restore_from_backup(lockdown, Path(backup_file))
+    console.print()
+
+
+@main.command(name="safety-test")
+def safety_test():
+    """Test that backup and restore work correctly (no-op round-trip)."""
+    from homeboard.device import connect, read_layout
+    from homeboard.safety import test_restore_roundtrip, verified_backup
+
+    console.print("\n[bold]HomeBoard[/bold] — Safety Test\n")
+    console.print("  This test proves that HomeBoard can safely read and write")
+    console.print("  your home screen without changing anything.\n")
+
+    try:
+        lockdown, device = connect()
+    except Exception as e:
+        console.print(f"[red]No iPhone detected.[/red] {e}")
+        sys.exit(1)
+
+    console.print(f"  Device: [cyan]{device.name}[/cyan] (iOS {device.ios_version})\n")
+
+    # Step 1: Verified backup
+    console.print("  [bold]1. Creating verified backup...[/bold]")
+    layout = read_layout(lockdown)
+    try:
+        backup_path = verified_backup(lockdown, layout)
+        console.print(f"     [green]✓[/green] Backup saved: {backup_path}")
+        console.print(f"     [green]✓[/green] {layout.page_count} pages, {layout.total_apps} apps captured\n")
+    except Exception as e:
+        console.print(f"     [red]✗ Backup failed: {e}[/red]\n")
+        sys.exit(1)
+
+    # Step 2: Round-trip test
+    console.print("  [bold]2. Round-trip test (write current layout back, read again)...[/bold]")
+    success = test_restore_roundtrip(lockdown)
+    console.print()
+
+    if success:
+        console.print("  [green bold]All safety tests passed.[/green bold]")
+        console.print("  HomeBoard can safely read and write your home screen layout.")
+        console.print(f"  Your backup is at: {backup_path}")
+        console.print(f"\n  You're safe to run [bold]homeboard suggest[/bold] now.\n")
+    else:
+        console.print("  [red bold]Safety test failed.[/red bold]")
+        console.print("  Do NOT run homeboard suggest until this is resolved.\n")
+        sys.exit(1)
 
 
 @main.command()
@@ -313,18 +371,23 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
 
     console.print()
     if click.confirm("  Apply these changes to your iPhone?", default=True):
-        # Auto-backup first
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup_path = BACKUP_DIR / f"layout-pre-suggest-{timestamp}.json"
-        backup_layout(layout, backup_path)
-        console.print(f"    [dim]Backup saved: {backup_path}[/dim]")
+        from homeboard.safety import pre_write_safety_check
 
-        # Build the new raw state from the preview
-        # For now, we write the original raw state with modifications
-        # TODO: Build raw plist from the preview layout model
+        safe, backup_path = pre_write_safety_check(lockdown, layout)
+        if not safe:
+            console.print("  [red]Safety check failed. No changes made.[/red]\n")
+            return
+
+        # Write the new layout
         write_layout(lockdown, final_preview.raw)
+
+        # Verify the write took effect
+        from homeboard.device import read_layout as re_read
+        verify = re_read(lockdown)
+        console.print(f"  [dim]Verifying write... {verify.page_count} pages read back.[/dim]")
+
         console.print(f"\n  [green bold]Done![/green bold] Your iPhone has been reorganized.")
-        console.print(f"  Run [bold]homeboard restore {backup_path}[/bold] to undo.\n")
+        console.print(f"  Undo anytime: [bold]homeboard restore {backup_path}[/bold]\n")
     else:
         console.print("  [yellow]Cancelled.[/yellow] No changes made.\n")
 
