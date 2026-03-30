@@ -18,11 +18,12 @@ from homeboard.models import HomeScreenLayout, ScoreBreakdown
 @dataclass
 class LayoutOperation:
     """A single validated layout change."""
-    action: str  # "move_to_app_library", "move_to_page", "create_folder", "rename_folder", "move_to_folder"
+    action: str  # "move_to_app_library", "delete", "move_to_page", "create_folder", "rename_folder", "move_to_folder"
     bundle_ids: list[str] = field(default_factory=list)
     target_page: int | None = None
     folder_name: str | None = None
     old_name: str | None = None
+    gratitude: str | None = None  # Marie Kondo moment: thank the app before deleting
 
 
 @dataclass
@@ -66,6 +67,12 @@ RULES:
 - The personality narrative should feel like someone who KNOWS this person, not a database report
 - Observations should be ordered: cleanup first, then organization, then optimization
 
+MARIE KONDO PRINCIPLE — for cleanup observations:
+- For apps that are truly abandoned, outdated, or superseded, use "delete" action instead of "move_to_app_library". These apps deserve a proper goodbye, not a junk drawer.
+- For apps that might still be useful occasionally, use "move_to_app_library" (archive).
+- For EVERY delete action, include a "gratitude" field: a one-sentence acknowledgment of what the app did for the user. Examples: "Purify served you well when mobile ad blocking was harder. Safari handles this natively now." or "Dark Sky was the gold standard for hyperlocal weather before Apple acquired it and folded its best features into the Weather app."
+- The gratitude line should be warm, specific, and final. Not sentimental slop. A respectful sendoff.
+
 OUTPUT FORMAT: You must respond with a JSON object matching this exact schema.
 """
 
@@ -93,12 +100,13 @@ ANALYSIS_TOOL = {
                                 "properties": {
                                     "action": {
                                         "type": "string",
-                                        "enum": ["move_to_app_library", "move_to_page", "create_folder", "rename_folder", "move_to_folder"]
+                                        "enum": ["move_to_app_library", "delete", "move_to_page", "create_folder", "rename_folder", "move_to_folder"]
                                     },
                                     "bundle_ids": {"type": "array", "items": {"type": "string"}},
                                     "target_page": {"type": "integer", "description": "0-indexed page number for move_to_page"},
                                     "folder_name": {"type": "string", "description": "Folder name for create_folder, rename_folder, or move_to_folder"},
                                     "old_name": {"type": "string", "description": "Old folder name for rename_folder"},
+                                    "gratitude": {"type": "string", "description": "For delete actions: a one-sentence thank-you to the app for what it once provided. Warm, specific, final."},
                                 },
                             },
                         },
@@ -274,6 +282,7 @@ def _parse_result(data: dict, layout: HomeScreenLayout) -> AnalysisResult:
                 target_page=op_data.get("target_page"),
                 folder_name=op_data.get("folder_name"),
                 old_name=op_data.get("old_name"),
+                gratitude=op_data.get("gratitude"),
             ))
 
         observations.append(Observation(

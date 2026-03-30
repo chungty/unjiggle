@@ -53,15 +53,18 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
     raw = copy.deepcopy(layout.raw)
 
     for op in operations:
-        if op.action == "move_to_app_library":
+        if op.action in ("move_to_app_library", "delete"):
             _raw_remove_apps(raw, op.bundle_ids)
             # For dict-format raw (legacy), track ignored apps
-            if isinstance(raw, dict):
+            if isinstance(raw, dict) and op.action == "move_to_app_library":
                 ignored = raw.get("ignored", [])
                 for bid in op.bundle_ids:
                     if bid not in ignored:
                         ignored.append(bid)
                 raw["ignored"] = ignored
+            # Note: actual app deletion (uninstall) happens via a separate
+            # pymobiledevice3 API call, not through IconState. The layout
+            # engine just removes the icon from the home screen.
 
         elif op.action == "move_to_page":
             if op.target_page is not None:

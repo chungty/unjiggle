@@ -262,9 +262,19 @@ def analyze(api_key: str | None, model: str):
                 names_str = ", ".join(app_names)
                 if len(op.bundle_ids) > 5:
                     names_str += f" +{len(op.bundle_ids) - 5} more"
-                console.print(f"    → {op.action}: {names_str}")
+                action_label = {
+                    "delete": "[red]🙏 delete[/red]",
+                    "move_to_app_library": "[yellow]📦 archive[/yellow]",
+                    "move_to_page": "[blue]📄 move to page[/blue]",
+                    "create_folder": "[green]📁 create folder[/green]",
+                    "rename_folder": "[cyan]✏️  rename folder[/cyan]",
+                    "move_to_folder": "[blue]📁 move to folder[/blue]",
+                }.get(op.action, op.action)
+                console.print(f"    {action_label}: {names_str}")
+                if op.gratitude:
+                    console.print(f"    [dim italic]  \"{op.gratitude}\"[/dim italic]")
                 if op.folder_name:
-                    console.print(f"      folder: {op.folder_name}")
+                    console.print(f"      → folder: {op.folder_name}")
             console.print()
 
     if result.personality:
@@ -338,20 +348,51 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
                     console.print(f"    Pages: {'+' if delta_pages >= 0 else ''}{delta_pages}")
                 console.print()
 
-            choice = click.prompt(
-                "    [A]pply / [S]kip / [Q]uit",
-                type=click.Choice(["a", "s", "q"], case_sensitive=False),
-                default="a",
-            )
-
-            if choice.lower() == "a":
-                accepted_ops.extend(obs.operations)
-                console.print("    [green]Applied.[/green]\n")
-            elif choice.lower() == "q":
-                console.print("    [yellow]Stopped.[/yellow]\n")
-                break
+            # For cleanup observations with delete actions, offer granular choices
+            has_deletes = any(op.action == "delete" for op in obs.operations)
+            if has_deletes and obs.track == "cleanup":
+                console.print("    For each app:")
+                kept_ops = []
+                for op in obs.operations:
+                    if op.action == "delete":
+                        for bid in op.bundle_ids:
+                            meta = metadata.get(bid, {})
+                            name = meta.get("name", bid.split(".")[-1]) if meta else bid.split(".")[-1]
+                            if op.gratitude:
+                                console.print(f"\n    [bold]{name}[/bold]")
+                                console.print(f"    [dim italic]\"{op.gratitude}\"[/dim italic]")
+                            choice = click.prompt(
+                                f"    [D]elete / [A]rchive / [K]eep",
+                                type=click.Choice(["d", "a", "k"], case_sensitive=False),
+                                default="d",
+                            )
+                            if choice.lower() == "d":
+                                kept_ops.append(LayoutOperation(action="delete", bundle_ids=[bid], gratitude=op.gratitude))
+                                console.print(f"    [red]Goodbye, {name}.[/red]")
+                            elif choice.lower() == "a":
+                                kept_ops.append(LayoutOperation(action="move_to_app_library", bundle_ids=[bid]))
+                                console.print(f"    [yellow]Archived.[/yellow]")
+                            else:
+                                console.print(f"    [dim]Kept.[/dim]")
+                    else:
+                        kept_ops.append(op)
+                accepted_ops.extend(kept_ops)
+                console.print()
             else:
-                console.print("    [dim]Skipped.[/dim]\n")
+                choice = click.prompt(
+                    "    [A]pply / [S]kip / [Q]uit",
+                    type=click.Choice(["a", "s", "q"], case_sensitive=False),
+                    default="a",
+                )
+
+                if choice.lower() == "a":
+                    accepted_ops.extend(obs.operations)
+                    console.print("    [green]Applied.[/green]\n")
+                elif choice.lower() == "q":
+                    console.print("    [yellow]Stopped.[/yellow]\n")
+                    break
+                else:
+                    console.print("    [dim]Skipped.[/dim]\n")
 
     if not accepted_ops:
         console.print("  No changes to apply.\n")
