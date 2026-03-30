@@ -14,31 +14,61 @@ from homeboard.analyzer import LayoutOperation
 from homeboard.models import HomeScreenLayout
 
 
-def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]) -> dict:
-    """Apply operations to a copy of the raw plist and return the modified raw dict.
+def _get_pages(raw) -> list[list]:
+    """Get the pages list from raw state, handling both formats."""
+    if isinstance(raw, list):
+        # iOS 26: raw[0] = dock, raw[1:] = pages
+        return raw[1:] if len(raw) > 1 else []
+    else:
+        # Legacy dict format
+        return raw.get("iconLists", [])
 
-    This is what gets written to the device.
+
+def _set_pages(raw, pages: list[list]) -> None:
+    """Set the pages in raw state, handling both formats."""
+    if isinstance(raw, list):
+        # iOS 26: keep dock (raw[0]), replace pages
+        dock = raw[0] if raw else []
+        raw.clear()
+        raw.append(dock)
+        raw.extend(pages)
+    else:
+        raw["iconLists"] = pages
+
+
+def _get_dock(raw) -> list:
+    """Get the dock from raw state."""
+    if isinstance(raw, list):
+        return raw[0] if raw else []
+    else:
+        return raw.get("buttonBar", [])
+
+
+def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]):
+    """Apply operations to a copy of the raw state and return the modified state.
+
+    This is what gets written to the device. Handles both iOS 26 (list format)
+    and legacy (dict format).
     """
     raw = copy.deepcopy(layout.raw)
 
     for op in operations:
         if op.action == "move_to_app_library":
             _raw_remove_apps(raw, op.bundle_ids)
-            # Add to ignored list
-            ignored = raw.get("ignored", [])
-            for bid in op.bundle_ids:
-                if bid not in ignored:
-                    ignored.append(bid)
-            raw["ignored"] = ignored
+            # For dict-format raw (legacy), track ignored apps
+            if isinstance(raw, dict):
+                ignored = raw.get("ignored", [])
+                for bid in op.bundle_ids:
+                    if bid not in ignored:
+                        ignored.append(bid)
+                raw["ignored"] = ignored
 
         elif op.action == "move_to_page":
             if op.target_page is not None:
-                # Extract apps from wherever they are
                 extracted = _raw_extract_apps(raw, op.bundle_ids)
-                # Add to target page
-                icon_lists = raw.get("iconLists", [])
-                if 0 <= op.target_page < len(icon_lists):
-                    page = icon_lists[op.target_page]
+                pages = _get_pages(raw)
+                if 0 <= op.target_page < len(pages):
+                    page = pages[op.target_page]
                     if len(page) + len(extracted) <= 24:
                         page.extend(extracted)
 
@@ -49,18 +79,17 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                     folder_dict = {
                         "displayName": op.folder_name,
                         "iconLists": [extracted],
-                        "listType": "folder",
+                        "iconType": "folder",
                     }
-                    # Add folder to first page (or last page with space)
-                    icon_lists = raw.get("iconLists", [])
+                    pages = _get_pages(raw)
                     placed = False
-                    for page in icon_lists:
+                    for page in pages:
                         if len(page) < 24:
                             page.append(folder_dict)
                             placed = True
                             break
-                    if not placed and icon_lists:
-                        icon_lists[0].append(folder_dict)
+                    if not placed and pages:
+                        pages[0].append(folder_dict)
 
         elif op.action == "rename_folder":
             if op.old_name and op.folder_name:
@@ -73,7 +102,9 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                     _raw_add_to_folder(raw, op.folder_name, extracted)
 
     # Clean up empty pages
-    raw["iconLists"] = [page for page in raw.get("iconLists", []) if page]
+    pages = _get_pages(raw)
+    cleaned = [page for page in pages if page]
+    _set_pages(raw, cleaned)
 
     return raw
 
@@ -92,19 +123,20 @@ def _raw_is_folder(item: Any) -> bool:
     return isinstance(item, dict) and ("iconLists" in item or item.get("listType") == "folder")
 
 
-def _raw_remove_apps(raw: dict, bundle_ids: list[str]) -> None:
-    """Remove apps by bundle ID from all pages and folders in the raw plist."""
+def _raw_remove_apps(raw, bundle_ids: list[str]) -> None:
+    """Remove apps by bundle ID from all pages, folders, and dock."""
     bid_set = set(bundle_ids)
 
-    # Remove from pages
-    for page in raw.get("iconLists", []):
+    # Remove from all pages (including dock for list format)
+    all_pages = raw if isinstance(raw, list) else ([raw.get("buttonBar", [])] + raw.get("iconLists", []))
+
+    for page in all_pages:
         to_remove = []
         for i, item in enumerate(page):
             bid = _raw_find_app(item)
             if bid and bid in bid_set:
                 to_remove.append(i)
             elif _raw_is_folder(item):
-                # Remove from folder's pages
                 for folder_page in item.get("iconLists", []):
                     folder_page[:] = [
                         fi for fi in folder_page
@@ -113,21 +145,15 @@ def _raw_remove_apps(raw: dict, bundle_ids: list[str]) -> None:
         for i in reversed(to_remove):
             page.pop(i)
 
-    # Remove from dock
-    dock = raw.get("buttonBar", [])
-    dock[:] = [
-        item for item in dock
-        if _raw_find_app(item) not in bid_set
-    ]
 
-
-def _raw_extract_apps(raw: dict, bundle_ids: list[str]) -> list:
-    """Remove apps from the raw plist and return the raw items."""
+def _raw_extract_apps(raw, bundle_ids: list[str]) -> list:
+    """Remove apps from the raw state and return the raw items."""
     bid_set = set(bundle_ids)
     extracted = []
 
-    # Collect the raw items before removing
-    for page in raw.get("iconLists", []):
+    all_pages = raw if isinstance(raw, list) else ([raw.get("buttonBar", [])] + raw.get("iconLists", []))
+
+    for page in all_pages:
         for item in page:
             bid = _raw_find_app(item)
             if bid and bid in bid_set:
@@ -138,30 +164,30 @@ def _raw_extract_apps(raw: dict, bundle_ids: list[str]) -> list:
                         if _raw_find_app(fi) in bid_set:
                             extracted.append(fi)
 
-    # Now remove them
     _raw_remove_apps(raw, bundle_ids)
 
-    # If we didn't find some, create simple string entries
     found_bids = {_raw_find_app(e) for e in extracted if _raw_find_app(e)}
     for bid in bundle_ids:
         if bid not in found_bids:
-            extracted.append(bid)  # Simple string format
+            extracted.append({"bundleIdentifier": bid, "iconType": "app"})
 
     return extracted
 
 
-def _raw_rename_folder(raw: dict, old_name: str, new_name: str) -> None:
-    """Rename a folder in the raw plist."""
-    for page in raw.get("iconLists", []):
+def _raw_rename_folder(raw, old_name: str, new_name: str) -> None:
+    """Rename a folder in the raw state."""
+    all_pages = raw if isinstance(raw, list) else raw.get("iconLists", [])
+    for page in all_pages:
         for item in page:
             if _raw_is_folder(item) and item.get("displayName") == old_name:
                 item["displayName"] = new_name
                 return
 
 
-def _raw_add_to_folder(raw: dict, folder_name: str, items: list) -> None:
+def _raw_add_to_folder(raw, folder_name: str, items: list) -> None:
     """Add items to an existing folder by name."""
-    for page in raw.get("iconLists", []):
+    all_pages = raw if isinstance(raw, list) else raw.get("iconLists", [])
+    for page in all_pages:
         for item in page:
             if _raw_is_folder(item) and item.get("displayName") == folder_name:
                 folder_pages = item.get("iconLists", [[]])

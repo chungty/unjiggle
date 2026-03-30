@@ -32,22 +32,23 @@ def verified_backup(lockdown, layout: HomeScreenLayout) -> Path:
     path = BACKUP_DIR / f"layout-{timestamp}.json"
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Save
+    # Save (default=str handles datetime objects from pymobiledevice3)
     raw_json = json.dumps(layout.raw, indent=2, default=str)
     path.write_text(raw_json)
 
-    # Verify: read it back and compare
-    loaded = json.loads(path.read_text())
-    if loaded != layout.raw:
+    # Verify: read it back and compare (compare the JSON strings, not dicts,
+    # because default=str converts non-serializable types one-way)
+    loaded_json = path.read_text()
+    if loaded_json != raw_json:
         path.unlink()
         raise RuntimeError("Backup verification failed: saved file doesn't match device state")
 
-    # Verify: re-read from device to confirm device state hasn't changed
+    # Verify: re-read from device to confirm device state hasn't drifted
     fresh_layout = read_layout(lockdown)
-    if json.dumps(fresh_layout.raw, default=str) != json.dumps(layout.raw, default=str):
+    fresh_json = json.dumps(fresh_layout.raw, indent=2, default=str)
+    if fresh_json != raw_json:
         console.print("[yellow]  Warning: device state changed between reads. Re-backing up...[/yellow]")
-        raw_json = json.dumps(fresh_layout.raw, indent=2, default=str)
-        path.write_text(raw_json)
+        path.write_text(fresh_json)
 
     return path
 
@@ -65,14 +66,14 @@ def test_restore_roundtrip(lockdown) -> bool:
 
     console.print("  [dim]Reading current layout...[/dim]")
     before = read_layout(lockdown)
-    before_json = json.dumps(before.raw, default=str)
+    before_json = json.dumps(before.raw, indent=2, default=str)
 
     console.print("  [dim]Writing layout back unchanged (no-op write)...[/dim]")
     write_layout(lockdown, before.raw)
 
     console.print("  [dim]Reading layout again to verify...[/dim]")
     after = read_layout(lockdown)
-    after_json = json.dumps(after.raw, default=str)
+    after_json = json.dumps(after.raw, indent=2, default=str)
 
     if before_json == after_json:
         console.print("  [green]Round-trip verified.[/green] Read → Write → Read produced identical state.")
