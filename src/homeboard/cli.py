@@ -476,21 +476,37 @@ def report(api_key: str | None, model: str, output: str | None, open_browser: bo
     else:
         console.print("[dim]No API key — generating report without AI narrative.[/dim]")
 
+    # Generate both full report and share card
+    from homeboard.visualize import generate_share_card
+
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+
+    # Share card (1080x1350, Wrapped-style)
+    share_html = generate_share_card(
+        layout, metadata, score,
+        archetype=archetype,
+        personality=personality,
+    )
+    share_path = HOMEBOARD_DIR / "reports" / f"share-{timestamp}.html"
+    save_report(share_html, share_path)
+
+    # Full report (detailed)
     html = generate_report(
         layout, metadata, score,
         archetype=archetype,
         observations=observations_text,
         personality=personality,
     )
-
-    out_path = Path(output) if output else HOMEBOARD_DIR / "reports" / f"report-{datetime.now().strftime('%Y%m%d-%H%M%S')}.html"
+    out_path = Path(output) if output else HOMEBOARD_DIR / "reports" / f"report-{timestamp}.html"
     save_report(html, out_path)
-    console.print(f"\n  [green]Report saved:[/green] {out_path}")
+
+    console.print(f"\n  [green]Share card:[/green] {share_path}")
+    console.print(f"  [green]Full report:[/green] {out_path}")
 
     if open_browser:
         import webbrowser
-        webbrowser.open(f"file://{out_path.resolve()}")
-        console.print("  [dim]Opened in browser.[/dim]")
+        webbrowser.open(f"file://{share_path.resolve()}")
+        console.print("  [dim]Opened share card in browser.[/dim]")
 
     console.print()
 

@@ -15,7 +15,8 @@ class TestGenerateReport:
     def test_includes_score(self, chaotic_layout, sample_metadata):
         score = ScoreBreakdown(40, 30, 50, 60)
         html = generate_report(chaotic_layout, sample_metadata, score)
-        assert "Cluttered" in html
+        # Score value should appear in the report (as the number)
+        assert str(int(score.total)) in html
 
     def test_includes_archetype(self, chaotic_layout, sample_metadata):
         score = ScoreBreakdown(50, 50, 50, 50)

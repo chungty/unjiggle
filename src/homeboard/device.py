@@ -31,7 +31,16 @@ def _get_loop() -> asyncio.AbstractEventLoop:
     global _loop
     if _loop is None or _loop.is_closed():
         _loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(_loop)
     return _loop
+
+
+def reset_connection():
+    """Reset the event loop for a fresh connection."""
+    global _loop
+    if _loop and not _loop.is_closed():
+        _loop.close()
+    _loop = None
 
 
 def _run(coro):
@@ -42,6 +51,7 @@ def connect() -> tuple:
     """Connect to the first USB-attached iPhone. Returns (lockdown_client, device_info)."""
     from pymobiledevice3.lockdown import create_using_usbmux
 
+    reset_connection()  # Fresh loop for each connect
     lockdown = _run(create_using_usbmux())
     info = DeviceInfo(
         name=lockdown.all_values.get("DeviceName", "Unknown"),
