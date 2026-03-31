@@ -1,4 +1,4 @@
-"""Shared test fixtures for HomeBoard."""
+"""Shared test fixtures for Unjiggle."""
 
 import pytest
 

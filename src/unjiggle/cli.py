@@ -1,4 +1,4 @@
-"""HomeBoard CLI entry point."""
+"""Unjiggle CLI entry point."""
 
 from __future__ import annotations
 
@@ -39,6 +39,11 @@ def main(ctx):
         console.print("  [bold]unjiggle analyze[/bold]         AI-powered observations")
         console.print("  [bold]unjiggle suggest[/bold]         Interactive walkthrough with apply")
         console.print("  [bold]unjiggle report[/bold]          Generate shareable report card")
+        console.print()
+        console.print("  [bold magenta]Viral features:[/bold magenta]")
+        console.print("  [bold]unjiggle mirror[/bold]           Personality roast from your app collection")
+        console.print("  [bold]unjiggle obituary[/bold]         Eulogies for your dead apps")
+        console.print("  [bold]unjiggle swipetax[/bold]         How many swipes your layout wastes")
         console.print()
         console.print(f"  [dim]GUI coming soon → {WEBSITE_URL}[/dim]")
         console.print(f"  [dim]Star us on GitHub → {GITHUB_URL}[/dim]\n")
@@ -89,6 +94,16 @@ def go(api_key: str | None, model: str | None):
     console.print(f"  [bold magenta]{archetype}[/bold magenta]")
     console.print(f"  [dim]{tagline}[/dim]\n")
 
+    # Swipe Tax (always works, no API key needed)
+    from unjiggle.swipetax import compute_swipe_tax
+    tax = compute_swipe_tax(layout, metadata)
+    if tax.savings > 0:
+        console.print(f"  [bold yellow]Swipe Tax:[/bold yellow] {tax.headline}")
+        if tax.worst_offenders:
+            worst = tax.worst_offenders[0]
+            console.print(f"  [dim]Worst offender: {worst.name} on page {worst.page} ({worst.annual_wasted_swipes:,} wasted swipes/yr)[/dim]")
+        console.print(f"  [dim]Run [bold]unjiggle swipetax[/bold] for the full breakdown.[/dim]\n")
+
     # AI analysis (optional, needs API key)
     if api_key:
         try:
@@ -138,12 +153,12 @@ def go(api_key: str | None, model: str | None):
     console.print("  ─────────────────────────────────────────")
     console.print()
     console.print(f"  [bold]What's next?[/bold]")
-    console.print(f"    📸 Screenshot the share card and post it")
     console.print(f"    🔧 [bold]unjiggle suggest[/bold] to fix your layout with AI")
+    console.print(f"    🪞 [bold]unjiggle mirror[/bold] for your personality roast")
+    console.print(f"    ⚰️  [bold]unjiggle obituary[/bold] for eulogies of your dead apps")
     console.print(f"    ⭐ Star us: {GITHUB_URL}")
     console.print()
-    console.print(f"  [dim]A native Mac app with live preview, drag-and-drop,")
-    console.print(f"  and animated before/after is coming soon.[/dim]")
+    console.print(f"  [dim]A native Mac app with live preview, drag-and-drop, and animated before/after is coming soon.[/dim]")
     console.print(f"  [dim]Sign up: {WEBSITE_URL}[/dim]\n")
 
 
@@ -300,7 +315,7 @@ def safety_test():
     from unjiggle.safety import test_restore_roundtrip, verified_backup
 
     console.print("\n[bold]Unjiggle[/bold] — Safety Test\n")
-    console.print("  This test proves that HomeBoard can safely read and write")
+    console.print("  This test proves that Unjiggle can safely read and write")
     console.print("  your home screen without changing anything.\n")
 
     try:
@@ -329,7 +344,7 @@ def safety_test():
 
     if success:
         console.print("  [green bold]All safety tests passed.[/green bold]")
-        console.print("  HomeBoard can safely read and write your home screen layout.")
+        console.print("  Unjiggle can safely read and write your home screen layout.")
         console.print(f"  Your backup is at: {backup_path}")
         console.print(f"\n  You're safe to run [bold]unjiggle suggest[/bold] now.\n")
     else:
@@ -647,6 +662,209 @@ def report(api_key: str | None, model: str, output: str | None, open_browser: bo
     console.print()
     console.print(f"  [dim]Love Unjiggle? A native Mac app with live preview + slider is coming.[/dim]")
     console.print(f"  [dim]Sign up: {WEBSITE_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
+
+
+@main.command()
+@click.option("--api-key", envvar=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], help="API key (auto-detected)")
+@click.option("--model", default=None, help="Model override")
+def mirror(api_key: str | None, model: str | None):
+    """Personality roast: what your app collection says about you."""
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.mirror import generate_mirror
+    from unjiggle.scoring import compute_score
+
+    if not api_key:
+        console.print("[red]No API key found.[/red] Set ANTHROPIC_API_KEY or OPENAI_API_KEY.")
+        sys.exit(1)
+
+    console.print("\n[bold]Unjiggle[/bold] — Personality Mirror\n")
+    console.print("  [dim]Scanning your apps and preparing your roast...[/dim]\n")
+
+    try:
+        lockdown, device = connect()
+    except Exception as e:
+        console.print(f"[red]No iPhone detected.[/red] {e}")
+        sys.exit(1)
+
+    layout = read_layout(lockdown)
+    metadata = enrich_layout(layout)
+    score = compute_score(layout, metadata)
+
+    console.print("[dim]Generating your personality profile...[/dim]\n")
+    result = generate_mirror(layout, metadata, score, api_key=api_key, model=model)
+
+    # The roast
+    console.print(f"  [bold magenta]The Roast[/bold magenta]\n")
+    console.print(f"  {result.roast}\n")
+
+    # Life phases
+    if result.phases:
+        console.print(f"  [bold cyan]Life Phases Detected[/bold cyan]\n")
+        for phase in result.phases:
+            console.print(f"  [bold]{phase.name}[/bold]")
+            console.print(f"  {phase.narrative}")
+            console.print(f"  [dim]Evidence: {', '.join(phase.apps[:5])}[/dim]\n")
+
+    # Contradictions
+    if result.contradictions:
+        console.print(f"  [bold yellow]Contradictions[/bold yellow]\n")
+        for c in result.contradictions:
+            console.print(f"  [bold]{c.tension}[/bold]")
+            console.print(f"  {c.roast}")
+            console.print(f"  [dim]{', '.join(c.apps_a[:3])} vs. {', '.join(c.apps_b[:3])}[/dim]\n")
+
+    # Guilty pleasure
+    if result.guilty_pleasure:
+        console.print(f"  [bold red]Guilty Pleasure[/bold red]")
+        console.print(f"  {result.guilty_pleasure}\n")
+
+    # Tweetable one-liner
+    console.print("  ─────────────────────────────────────────")
+    console.print(f"\n  [italic]\"{result.one_line}\"[/italic]\n")
+
+    # Generate share card → clipboard
+    from unjiggle.cards import generate_mirror_card, save_card
+    from unjiggle.render import copy_text, export_card
+
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    card_html = generate_mirror_card(layout, metadata, result)
+    card_path = UNJIGGLE_DIR / "reports" / f"mirror-{timestamp}.html"
+    save_card(card_html, card_path)
+    export_card(card_path, console)
+
+    # Also copy the one-liner for Twitter/text posts
+    copy_text(result.one_line)
+    console.print(f"  [dim]One-liner also copied — Cmd+V to tweet it.[/dim]")
+    console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
+
+
+@main.command()
+@click.option("--api-key", envvar=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], help="API key (auto-detected)")
+@click.option("--model", default=None, help="Model override")
+def obituary(api_key: str | None, model: str | None):
+    """Eulogies for your dead apps. RIP."""
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.obituary import generate_obituaries
+
+    if not api_key:
+        console.print("[red]No API key found.[/red] Set ANTHROPIC_API_KEY or OPENAI_API_KEY.")
+        sys.exit(1)
+
+    console.print("\n[bold]Unjiggle[/bold] — The Digital Graveyard\n")
+
+    try:
+        lockdown, device = connect()
+    except Exception as e:
+        console.print(f"[red]No iPhone detected.[/red] {e}")
+        sys.exit(1)
+
+    layout = read_layout(lockdown)
+    console.print("[dim]Fetching app metadata...[/dim]")
+    metadata = enrich_layout(layout)
+
+    console.print("[dim]Identifying dead apps and writing eulogies...[/dim]\n")
+    result = generate_obituaries(layout, metadata, api_key=api_key, model=model)
+
+    if not result.obituaries:
+        console.print("  [green]No dead apps found.[/green] Your phone is pristine.\n")
+        return
+
+    console.print(f"  [bold]{result.total_dead} apps didn't make it.[/bold]\n")
+
+    for i, obit in enumerate(result.obituaries):
+        console.print(f"  [dim]{'─' * 50}[/dim]")
+        console.print(f"  [bold]⚰️  {obit.app_name}[/bold]", end="")
+        if obit.born:
+            console.print(f" [dim]({obit.born} – {obit.died})[/dim]")
+        else:
+            console.print()
+        console.print()
+        console.print(f"  {obit.eulogy}")
+        if obit.cause_of_death:
+            console.print(f"  [dim italic]Cause of death: {obit.cause_of_death}[/dim italic]")
+        if obit.survived_by:
+            console.print(f"  [dim]Survived by: {obit.survived_by}[/dim]")
+        console.print()
+
+    # Summary + share card
+    console.print(f"  [dim]{'─' * 50}[/dim]")
+    console.print(f"\n  [italic]\"{result.graveyard_summary}\"[/italic]\n")
+
+    # Generate share card → clipboard
+    from unjiggle.cards import generate_obituary_card, save_card
+    from unjiggle.render import copy_text, export_card
+
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    card_html = generate_obituary_card(layout, metadata, result)
+    card_path = UNJIGGLE_DIR / "reports" / f"obituary-{timestamp}.html"
+    save_card(card_html, card_path)
+    export_card(card_path, console)
+
+    copy_text(result.graveyard_summary)
+    console.print(f"  [dim]Summary also copied — Cmd+V to tweet it.[/dim]")
+    console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
+
+
+@main.command()
+def swipetax():
+    """Calculate the physical cost of your disorganized layout."""
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.swipetax import compute_swipe_tax
+
+    console.print("\n[bold]Unjiggle[/bold] — Swipe Tax Calculator\n")
+
+    try:
+        lockdown, device = connect()
+    except Exception as e:
+        console.print(f"[red]No iPhone detected.[/red] {e}")
+        sys.exit(1)
+
+    layout = read_layout(lockdown)
+    console.print("[dim]Fetching app metadata...[/dim]")
+    metadata = enrich_layout(layout)
+
+    tax = compute_swipe_tax(layout, metadata)
+
+    console.print(f"\n  [bold yellow]{tax.headline}[/bold yellow]\n")
+    console.print(f"  Current layout:  [red]{tax.total_annual_swipes:>8,} swipes/year[/red]")
+    console.print(f"  Optimal layout:  [green]{tax.optimal_annual_swipes:>8,} swipes/year[/green]")
+    console.print(f"  [bold]You could save:  {tax.savings:>8,} swipes/year[/bold]\n")
+
+    if tax.worst_offenders:
+        table = Table(title="Top Offenders", show_header=True, header_style="bold")
+        table.add_column("App", style="bold")
+        table.add_column("Page", justify="center")
+        table.add_column("Swipes to Reach", justify="center")
+        table.add_column("Wasted/Year", justify="right", style="red")
+
+        for app in tax.worst_offenders:
+            loc = f"{'📁 ' if app.in_folder else ''}Page {app.page}"
+            table.add_row(
+                app.name,
+                loc,
+                str(app.swipes_to_reach),
+                f"{app.annual_wasted_swipes:,}",
+            )
+        console.print(table)
+        console.print()
+
+    # Generate share card → clipboard
+    from unjiggle.cards import generate_swipetax_card, save_card
+    from unjiggle.render import copy_text, export_card
+
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    card_html = generate_swipetax_card(layout, metadata, tax)
+    card_path = UNJIGGLE_DIR / "reports" / f"swipetax-{timestamp}.html"
+    save_card(card_html, card_path)
+    export_card(card_path, console)
+
+    copy_text(tax.headline)
+    console.print(f"  [dim]Headline also copied — Cmd+V to tweet it.[/dim]")
+    console.print(f"  [bold]Fix it:[/bold] [bold]unjiggle suggest[/bold] to reorganize with AI")
+    console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
 
 
 def _cat_color(category: str) -> str:

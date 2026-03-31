@@ -1,4 +1,4 @@
-"""Tests for HomeBoard data models."""
+"""Tests for Unjiggle data models."""
 
 from unjiggle.models import AppItem, FolderItem, HomeScreenLayout, LayoutItem, ScoreBreakdown
 

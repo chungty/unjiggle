@@ -48,7 +48,7 @@ class AnalysisResult:
 
 
 SYSTEM_PROMPT = """\
-You are HomeBoard's AI analysis engine. You analyze iPhone home screen layouts and produce structured observations with narrative explanations.
+You are Unjiggle's AI analysis engine. You analyze iPhone home screen layouts and produce structured observations with narrative explanations.
 
 You receive a complete home screen layout (bundle IDs, positions, folders, widgets) enriched with App Store metadata (app name, category, description, last update date).
 

@@ -1,4 +1,4 @@
-"""Safety and backup verification for HomeBoard.
+"""Safety and backup verification for Unjiggle.
 
 Trust architecture:
 1. Backup is visible and verified (read-back confirms integrity)

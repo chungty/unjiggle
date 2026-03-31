@@ -1,4 +1,4 @@
-"""Data models for HomeBoard layout representation."""
+"""Data models for Unjiggle layout representation."""
 
 from __future__ import annotations
 

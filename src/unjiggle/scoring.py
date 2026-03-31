@@ -1,4 +1,4 @@
-"""Organization scoring engine for HomeBoard."""
+"""Organization scoring engine for Unjiggle."""
 
 from __future__ import annotations
 
