@@ -4,6 +4,10 @@
 
 Unjiggle is an AI-powered CLI that reads your iPhone home screen, scores your organization, tells you what's wrong (and why), and fixes it — one step at a time or all at once.
 
+<p align="center">
+  <img src="assets/cli-demo.png" width="600" alt="unjiggle go — one command to scan, score, and analyze your iPhone">
+</p>
+
 ## Quick Start
 
 ```bash
@@ -18,14 +22,21 @@ unjiggle go
 
 That's it. One command. It scans your phone, scores your organization, runs AI analysis, and generates a shareable report card.
 
+## The Share Card
+
+Unjiggle generates a Wrapped-style share card with your archetype, score, and App DNA mosaic. Screenshot it. Post it. Challenge your friends.
+
+<p align="center">
+  <img src="assets/share-card.png" width="400" alt="Unjiggle share card — The Agile Optimizer, score 70/100">
+</p>
+
 ## What It Does
 
 **`unjiggle go`** — The full experience in one command:
 - Reads your entire home screen layout over USB (226 apps, 8 pages, 14 folders... or whatever yours looks like)
 - Scores your organization (0-100) across four dimensions
 - Runs AI analysis that actually *sees* your phone: duplicate apps, abandoned apps, scattered categories, cryptic folder names
-- Generates a Wrapped-style share card with your archetype and App DNA mosaic
-- Opens it in your browser. Screenshot it. Post it.
+- Generates a share card with your archetype and App DNA mosaic
 
 **`unjiggle suggest`** — Interactive AI walkthrough:
 - The AI walks you through 5-7 observations, each with a specific fix
@@ -42,7 +53,7 @@ That's it. One command. It scans your phone, scores your organization, runs AI a
 
 | Command | What it does |
 |---------|-------------|
-| `unjiggle go` | Full experience: scan → score → AI → share card |
+| `unjiggle go` | Full experience: scan, score, AI analysis, share card |
 | `unjiggle scan` | See your layout color-coded by category |
 | `unjiggle score` | Organization score (0-100) with breakdown |
 | `unjiggle analyze` | AI observations (Claude or GPT-4.1) |
@@ -65,16 +76,6 @@ That's it. One command. It scans your phone, scores your organization, runs AI a
 Unjiggle uses [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) to communicate with your iPhone's SpringBoard services over USB. It reads the `IconState` (your home screen layout), enriches it with App Store metadata, and uses an LLM to generate observations and layout suggestions.
 
 The write path is validated on iPhone 16 Pro, iOS 26.0. Every write is preceded by a verified backup and an optional round-trip safety test.
-
-## The Share Card
-
-Unjiggle generates a Wrapped-style share card (1080x1350) with:
-- Your **archetype** ("The Agile Optimizer", "The Digital Archaeologist", etc.)
-- Your **organization score** (0-100)
-- An **App DNA mosaic** — tiny color-coded grids showing the category pattern across all your pages
-- A **one-line personality tagline** from the AI
-
-Screenshot it. Post it. Challenge your friends.
 
 ## GUI Coming Soon
 
