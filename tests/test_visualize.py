@@ -1,7 +1,7 @@
 """Tests for HTML visualization."""
 
-from homeboard.models import ScoreBreakdown
-from homeboard.visualize import generate_report
+from unjiggle.models import ScoreBreakdown
+from unjiggle.visualize import generate_report
 
 
 class TestGenerateReport:
@@ -9,7 +9,7 @@ class TestGenerateReport:
         score = ScoreBreakdown(40, 30, 50, 60)
         html = generate_report(chaotic_layout, sample_metadata, score)
         assert "<!DOCTYPE html>" in html
-        assert "HomeBoard" in html
+        assert "Unjiggle" in html
         assert "</html>" in html
 
     def test_includes_score(self, chaotic_layout, sample_metadata):
@@ -54,7 +54,7 @@ class TestGenerateReport:
         assert str(chaotic_layout.total_apps) in html
 
     def test_empty_layout(self, sample_metadata):
-        from homeboard.models import HomeScreenLayout
+        from unjiggle.models import HomeScreenLayout
         layout = HomeScreenLayout()
         score = ScoreBreakdown(0, 0, 0, 0)
         html = generate_report(layout, sample_metadata, score)

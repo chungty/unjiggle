@@ -1,6 +1,6 @@
 """Tests for HomeBoard data models."""
 
-from homeboard.models import AppItem, FolderItem, HomeScreenLayout, LayoutItem, ScoreBreakdown
+from unjiggle.models import AppItem, FolderItem, HomeScreenLayout, LayoutItem, ScoreBreakdown
 
 
 class TestLayoutItem:

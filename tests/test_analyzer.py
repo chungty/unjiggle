@@ -2,8 +2,8 @@
 
 from tests.conftest import make_app, make_folder
 
-from homeboard.analyzer import LayoutOperation, Observation, preview_operations, _parse_result
-from homeboard.models import HomeScreenLayout
+from unjiggle.analyzer import LayoutOperation, Observation, preview_operations, _parse_result
+from unjiggle.models import HomeScreenLayout
 
 
 class TestPreviewOperations:

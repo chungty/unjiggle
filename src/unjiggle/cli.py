@@ -12,35 +12,35 @@ from rich.console import Console
 from rich.progress import Progress
 from rich.table import Table
 
-from homeboard import __version__
+from unjiggle import __version__
 
 console = Console()
-HOMEBOARD_DIR = Path.home() / ".homeboard"
-BACKUP_DIR = HOMEBOARD_DIR / "backups"
+UNJIGGLE_DIR = Path.home() / ".unjiggle"
+BACKUP_DIR = UNJIGGLE_DIR / "backups"
 
 
-WAITLIST_URL = "https://homeboard.app"
-GITHUB_URL = "https://github.com/chungty/homeboard"
+WEBSITE_URL = "https://unjiggle.com"
+GITHUB_URL = "https://github.com/chungty/unjiggle"
 
 
 @click.group(invoke_without_command=True)
 @click.version_option(version=__version__)
 @click.pass_context
 def main(ctx):
-    """HomeBoard: AI-powered iPhone home screen organizer."""
+    """Unjiggle: AI-powered iPhone home screen organizer."""
     if ctx.invoked_subcommand is None:
         # First-run experience: guide the user
-        console.print("\n[bold]HomeBoard[/bold] v" + __version__ + "\n")
+        console.print("\n[bold]Unjiggle[/bold] v" + __version__ + "\n")
         console.print("  Connect your iPhone via USB, then:\n")
-        console.print("  [bold]homeboard go[/bold]              Full experience: scan → score → AI analysis → share card")
-        console.print("  [bold]homeboard safety-test[/bold]     Prove read/write works (changes nothing)")
-        console.print("  [bold]homeboard scan[/bold]            See your home screen layout")
-        console.print("  [bold]homeboard score[/bold]           Get your organization score")
-        console.print("  [bold]homeboard analyze[/bold]         AI-powered observations")
-        console.print("  [bold]homeboard suggest[/bold]         Interactive walkthrough with apply")
-        console.print("  [bold]homeboard report[/bold]          Generate shareable report card")
+        console.print("  [bold]unjiggle go[/bold]              Full experience: scan → score → AI analysis → share card")
+        console.print("  [bold]unjiggle safety-test[/bold]     Prove read/write works (changes nothing)")
+        console.print("  [bold]unjiggle scan[/bold]            See your home screen layout")
+        console.print("  [bold]unjiggle score[/bold]           Get your organization score")
+        console.print("  [bold]unjiggle analyze[/bold]         AI-powered observations")
+        console.print("  [bold]unjiggle suggest[/bold]         Interactive walkthrough with apply")
+        console.print("  [bold]unjiggle report[/bold]          Generate shareable report card")
         console.print()
-        console.print(f"  [dim]GUI coming soon → {WAITLIST_URL}[/dim]")
+        console.print(f"  [dim]GUI coming soon → {WEBSITE_URL}[/dim]")
         console.print(f"  [dim]Star us on GitHub → {GITHUB_URL}[/dim]\n")
 
 
@@ -49,11 +49,11 @@ def main(ctx):
 @click.option("--model", default=None, help="Model override")
 def go(api_key: str | None, model: str | None):
     """Full experience: scan → score → AI analysis → share card. One command."""
-    from homeboard.device import connect, read_layout
-    from homeboard.itunes import enrich_layout
-    from homeboard.scoring import compute_score
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.scoring import compute_score
 
-    console.print("\n[bold]HomeBoard[/bold] — Let's see your phone.\n")
+    console.print("\n[bold]Unjiggle[/bold] — Let's see your phone.\n")
 
     # Connect
     try:
@@ -86,7 +86,7 @@ def go(api_key: str | None, model: str | None):
     observations_text = []
 
     if api_key:
-        from homeboard.analyzer import analyze as run_analysis
+        from unjiggle.analyzer import analyze as run_analysis
         console.print("[dim]Running AI analysis...[/dim]\n")
         result = run_analysis(layout, metadata, score, api_key=api_key, model=model)
         archetype = result.archetype
@@ -104,19 +104,19 @@ def go(api_key: str | None, model: str | None):
         console.print("[dim]Set ANTHROPIC_API_KEY or OPENAI_API_KEY for AI analysis.[/dim]\n")
 
     # Generate share card + full report
-    from homeboard.visualize import generate_report, generate_share_card, save_report
+    from unjiggle.visualize import generate_report, generate_share_card, save_report
 
     timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
 
     share_html = generate_share_card(layout, metadata, score, archetype=archetype, personality=personality)
-    share_path = HOMEBOARD_DIR / "reports" / f"share-{timestamp}.html"
+    share_path = UNJIGGLE_DIR / "reports" / f"share-{timestamp}.html"
     save_report(share_html, share_path)
 
     report_html = generate_report(
         layout, metadata, score,
         archetype=archetype, observations=observations_text, personality=personality,
     )
-    report_path = HOMEBOARD_DIR / "reports" / f"report-{timestamp}.html"
+    report_path = UNJIGGLE_DIR / "reports" / f"report-{timestamp}.html"
     save_report(report_html, report_path)
 
     # Open share card
@@ -131,21 +131,21 @@ def go(api_key: str | None, model: str | None):
     console.print()
     console.print(f"  [bold]What's next?[/bold]")
     console.print(f"    📸 Screenshot the share card and post it")
-    console.print(f"    🔧 [bold]homeboard suggest[/bold] to fix your layout with AI")
+    console.print(f"    🔧 [bold]unjiggle suggest[/bold] to fix your layout with AI")
     console.print(f"    ⭐ Star us: {GITHUB_URL}")
     console.print()
     console.print(f"  [dim]A native Mac app with live preview, drag-and-drop,")
     console.print(f"  and animated before/after is coming soon.[/dim]")
-    console.print(f"  [dim]Sign up: {WAITLIST_URL}[/dim]\n")
+    console.print(f"  [dim]Sign up: {WEBSITE_URL}[/dim]\n")
 
 
 @main.command()
 def scan():
     """Read and display your iPhone's home screen layout."""
-    from homeboard.device import connect, read_layout
-    from homeboard.itunes import enrich_layout
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
 
-    console.print("\n[bold]HomeBoard[/bold] — Scanning your iPhone...\n")
+    console.print("\n[bold]Unjiggle[/bold] — Scanning your iPhone...\n")
 
     try:
         lockdown, device = connect()
@@ -200,18 +200,18 @@ def scan():
         console.print()
 
     console.print("[green]Scan complete.[/green]")
-    console.print(f"  Next: [bold]homeboard score[/bold] to see your organization score")
-    console.print(f"  Or:   [bold]homeboard go[/bold] for the full experience (scan → score → AI → share card)\n")
+    console.print(f"  Next: [bold]unjiggle score[/bold] to see your organization score")
+    console.print(f"  Or:   [bold]unjiggle go[/bold] for the full experience (scan → score → AI → share card)\n")
 
 
 @main.command()
 def score():
     """Score your home screen organization (0-100)."""
-    from homeboard.device import connect, read_layout
-    from homeboard.itunes import enrich_layout
-    from homeboard.scoring import compute_score
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.scoring import compute_score
 
-    console.print("\n[bold]HomeBoard[/bold] — Scoring your layout...\n")
+    console.print("\n[bold]Unjiggle[/bold] — Scoring your layout...\n")
 
     try:
         lockdown, device = connect()
@@ -229,16 +229,16 @@ def score():
     console.print(f"  Folder Usage:       {breakdown.folder_usage:.0f}/100 (weight 20%)")
     console.print(f"  Dock Quality:       {breakdown.dock_quality:.0f}/100 (weight 20%)")
     console.print()
-    console.print(f"  Next: [bold]homeboard analyze[/bold] for AI-powered insights")
-    console.print(f"  Or:   [bold]homeboard suggest[/bold] to fix it interactively\n")
+    console.print(f"  Next: [bold]unjiggle analyze[/bold] for AI-powered insights")
+    console.print(f"  Or:   [bold]unjiggle suggest[/bold] to fix it interactively\n")
 
 
 @main.command()
 def backup():
     """Backup your current home screen layout."""
-    from homeboard.device import backup_layout, connect, read_layout
+    from unjiggle.device import backup_layout, connect, read_layout
 
-    console.print("\n[bold]HomeBoard[/bold] — Backing up layout...\n")
+    console.print("\n[bold]Unjiggle[/bold] — Backing up layout...\n")
 
     try:
         lockdown, device = connect()
@@ -257,21 +257,21 @@ def backup():
 @click.argument("backup_file", type=click.Path(exists=True), required=False)
 def restore(backup_file: str | None):
     """Restore a previously backed up layout. If no file specified, shows available backups."""
-    from homeboard.device import connect
-    from homeboard.safety import list_backups, restore_from_backup
+    from unjiggle.device import connect
+    from unjiggle.safety import list_backups, restore_from_backup
 
-    console.print("\n[bold]HomeBoard[/bold] — Restore\n")
+    console.print("\n[bold]Unjiggle[/bold] — Restore\n")
 
     if not backup_file:
         backups = list_backups()
         if not backups:
-            console.print("  No backups found. Run [bold]homeboard backup[/bold] first.\n")
+            console.print("  No backups found. Run [bold]unjiggle backup[/bold] first.\n")
             return
         console.print("  Available backups (newest first):\n")
         for i, bp in enumerate(backups[:10]):
             size = bp.stat().st_size
             console.print(f"    {i + 1}. {bp.name} ({size:,} bytes)")
-        console.print(f"\n  Usage: [bold]homeboard restore {backups[0]}[/bold]\n")
+        console.print(f"\n  Usage: [bold]unjiggle restore {backups[0]}[/bold]\n")
         return
 
     try:
@@ -288,10 +288,10 @@ def restore(backup_file: str | None):
 @main.command(name="safety-test")
 def safety_test():
     """Test that backup and restore work correctly (no-op round-trip)."""
-    from homeboard.device import connect, read_layout
-    from homeboard.safety import test_restore_roundtrip, verified_backup
+    from unjiggle.device import connect, read_layout
+    from unjiggle.safety import test_restore_roundtrip, verified_backup
 
-    console.print("\n[bold]HomeBoard[/bold] — Safety Test\n")
+    console.print("\n[bold]Unjiggle[/bold] — Safety Test\n")
     console.print("  This test proves that HomeBoard can safely read and write")
     console.print("  your home screen without changing anything.\n")
 
@@ -323,10 +323,10 @@ def safety_test():
         console.print("  [green bold]All safety tests passed.[/green bold]")
         console.print("  HomeBoard can safely read and write your home screen layout.")
         console.print(f"  Your backup is at: {backup_path}")
-        console.print(f"\n  You're safe to run [bold]homeboard suggest[/bold] now.\n")
+        console.print(f"\n  You're safe to run [bold]unjiggle suggest[/bold] now.\n")
     else:
         console.print("  [red bold]Safety test failed.[/red bold]")
-        console.print("  Do NOT run homeboard suggest until this is resolved.\n")
+        console.print("  Do NOT run unjiggle suggest until this is resolved.\n")
         sys.exit(1)
 
 
@@ -335,16 +335,16 @@ def safety_test():
 @click.option("--model", default=None, help="Model override (auto-detected from API key)")
 def analyze(api_key: str | None, model: str):
     """AI-powered analysis of your home screen."""
-    from homeboard.analyzer import analyze as run_analysis
-    from homeboard.device import connect, read_layout
-    from homeboard.itunes import enrich_layout
-    from homeboard.scoring import compute_score
+    from unjiggle.analyzer import analyze as run_analysis
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.scoring import compute_score
 
     if not api_key:
         console.print("[red]No API key found.[/red] Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or pass --api-key.")
         sys.exit(1)
 
-    console.print("\n[bold]HomeBoard[/bold] — AI Analysis...\n")
+    console.print("\n[bold]Unjiggle[/bold] — AI Analysis...\n")
 
     try:
         lockdown, device = connect()
@@ -398,8 +398,8 @@ def analyze(api_key: str | None, model: str):
         console.print(f"\n  [italic dim]{result.personality}[/italic dim]\n")
 
     console.print("[green]Analysis complete.[/green]")
-    console.print(f"  Next: [bold]homeboard suggest[/bold] to apply changes interactively")
-    console.print(f"        [bold]homeboard report --open[/bold] to generate your shareable report card\n")
+    console.print(f"  Next: [bold]unjiggle suggest[/bold] to apply changes interactively")
+    console.print(f"        [bold]unjiggle report --open[/bold] to generate your shareable report card\n")
 
 
 @main.command()
@@ -408,16 +408,16 @@ def analyze(api_key: str | None, model: str):
 @click.option("--apply-all", is_flag=True, help="Apply all suggestions without stepping through (Just Fix It mode)")
 def suggest(api_key: str | None, model: str, apply_all: bool):
     """AI-powered suggestions with live preview. Accept/skip each change."""
-    from homeboard.analyzer import analyze as run_analysis, preview_operations
-    from homeboard.device import backup_layout, connect, read_layout, write_layout
-    from homeboard.itunes import enrich_layout
-    from homeboard.scoring import compute_score
+    from unjiggle.analyzer import analyze as run_analysis, preview_operations
+    from unjiggle.device import backup_layout, connect, read_layout, write_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.scoring import compute_score
 
     if not api_key:
         console.print("[red]ANTHROPIC_API_KEY not set.[/red]")
         sys.exit(1)
 
-    console.print("\n[bold]HomeBoard[/bold] — Smart Suggestions...\n")
+    console.print("\n[bold]Unjiggle[/bold] — Smart Suggestions...\n")
 
     try:
         lockdown, device = connect()
@@ -531,8 +531,8 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
 
     console.print()
     if click.confirm("  Apply these changes to your iPhone?", default=True):
-        from homeboard.layout_engine import apply_operations
-        from homeboard.safety import pre_write_safety_check
+        from unjiggle.layout_engine import apply_operations
+        from unjiggle.safety import pre_write_safety_check
 
         safe, backup_path = pre_write_safety_check(lockdown, layout)
         if not safe:
@@ -546,18 +546,18 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         write_layout(lockdown, modified_raw)
 
         # Verify the write took effect
-        from homeboard.device import read_layout as re_read
+        from unjiggle.device import read_layout as re_read
         verify = re_read(lockdown)
         console.print(f"  [dim]Verifying write... {verify.page_count} pages, {verify.total_apps} apps read back.[/dim]")
 
         console.print(f"\n  [green bold]Done![/green bold] Your iPhone has been reorganized.")
-        console.print(f"  Undo anytime: [bold]homeboard restore {backup_path}[/bold]")
+        console.print(f"  Undo anytime: [bold]unjiggle restore {backup_path}[/bold]")
         console.print()
         console.print(f"  [bold]Share your transformation:[/bold]")
-        console.print(f"    [bold]homeboard report --open[/bold] to generate a before/after share card")
+        console.print(f"    [bold]unjiggle report --open[/bold] to generate a before/after share card")
         console.print()
-        console.print(f"  [dim]Love HomeBoard? A native Mac app with live preview is coming.[/dim]")
-        console.print(f"  [dim]Sign up: {WAITLIST_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
+        console.print(f"  [dim]Love Unjiggle? A native Mac app with live preview is coming.[/dim]")
+        console.print(f"  [dim]Sign up: {WEBSITE_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
     else:
         console.print("  [yellow]Cancelled.[/yellow] No changes made.\n")
 
@@ -569,13 +569,13 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
 @click.option("--open", "open_browser", is_flag=True, help="Open the report in your browser")
 def report(api_key: str | None, model: str, output: str | None, open_browser: bool):
     """Generate a shareable HTML report card with AI personality narrative."""
-    from homeboard.analyzer import analyze as run_analysis
-    from homeboard.device import connect, read_layout
-    from homeboard.itunes import enrich_layout
-    from homeboard.scoring import compute_score
-    from homeboard.visualize import generate_report, save_report
+    from unjiggle.analyzer import analyze as run_analysis
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.scoring import compute_score
+    from unjiggle.visualize import generate_report, save_report
 
-    console.print("\n[bold]HomeBoard[/bold] — Generating Report...\n")
+    console.print("\n[bold]Unjiggle[/bold] — Generating Report...\n")
 
     try:
         lockdown, device = connect()
@@ -602,7 +602,7 @@ def report(api_key: str | None, model: str, output: str | None, open_browser: bo
         console.print("[dim]No API key — generating report without AI narrative.[/dim]")
 
     # Generate both full report and share card
-    from homeboard.visualize import generate_share_card
+    from unjiggle.visualize import generate_share_card
 
     timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
 
@@ -612,7 +612,7 @@ def report(api_key: str | None, model: str, output: str | None, open_browser: bo
         archetype=archetype,
         personality=personality,
     )
-    share_path = HOMEBOARD_DIR / "reports" / f"share-{timestamp}.html"
+    share_path = UNJIGGLE_DIR / "reports" / f"share-{timestamp}.html"
     save_report(share_html, share_path)
 
     # Full report (detailed)
@@ -622,7 +622,7 @@ def report(api_key: str | None, model: str, output: str | None, open_browser: bo
         observations=observations_text,
         personality=personality,
     )
-    out_path = Path(output) if output else HOMEBOARD_DIR / "reports" / f"report-{timestamp}.html"
+    out_path = Path(output) if output else UNJIGGLE_DIR / "reports" / f"report-{timestamp}.html"
     save_report(html, out_path)
 
     console.print(f"\n  [green]Share card:[/green] {share_path}")
@@ -635,10 +635,10 @@ def report(api_key: str | None, model: str, output: str | None, open_browser: bo
 
     console.print()
     console.print(f"  [bold]Share it:[/bold] Screenshot the card and post it!")
-    console.print(f"  [bold]Fix it:[/bold]  [bold]homeboard suggest[/bold] to apply AI recommendations")
+    console.print(f"  [bold]Fix it:[/bold]  [bold]unjiggle suggest[/bold] to apply AI recommendations")
     console.print()
-    console.print(f"  [dim]Love HomeBoard? A native Mac app with live preview + slider is coming.[/dim]")
-    console.print(f"  [dim]Sign up: {WAITLIST_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
+    console.print(f"  [dim]Love Unjiggle? A native Mac app with live preview + slider is coming.[/dim]")
+    console.print(f"  [dim]Sign up: {WEBSITE_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
 
 
 def _cat_color(category: str) -> str:

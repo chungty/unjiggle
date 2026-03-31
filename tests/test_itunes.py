@@ -1,6 +1,6 @@
 """Tests for iTunes Search API integration."""
 
-from homeboard.itunes import GENRE_MAP, _is_system_app, _system_app_name
+from unjiggle.itunes import GENRE_MAP, _is_system_app, _system_app_name
 
 
 class TestSystemAppDetection:

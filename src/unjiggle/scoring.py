@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 
-from homeboard.models import HomeScreenLayout, ScoreBreakdown
+from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
 
 def compute_score(layout: HomeScreenLayout, metadata: dict[str, dict]) -> ScoreBreakdown:

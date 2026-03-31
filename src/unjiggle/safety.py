@@ -15,10 +15,10 @@ from pathlib import Path
 
 from rich.console import Console
 
-from homeboard.models import HomeScreenLayout
+from unjiggle.models import HomeScreenLayout
 
 console = Console()
-BACKUP_DIR = Path.home() / ".homeboard" / "backups"
+BACKUP_DIR = Path.home() / ".unjiggle" / "backups"
 
 
 def verified_backup(lockdown, layout: HomeScreenLayout) -> Path:
@@ -26,7 +26,7 @@ def verified_backup(lockdown, layout: HomeScreenLayout) -> Path:
 
     Returns the backup path. Raises if verification fails.
     """
-    from homeboard.device import read_layout
+    from unjiggle.device import read_layout
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = BACKUP_DIR / f"layout-{timestamp}.json"
@@ -62,7 +62,7 @@ def test_restore_roundtrip(lockdown) -> bool:
 
     Returns True if the round-trip succeeds.
     """
-    from homeboard.device import read_layout, write_layout
+    from unjiggle.device import read_layout, write_layout
 
     console.print("  [dim]Reading current layout...[/dim]")
     before = read_layout(lockdown)
@@ -89,7 +89,7 @@ def restore_from_backup(lockdown, backup_path: Path) -> bool:
 
     Returns True if the restore succeeds and is verified.
     """
-    from homeboard.device import read_layout, write_layout
+    from unjiggle.device import read_layout, write_layout
 
     if not backup_path.exists():
         console.print(f"  [red]Backup file not found: {backup_path}[/red]")
@@ -159,6 +159,6 @@ def pre_write_safety_check(lockdown, layout: HomeScreenLayout) -> tuple[bool, Pa
         console.print("  [dim]Skipped. Proceeding on trust.[/dim]\n")
 
     console.print("  [green bold]Safety check passed.[/green bold] You have a verified backup")
-    console.print(f"  and can undo anytime with: [bold]homeboard restore {backup_path}[/bold]\n")
+    console.print(f"  and can undo anytime with: [bold]unjiggle restore {backup_path}[/bold]\n")
 
     return True, backup_path

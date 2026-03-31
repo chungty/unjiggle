@@ -8,7 +8,7 @@ from pathlib import Path
 
 import httpx
 
-CACHE_DIR = Path.home() / ".homeboard" / "cache"
+CACHE_DIR = Path.home() / ".unjiggle" / "cache"
 CACHE_FILE = CACHE_DIR / "itunes.json"
 LOOKUP_URL = "https://itunes.apple.com/lookup"
 

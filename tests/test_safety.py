@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from homeboard.safety import list_backups, BACKUP_DIR
+from unjiggle.safety import list_backups, BACKUP_DIR
 
 
 class TestVerifiedBackup:
@@ -28,11 +28,11 @@ class TestVerifiedBackup:
 
 class TestListBackups:
     def test_empty_when_no_dir(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("homeboard.safety.BACKUP_DIR", tmp_path / "nonexistent")
+        monkeypatch.setattr("unjiggle.safety.BACKUP_DIR", tmp_path / "nonexistent")
         assert list_backups() == []
 
     def test_finds_backup_files(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("homeboard.safety.BACKUP_DIR", tmp_path)
+        monkeypatch.setattr("unjiggle.safety.BACKUP_DIR", tmp_path)
         (tmp_path / "layout-20260330-120000.json").write_text("{}")
         (tmp_path / "layout-20260330-130000.json").write_text("{}")
         (tmp_path / "not-a-backup.txt").write_text("nope")
@@ -43,7 +43,7 @@ class TestListBackups:
         assert backups[0].name == "layout-20260330-130000.json"
 
     def test_sorted_newest_first(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("homeboard.safety.BACKUP_DIR", tmp_path)
+        monkeypatch.setattr("unjiggle.safety.BACKUP_DIR", tmp_path)
         (tmp_path / "layout-20260101-000000.json").write_text("{}")
         (tmp_path / "layout-20261231-235959.json").write_text("{}")
         (tmp_path / "layout-20260615-120000.json").write_text("{}")

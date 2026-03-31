@@ -2,8 +2,8 @@
 
 from tests.conftest import make_app, make_folder
 
-from homeboard.models import HomeScreenLayout
-from homeboard.scoring import compute_score
+from unjiggle.models import HomeScreenLayout
+from unjiggle.scoring import compute_score
 
 
 class TestPageEfficiency:
@@ -37,7 +37,7 @@ class TestCategoryCoherence:
     def test_chaotic_less_coherent_than_homogeneous(self, chaotic_layout, sample_metadata):
         """Chaotic layout should be less coherent than a page of all-same-category apps."""
         from tests.conftest import make_app
-        from homeboard.models import HomeScreenLayout
+        from unjiggle.models import HomeScreenLayout
         homogeneous = HomeScreenLayout(
             dock=[],
             pages=[[

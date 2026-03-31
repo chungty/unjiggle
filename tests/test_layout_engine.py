@@ -2,9 +2,9 @@
 
 import copy
 
-from homeboard.analyzer import LayoutOperation
-from homeboard.layout_engine import apply_operations
-from homeboard.models import HomeScreenLayout
+from unjiggle.analyzer import LayoutOperation
+from unjiggle.layout_engine import apply_operations
+from unjiggle.models import HomeScreenLayout
 
 
 def _make_raw_layout() -> dict:
@@ -49,8 +49,8 @@ def _make_raw_layout() -> dict:
 
 def _make_layout_with_raw(raw: dict) -> HomeScreenLayout:
     """Create a HomeScreenLayout with the raw dict set."""
-    from homeboard.device import _parse_layout_item
-    from homeboard.models import LayoutItem
+    from unjiggle.device import _parse_layout_item
+    from unjiggle.models import LayoutItem
 
     dock = []
     for item in raw.get("buttonBar", []):

@@ -1,4 +1,4 @@
-"""HTML visualization for HomeBoard layouts."""
+"""HTML visualization for Unjiggle layouts."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from pathlib import Path
 
 from jinja2 import Template
 
-from homeboard.itunes import CATEGORY_COLORS
-from homeboard.models import HomeScreenLayout, ScoreBreakdown
+from unjiggle.itunes import CATEGORY_COLORS
+from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
 REPORT_TEMPLATE = Template("""\
 <!DOCTYPE html>
@@ -15,7 +15,7 @@ REPORT_TEMPLATE = Template("""\
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HomeBoard Report</title>
+<title>Unjiggle Report</title>
 <style>
 @keyframes scoreReveal {
   0% { stroke-dashoffset: 283; }
@@ -266,7 +266,7 @@ body {
 <body>
 <div class="report-card">
 
-<div class="brand">HomeBoard</div>
+<div class="brand">Unjiggle</div>
 
 <div class="hero">
   <div class="archetype">{{ archetype }}</div>
@@ -384,7 +384,7 @@ body {
 {% endif %}
 
 <div class="footer">
-  <div class="url">homeboard.app</div>
+  <div class="url">unjiggle.com</div>
 </div>
 
 </div>
@@ -497,7 +497,7 @@ SHARE_CARD_TEMPLATE = Template("""\
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>HomeBoard — {{ archetype }}</title>
+<title>Unjiggle — {{ archetype }}</title>
 <style>
 @keyframes gradientShift {
   0%, 100% { background-position: 0% 50%; }
@@ -633,7 +633,7 @@ body {
 <div class="card">
   <div class="content">
     <div class="top">
-      <div class="brand">HomeBoard</div>
+      <div class="brand">Unjiggle</div>
       <div class="archetype">{{ archetype }}</div>
     </div>
 
@@ -666,7 +666,7 @@ body {
     </div>
 
     <div class="bottom">
-      <div class="url">homeboard.app</div>
+      <div class="url">unjiggle.com</div>
     </div>
   </div>
 </div>

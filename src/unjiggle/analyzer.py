@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 import anthropic
 
-from homeboard.models import HomeScreenLayout, ScoreBreakdown
+from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
 
 @dataclass
@@ -323,7 +323,7 @@ def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperatio
 
         elif op.action == "create_folder":
             if op.folder_name:
-                from homeboard.models import AppItem, FolderItem, LayoutItem
+                from unjiggle.models import AppItem, FolderItem, LayoutItem
                 items = _extract_apps_from_layout(preview, op.bundle_ids)
                 apps = [item.app for item in items if item.is_app]
                 if apps:
@@ -376,7 +376,7 @@ def _remove_apps_from_layout(layout: HomeScreenLayout, bundle_ids: set[str]) -> 
 
 def _extract_apps_from_layout(layout: HomeScreenLayout, bundle_ids: list[str]) -> list:
     """Remove apps from layout and return them as LayoutItems."""
-    from homeboard.models import AppItem, LayoutItem
+    from unjiggle.models import AppItem, LayoutItem
     bid_set = set(bundle_ids)
     extracted = []
     _remove_apps_from_layout(layout, bid_set)

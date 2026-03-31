@@ -14,7 +14,7 @@ import asyncio
 import json
 from pathlib import Path
 
-from homeboard.models import (
+from unjiggle.models import (
     AppItem,
     DeviceInfo,
     FolderItem,

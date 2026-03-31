@@ -2,7 +2,7 @@
 
 import pytest
 
-from homeboard.models import (
+from unjiggle.models import (
     AppItem,
     FolderItem,
     HomeScreenLayout,

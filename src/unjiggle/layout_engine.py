@@ -10,8 +10,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from homeboard.analyzer import LayoutOperation
-from homeboard.models import HomeScreenLayout
+from unjiggle.analyzer import LayoutOperation
+from unjiggle.models import HomeScreenLayout
 
 
 def _get_pages(raw) -> list[list]:
