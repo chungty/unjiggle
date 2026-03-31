@@ -19,11 +19,124 @@ HOMEBOARD_DIR = Path.home() / ".homeboard"
 BACKUP_DIR = HOMEBOARD_DIR / "backups"
 
 
-@click.group()
+WAITLIST_URL = "https://homeboard.app"
+GITHUB_URL = "https://github.com/chungty/homeboard"
+
+
+@click.group(invoke_without_command=True)
 @click.version_option(version=__version__)
-def main():
+@click.pass_context
+def main(ctx):
     """HomeBoard: AI-powered iPhone home screen organizer."""
-    pass
+    if ctx.invoked_subcommand is None:
+        # First-run experience: guide the user
+        console.print("\n[bold]HomeBoard[/bold] v" + __version__ + "\n")
+        console.print("  Connect your iPhone via USB, then:\n")
+        console.print("  [bold]homeboard go[/bold]              Full experience: scan → score → AI analysis → share card")
+        console.print("  [bold]homeboard safety-test[/bold]     Prove read/write works (changes nothing)")
+        console.print("  [bold]homeboard scan[/bold]            See your home screen layout")
+        console.print("  [bold]homeboard score[/bold]           Get your organization score")
+        console.print("  [bold]homeboard analyze[/bold]         AI-powered observations")
+        console.print("  [bold]homeboard suggest[/bold]         Interactive walkthrough with apply")
+        console.print("  [bold]homeboard report[/bold]          Generate shareable report card")
+        console.print()
+        console.print(f"  [dim]GUI coming soon → {WAITLIST_URL}[/dim]")
+        console.print(f"  [dim]Star us on GitHub → {GITHUB_URL}[/dim]\n")
+
+
+@main.command()
+@click.option("--api-key", envvar=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], help="API key (auto-detected)")
+@click.option("--model", default=None, help="Model override")
+def go(api_key: str | None, model: str | None):
+    """Full experience: scan → score → AI analysis → share card. One command."""
+    from homeboard.device import connect, read_layout
+    from homeboard.itunes import enrich_layout
+    from homeboard.scoring import compute_score
+
+    console.print("\n[bold]HomeBoard[/bold] — Let's see your phone.\n")
+
+    # Connect
+    try:
+        lockdown, device = connect()
+    except Exception as e:
+        console.print(f"[red]No iPhone detected.[/red] Connect via USB and tap Trust.\n{e}")
+        sys.exit(1)
+
+    console.print(f"  Device: [cyan]{device.name}[/cyan] ({device.model}, iOS {device.ios_version})\n")
+
+    # Read layout
+    layout = read_layout(lockdown)
+    console.print(f"  [bold]{layout.total_apps}[/bold] apps across [bold]{layout.page_count}[/bold] pages")
+    console.print(f"  {len(layout.dock)} dock items, {len(layout.all_folders())} folders\n")
+
+    # Fetch metadata
+    console.print("[dim]Looking up your apps...[/dim]")
+    from rich.progress import Progress
+    with Progress() as progress:
+        task = progress.add_task("Fetching metadata...", total=len(layout.all_bundle_ids))
+        metadata = enrich_layout(layout, lambda done, total: progress.update(task, completed=done))
+
+    # Score
+    score = compute_score(layout, metadata)
+    console.print(f"\n  Organization Score: [bold]{score.total:.0f}/100[/bold] — {score.label}\n")
+
+    # AI analysis (if key available)
+    archetype = "The Collector"
+    personality = None
+    observations_text = []
+
+    if api_key:
+        from homeboard.analyzer import analyze as run_analysis
+        console.print("[dim]Running AI analysis...[/dim]\n")
+        result = run_analysis(layout, metadata, score, api_key=api_key, model=model)
+        archetype = result.archetype
+        personality = result.personality
+        observations_text = [obs.narrative for obs in result.observations]
+
+        console.print(f"  [bold magenta]{archetype}[/bold magenta]\n")
+        for i, obs in enumerate(result.observations[:3]):  # Show top 3 in terminal
+            console.print(f"  {obs.narrative}\n")
+        if len(result.observations) > 3:
+            console.print(f"  [dim]...and {len(result.observations) - 3} more insights in the full report.[/dim]\n")
+        if personality:
+            console.print(f"  [italic dim]{personality}[/italic dim]\n")
+    else:
+        console.print("[dim]Set ANTHROPIC_API_KEY or OPENAI_API_KEY for AI analysis.[/dim]\n")
+
+    # Generate share card + full report
+    from homeboard.visualize import generate_report, generate_share_card, save_report
+
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+
+    share_html = generate_share_card(layout, metadata, score, archetype=archetype, personality=personality)
+    share_path = HOMEBOARD_DIR / "reports" / f"share-{timestamp}.html"
+    save_report(share_html, share_path)
+
+    report_html = generate_report(
+        layout, metadata, score,
+        archetype=archetype, observations=observations_text, personality=personality,
+    )
+    report_path = HOMEBOARD_DIR / "reports" / f"report-{timestamp}.html"
+    save_report(report_html, report_path)
+
+    # Open share card
+    import webbrowser
+    webbrowser.open(f"file://{share_path.resolve()}")
+
+    console.print(f"  [green]Share card opened in browser.[/green]")
+    console.print(f"  [dim]Full report: {report_path}[/dim]\n")
+
+    # The funnel
+    console.print("  ─────────────────────────────────────────")
+    console.print()
+    console.print(f"  [bold]What's next?[/bold]")
+    console.print(f"    📸 Screenshot the share card and post it")
+    console.print(f"    🔧 [bold]homeboard suggest[/bold] to fix your layout with AI")
+    console.print(f"    ⭐ Star us: {GITHUB_URL}")
+    console.print()
+    console.print(f"  [dim]A native Mac app with live preview, drag-and-drop,")
+    console.print(f"  and animated before/after is coming soon.[/dim]")
+    console.print(f"  [dim]Sign up: {WAITLIST_URL}[/dim]\n")
 
 
 @main.command()
@@ -86,7 +199,9 @@ def scan():
         console.print(table)
         console.print()
 
-    console.print("[green]Scan complete.[/green] Run [bold]homeboard score[/bold] to see your organization score.\n")
+    console.print("[green]Scan complete.[/green]")
+    console.print(f"  Next: [bold]homeboard score[/bold] to see your organization score")
+    console.print(f"  Or:   [bold]homeboard go[/bold] for the full experience (scan → score → AI → share card)\n")
 
 
 @main.command()
@@ -114,6 +229,8 @@ def score():
     console.print(f"  Folder Usage:       {breakdown.folder_usage:.0f}/100 (weight 20%)")
     console.print(f"  Dock Quality:       {breakdown.dock_quality:.0f}/100 (weight 20%)")
     console.print()
+    console.print(f"  Next: [bold]homeboard analyze[/bold] for AI-powered insights")
+    console.print(f"  Or:   [bold]homeboard suggest[/bold] to fix it interactively\n")
 
 
 @main.command()
@@ -280,7 +397,9 @@ def analyze(api_key: str | None, model: str):
     if result.personality:
         console.print(f"\n  [italic dim]{result.personality}[/italic dim]\n")
 
-    console.print("[green]Analysis complete.[/green] Run [bold]homeboard suggest[/bold] to apply changes interactively.\n")
+    console.print("[green]Analysis complete.[/green]")
+    console.print(f"  Next: [bold]homeboard suggest[/bold] to apply changes interactively")
+    console.print(f"        [bold]homeboard report --open[/bold] to generate your shareable report card\n")
 
 
 @main.command()
@@ -432,7 +551,13 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         console.print(f"  [dim]Verifying write... {verify.page_count} pages, {verify.total_apps} apps read back.[/dim]")
 
         console.print(f"\n  [green bold]Done![/green bold] Your iPhone has been reorganized.")
-        console.print(f"  Undo anytime: [bold]homeboard restore {backup_path}[/bold]\n")
+        console.print(f"  Undo anytime: [bold]homeboard restore {backup_path}[/bold]")
+        console.print()
+        console.print(f"  [bold]Share your transformation:[/bold]")
+        console.print(f"    [bold]homeboard report --open[/bold] to generate a before/after share card")
+        console.print()
+        console.print(f"  [dim]Love HomeBoard? A native Mac app with live preview is coming.[/dim]")
+        console.print(f"  [dim]Sign up: {WAITLIST_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
     else:
         console.print("  [yellow]Cancelled.[/yellow] No changes made.\n")
 
@@ -509,6 +634,11 @@ def report(api_key: str | None, model: str, output: str | None, open_browser: bo
         console.print("  [dim]Opened share card in browser.[/dim]")
 
     console.print()
+    console.print(f"  [bold]Share it:[/bold] Screenshot the card and post it!")
+    console.print(f"  [bold]Fix it:[/bold]  [bold]homeboard suggest[/bold] to apply AI recommendations")
+    console.print()
+    console.print(f"  [dim]Love HomeBoard? A native Mac app with live preview + slider is coming.[/dim]")
+    console.print(f"  [dim]Sign up: {WAITLIST_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
 
 
 def _cat_color(category: str) -> str:
