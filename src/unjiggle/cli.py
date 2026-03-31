@@ -80,28 +80,36 @@ def go(api_key: str | None, model: str | None):
     score = compute_score(layout, metadata)
     console.print(f"\n  Organization Score: [bold]{score.total:.0f}/100[/bold] — {score.label}\n")
 
-    # AI analysis (if key available)
-    archetype = "The Collector"
-    personality = None
+    # Archetype assignment (always works, no API key needed)
+    from unjiggle.archetypes import assign_archetype
+    archetype, tagline = assign_archetype(layout, metadata)
+    personality = tagline
     observations_text = []
 
-    if api_key:
-        from unjiggle.analyzer import analyze as run_analysis
-        console.print("[dim]Running AI analysis...[/dim]\n")
-        result = run_analysis(layout, metadata, score, api_key=api_key, model=model)
-        archetype = result.archetype
-        personality = result.personality
-        observations_text = [obs.narrative for obs in result.observations]
+    console.print(f"  [bold magenta]{archetype}[/bold magenta]")
+    console.print(f"  [dim]{tagline}[/dim]\n")
 
-        console.print(f"  [bold magenta]{archetype}[/bold magenta]\n")
-        for i, obs in enumerate(result.observations[:3]):  # Show top 3 in terminal
-            console.print(f"  {obs.narrative}\n")
-        if len(result.observations) > 3:
-            console.print(f"  [dim]...and {len(result.observations) - 3} more insights in the full report.[/dim]\n")
-        if personality:
-            console.print(f"  [italic dim]{personality}[/italic dim]\n")
+    # AI analysis (optional, needs API key)
+    if api_key:
+        try:
+            from unjiggle.analyzer import analyze as run_analysis
+            console.print("[dim]Running AI analysis for deeper insights...[/dim]\n")
+            result = run_analysis(layout, metadata, score, api_key=api_key, model=model)
+            archetype = result.archetype
+            personality = result.personality or tagline
+            observations_text = [obs.narrative for obs in result.observations]
+
+            console.print(f"  [bold magenta]{archetype}[/bold magenta]\n")
+            for i, obs in enumerate(result.observations[:3]):
+                console.print(f"  {obs.narrative}\n")
+            if len(result.observations) > 3:
+                console.print(f"  [dim]...and {len(result.observations) - 3} more insights in the full report.[/dim]\n")
+            if result.personality:
+                console.print(f"  [italic dim]{result.personality}[/italic dim]\n")
+        except ImportError:
+            console.print("[dim]Install AI extras for deeper analysis: pip install unjiggle[ai][/dim]\n")
     else:
-        console.print("[dim]Set ANTHROPIC_API_KEY or OPENAI_API_KEY for AI analysis.[/dim]\n")
+        console.print("[dim]Tip: Set ANTHROPIC_API_KEY or OPENAI_API_KEY for AI-powered observations.[/dim]\n")
 
     # Generate share card + full report
     from unjiggle.visualize import generate_report, generate_share_card, save_report

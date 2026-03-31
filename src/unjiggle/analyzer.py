@@ -10,7 +10,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-import anthropic
+try:
+    import anthropic
+except ImportError:
+    anthropic = None
 
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
