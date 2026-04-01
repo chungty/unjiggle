@@ -161,6 +161,18 @@ def go(api_key: str | None, model: str | None):
     console.print(f"  [dim]A native Mac app with live preview, drag-and-drop, and animated before/after is coming soon.[/dim]")
     console.print(f"  [dim]Sign up: {WEBSITE_URL}[/dim]\n")
 
+    # Analytics opt-in (once, first run only)
+    from unjiggle.telemetry import prompt_analytics_opt_in, send_event
+    prompt_analytics_opt_in(console)
+    send_event("go", {
+        "app_count": layout.total_apps,
+        "page_count": layout.page_count,
+        "folder_count": len(layout.all_folders()),
+        "score": round(score.total),
+        "archetype": archetype,
+        "has_api_key": bool(api_key),
+    })
+
 
 @main.command()
 def scan():
@@ -736,6 +748,10 @@ def mirror(api_key: str | None, model: str | None):
     # Also copy the one-liner for Twitter/text posts
     copy_text(result.one_line)
     console.print(f"  [dim]One-liner also copied — Cmd+V to tweet it.[/dim]")
+
+    from unjiggle.telemetry import ask_did_share, send_event
+    shared = ask_did_share(console)
+    send_event("mirror", {"shared": shared or "skip"})
     console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
 
 
@@ -804,6 +820,10 @@ def obituary(api_key: str | None, model: str | None):
 
     copy_text(result.graveyard_summary)
     console.print(f"  [dim]Summary also copied — Cmd+V to tweet it.[/dim]")
+
+    from unjiggle.telemetry import ask_did_share, send_event
+    shared = ask_did_share(console)
+    send_event("obituary", {"shared": shared or "skip", "dead_count": result.total_dead})
     console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
 
 
@@ -863,6 +883,11 @@ def swipetax():
 
     copy_text(tax.headline)
     console.print(f"  [dim]Headline also copied — Cmd+V to tweet it.[/dim]")
+
+    from unjiggle.telemetry import ask_did_share, send_event
+    shared = ask_did_share(console)
+    send_event("swipetax", {"shared": shared or "skip", "savings": tax.savings})
+
     console.print(f"  [bold]Fix it:[/bold] [bold]unjiggle suggest[/bold] to reorganize with AI")
     console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
 

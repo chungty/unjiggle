@@ -57,12 +57,16 @@ class SwipeTaxResult:
 
 
 def compute_swipe_tax(layout: HomeScreenLayout, metadata: dict[str, dict]) -> SwipeTaxResult:
+    # Try to get real usage data from Screen Time (graceful fallback to heuristics)
+    from unjiggle.screentime import get_usage
+    usage = get_usage(layout.all_bundle_ids)
+
     all_costs: list[AppSwipeCost] = []
 
     # Dock
     for item in layout.dock:
         if item.is_app:
-            cost = _cost(item.app.bundle_id, 0, False, metadata)
+            cost = _cost(item.app.bundle_id, 0, False, metadata, usage)
             if cost:
                 all_costs.append(cost)
 
@@ -70,13 +74,13 @@ def compute_swipe_tax(layout: HomeScreenLayout, metadata: dict[str, dict]) -> Sw
     for page_idx, page in enumerate(layout.pages):
         for item in page:
             if item.is_app:
-                cost = _cost(item.app.bundle_id, page_idx + 1, False, metadata)
+                cost = _cost(item.app.bundle_id, page_idx + 1, False, metadata, usage)
                 if cost:
                     all_costs.append(cost)
             elif item.is_folder:
                 for fpage in item.folder.pages:
                     for app in fpage:
-                        cost = _cost(app.bundle_id, page_idx + 1, True, metadata)
+                        cost = _cost(app.bundle_id, page_idx + 1, True, metadata, usage)
                         if cost:
                             all_costs.append(cost)
 
@@ -96,7 +100,7 @@ def compute_swipe_tax(layout: HomeScreenLayout, metadata: dict[str, dict]) -> Sw
     )
 
 
-def _cost(bundle_id: str, page: int, in_folder: bool, metadata: dict) -> AppSwipeCost | None:
+def _cost(bundle_id: str, page: int, in_folder: bool, metadata: dict, usage: dict | None = None) -> AppSwipeCost | None:
     meta = metadata.get(bundle_id, {})
     if not meta:
         return None
@@ -108,11 +112,16 @@ def _cost(bundle_id: str, page: int, in_folder: bool, metadata: dict) -> AppSwip
     if in_folder:
         swipes += 1
 
-    base_opens = _POSITION_OPENS.get(page, _DEEP_PAGE_OPENS)
-    if in_folder:
-        base_opens *= 0.5
+    # Use real Screen Time data if available, otherwise heuristic
+    real_usage = (usage or {}).get(bundle_id)
+    if real_usage and real_usage.avg_daily_opens > 0:
+        daily_opens = real_usage.avg_daily_opens
+    else:
+        base_opens = _POSITION_OPENS.get(page, _DEEP_PAGE_OPENS)
+        if in_folder:
+            base_opens *= 0.5
+        daily_opens = base_opens * _CATEGORY_FREQ.get(category, 0.5)
 
-    daily_opens = base_opens * _CATEGORY_FREQ.get(category, 0.5)
     annual_wasted = int(daily_opens * swipes * 365)
 
     return AppSwipeCost(

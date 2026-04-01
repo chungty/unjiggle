@@ -33,13 +33,16 @@ class ObituaryResult:
 
 
 def identify_dead_apps(layout: HomeScreenLayout, metadata: dict[str, dict]) -> list[dict]:
-    """Identify likely-dead apps using positional heuristics. No Screen Time needed."""
+    """Identify likely-dead apps. Uses Screen Time if available, falls back to heuristics."""
+    from unjiggle.screentime import get_usage
+    usage = get_usage(layout.all_bundle_ids)
+
     candidates = []
 
     for page_idx, page in enumerate(layout.pages):
         for item in page:
             if item.is_app:
-                _maybe_dead(item.app.bundle_id, page_idx, False, None, None, metadata, layout, candidates)
+                _maybe_dead(item.app.bundle_id, page_idx, False, None, None, metadata, layout, candidates, usage)
             elif item.is_folder:
                 folder_size = sum(len(p) for p in item.folder.pages)
                 for fpage in item.folder.pages:
@@ -47,7 +50,7 @@ def identify_dead_apps(layout: HomeScreenLayout, metadata: dict[str, dict]) -> l
                         _maybe_dead(
                             app.bundle_id, page_idx, True,
                             item.folder.display_name, folder_size,
-                            metadata, layout, candidates,
+                            metadata, layout, candidates, usage,
                         )
 
     candidates.sort(key=lambda x: -x["death_score"])
@@ -58,13 +61,29 @@ def _maybe_dead(
     bundle_id: str, page_idx: int, in_folder: bool,
     folder_name: str | None, folder_size: int | None,
     metadata: dict, layout: HomeScreenLayout, out: list,
+    usage: dict | None = None,
 ) -> None:
     meta = metadata.get(bundle_id, {})
     if not meta or meta.get("super_category") == "System":
         return
 
+    # If we have real Screen Time data, use it as a strong signal
+    app_usage = (usage or {}).get(bundle_id)
+    if app_usage and app_usage.avg_daily_opens >= 1.0:
+        return  # App is actively used — not dead regardless of position
+
     score = 0
     reasons = []
+
+    # Screen Time: not opened in 30+ days is a strong death signal
+    if app_usage and app_usage.last_opened:
+        days_since = (datetime.now(timezone.utc) - app_usage.last_opened).days
+        if days_since >= 90:
+            score += 3
+            reasons.append(f"not opened in {days_since} days")
+        elif days_since >= 30:
+            score += 2
+            reasons.append(f"last opened {days_since} days ago")
 
     # Page depth
     if page_idx >= 5:
@@ -83,9 +102,9 @@ def _maybe_dead(
     elif in_folder:
         score += 1
 
-    # Stale updates
+    # Stale App Store updates (weaker signal than Screen Time)
     last_updated = meta.get("last_updated")
-    if last_updated:
+    if last_updated and not app_usage:  # only use if no Screen Time data
         try:
             updated_date = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
             years_stale = (datetime.now(timezone.utc) - updated_date).days / 365
@@ -99,6 +118,20 @@ def _maybe_dead(
                 score += 1
         except (ValueError, TypeError):
             pass
+
+    # Actively-maintained popular apps on late pages (not in junk drawers)
+    # are likely intentionally buried, not dead.
+    cat = meta.get("super_category", "Other")
+    actively_maintained = last_updated and score > 0
+    if actively_maintained:
+        try:
+            updated_date = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
+            actively_maintained = (datetime.now(timezone.utc) - updated_date).days < 180
+        except (ValueError, TypeError):
+            actively_maintained = False
+
+    if actively_maintained and cat in ("Social", "Entertainment") and not (in_folder and folder_size and folder_size >= 8):
+        score -= 2
 
     if score >= 3:
         entry = {

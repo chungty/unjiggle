@@ -99,3 +99,40 @@ def test_no_metadata_apps_are_skipped():
     )
     dead = identify_dead_apps(layout, {})
     assert len(dead) == 0
+
+
+def test_active_social_app_on_late_page_not_flagged():
+    """Intentional burial: Instagram on page 6, recently updated, not in a folder."""
+    layout = HomeScreenLayout(
+        dock=[],
+        pages=[[], [], [], [], [], [_app("com.burbn.instagram")]],
+    )
+    metadata = {
+        "com.burbn.instagram": _meta(
+            "Instagram", cat="Social",
+            last_updated="2025-12-01T00:00:00Z",  # recent
+        ),
+    }
+    dead = identify_dead_apps(layout, metadata)
+    # Score: page 6 = +3, but Social + recent + not in folder = -2 → net 1, below threshold
+    assert len(dead) == 0
+
+
+def test_stale_social_app_on_late_page_still_flagged():
+    """Old social app in a junk drawer is genuinely dead."""
+    folder = FolderItem(
+        display_name="Old",
+        pages=[[AppItem(bundle_id=f"com.example.x{i}") for i in range(12)]
+               + [AppItem(bundle_id="com.old.social")]],
+    )
+    layout = HomeScreenLayout(
+        dock=[],
+        pages=[[], [], [], [], [LayoutItem(folder=folder)]],
+    )
+    metadata = {
+        "com.old.social": _meta("OldApp", cat="Social", last_updated="2021-01-01T00:00:00Z"),
+        **{f"com.example.x{i}": _meta(f"X{i}") for i in range(12)},
+    }
+    dead = identify_dead_apps(layout, metadata)
+    bids = [d["bundle_id"] for d in dead]
+    assert "com.old.social" in bids
