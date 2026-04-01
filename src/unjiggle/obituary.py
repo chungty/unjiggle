@@ -231,18 +231,61 @@ def generate_obituaries(
 def _obituary_rule_based(dead_apps: list[dict]) -> ObituaryResult:
     """Generate template-based obituaries. No LLM needed."""
     _CAUSES = {
-        "Social": "Lost to the endless scroll of its competitors.",
-        "Entertainment": "Replaced by whatever's trending now.",
-        "Games": "Died when the novelty wore off.",
-        "Health": "Succumbed to the couch. The app lived longer than the habit.",
-        "Education": "Downloaded with ambition, abandoned by Thursday.",
-        "Finance": "The market moved on. So did you.",
-        "Shopping": "Outcompeted by the app you actually buy things from.",
-        "Productivity": "Ironic cause of death: you were too busy to use it.",
-        "Utilities": "Replaced by something the phone already does.",
-        "Travel": "Died between trips. Never reopened.",
-        "News": "Lost in the noise.",
-        "Other": "Forgotten. No further details available.",
+        "Social": [
+            "Lost to the endless scroll of its competitors.",
+            "The group chat moved somewhere else.",
+            "Replaced by the social network you're actually addicted to.",
+        ],
+        "Entertainment": [
+            "Replaced by whatever's trending now.",
+            "The algorithm stopped being interesting.",
+            "You found a better way to avoid your responsibilities.",
+        ],
+        "Games": [
+            "Died when the novelty wore off.",
+            "One-starred by boredom.",
+            "The dopamine well ran dry.",
+        ],
+        "Health": [
+            "Succumbed to the couch. The app lived longer than the habit.",
+            "Your motivation expired before the free trial did.",
+            "Downloaded on a Monday. Forgotten by Wednesday.",
+        ],
+        "Education": [
+            "Downloaded with ambition, abandoned by Thursday.",
+            "The streak died. Then the app did.",
+            "You learned enough to know you weren't going to learn more.",
+        ],
+        "Finance": [
+            "The market moved on. So did you.",
+            "Stopped checking after it only showed bad news.",
+            "Replaced by not looking at your portfolio.",
+        ],
+        "Shopping": [
+            "Outcompeted by the app you actually buy things from.",
+            "You found one delivery app and stuck with it.",
+        ],
+        "Productivity": [
+            "Ironic cause of death: you were too busy to use it.",
+            "Replaced by the notes app you already had.",
+        ],
+        "Utilities": [
+            "Replaced by something the phone already does.",
+            "Apple built it in. The third party never recovered.",
+            "Outlived its usefulness by approximately two iOS updates.",
+        ],
+        "Travel": [
+            "Died between trips. Never reopened.",
+            "Used once in 2019. Still installed for reasons unknown.",
+        ],
+        "News": [
+            "Lost in the noise.",
+            "You started doomscrolling somewhere else instead.",
+        ],
+        "Other": [
+            "Forgotten. No further details available.",
+            "Nobody remembers downloading this.",
+        ],
     }
 
     obituaries = []
@@ -264,7 +307,11 @@ def _obituary_rule_based(dead_apps: list[dict]) -> ObituaryResult:
             except (ValueError, TypeError):
                 pass
 
-        cause = _CAUSES.get(cat, _CAUSES["Other"])
+        import hashlib
+        causes = _CAUSES.get(cat, _CAUSES["Other"])
+        # Deterministic pick based on app name (same app = same cause every time)
+        idx = int(hashlib.md5(name.encode()).hexdigest(), 16) % len(causes)
+        cause = causes[idx]
         location = f"page {page}"
         if app.get("in_folder"):
             location = f"a folder on page {page}"

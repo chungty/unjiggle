@@ -686,10 +686,7 @@ def mirror(api_key: str | None, model: str | None):
     from unjiggle.scoring import compute_score
 
     console.print("\n[bold]Unjiggle[/bold] — Personality Mirror\n")
-    if not api_key:
-        console.print("  [dim]No API key — using pattern-based analysis. Set ANTHROPIC_API_KEY for a deeper roast.[/dim]\n")
-    else:
-        console.print("  [dim]Scanning your apps and preparing your roast...[/dim]\n")
+    console.print("  [dim]Scanning your apps...[/dim]\n")
 
     try:
         lockdown, device = connect()
@@ -736,10 +733,9 @@ def mirror(api_key: str | None, model: str | None):
     # Upsell when using rule-based fallback
     if not api_key:
         console.print("  ─────────────────────────────────────────")
-        console.print("  [dim]This was pattern-based. With an API key, the roast gets personal —[/dim]")
-        console.print("  [dim]it references your specific apps by name, detects life phases from[/dim]")
-        console.print("  [dim]your install history, and finds contradictions you didn't know you had.[/dim]")
-        console.print("  [dim]  export ANTHROPIC_API_KEY=sk-... && unjiggle mirror[/dim]\n")
+        console.print("  Want a sharper roast? With a free API key, the mirror references")
+        console.print("  your specific apps by name and finds contradictions you didn't")
+        console.print("  know you had. [dim]Get a key at anthropic.com → set ANTHROPIC_API_KEY[/dim]\n")
 
     # Generate share card → clipboard
     from unjiggle.cards import generate_mirror_card, save_card
@@ -770,8 +766,6 @@ def obituary(api_key: str | None, model: str | None):
     from unjiggle.obituary import generate_obituaries
 
     console.print("\n[bold]Unjiggle[/bold] — The Digital Graveyard\n")
-    if not api_key:
-        console.print("  [dim]No API key — using template obituaries. Set ANTHROPIC_API_KEY for wittier eulogies.[/dim]\n")
 
     try:
         lockdown, device = connect()
@@ -812,9 +806,9 @@ def obituary(api_key: str | None, model: str | None):
     console.print(f"\n  [italic]\"{result.graveyard_summary}\"[/italic]\n")
 
     if not api_key:
-        console.print("  [dim]These were template obituaries. With an API key, each one gets a[/dim]")
-        console.print("  [dim]custom eulogy — dry wit, specific cause of death, \"survived by\" lines.[/dim]")
-        console.print("  [dim]  export ANTHROPIC_API_KEY=sk-... && unjiggle obituary[/dim]\n")
+        console.print("  Want funnier eulogies? With a free API key, each app gets a custom")
+        console.print("  obituary with a cause of death and \"survived by\" line.")
+        console.print("  [dim]Get a key at anthropic.com → set ANTHROPIC_API_KEY[/dim]\n")
 
     # Generate share card → clipboard
     from unjiggle.cards import generate_obituary_card, save_card
@@ -1008,6 +1002,8 @@ def demo():
     console.print("  [bold]That was demo mode.[/bold] To scan your actual phone:\n")
     console.print("    1. Connect your iPhone via USB")
     console.print("    2. [bold]unjiggle go[/bold]\n")
+    console.print("  [dim]With a free API key from anthropic.com, the roasts and obituaries[/dim]")
+    console.print("  [dim]get much sharper — personal, witty, and specific to your apps.[/dim]\n")
     console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
 
 
