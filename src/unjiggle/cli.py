@@ -733,6 +733,14 @@ def mirror(api_key: str | None, model: str | None):
     console.print("  ─────────────────────────────────────────")
     console.print(f"\n  [italic]\"{result.one_line}\"[/italic]\n")
 
+    # Upsell when using rule-based fallback
+    if not api_key:
+        console.print("  ─────────────────────────────────────────")
+        console.print("  [dim]This was pattern-based. With an API key, the roast gets personal —[/dim]")
+        console.print("  [dim]it references your specific apps by name, detects life phases from[/dim]")
+        console.print("  [dim]your install history, and finds contradictions you didn't know you had.[/dim]")
+        console.print("  [dim]  export ANTHROPIC_API_KEY=sk-... && unjiggle mirror[/dim]\n")
+
     # Generate share card → clipboard
     from unjiggle.cards import generate_mirror_card, save_card
     from unjiggle.render import copy_text, export_card
@@ -743,13 +751,12 @@ def mirror(api_key: str | None, model: str | None):
     save_card(card_html, card_path)
     export_card(card_path, console)
 
-    # Also copy the one-liner for Twitter/text posts
     copy_text(result.one_line)
     console.print("  [dim]One-liner also copied — Cmd+V to tweet it.[/dim]")
 
     from unjiggle.telemetry import ask_did_share, send_event
     shared = ask_did_share(console)
-    send_event("mirror", {"shared": shared or "skip"})
+    send_event("mirror", {"shared": shared or "skip", "has_api_key": bool(api_key)})
     console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
 
 
@@ -800,9 +807,14 @@ def obituary(api_key: str | None, model: str | None):
             console.print(f"  [dim]Survived by: {obit.survived_by}[/dim]")
         console.print()
 
-    # Summary + share card
+    # Summary + upsell
     console.print(f"  [dim]{'─' * 50}[/dim]")
     console.print(f"\n  [italic]\"{result.graveyard_summary}\"[/italic]\n")
+
+    if not api_key:
+        console.print("  [dim]These were template obituaries. With an API key, each one gets a[/dim]")
+        console.print("  [dim]custom eulogy — dry wit, specific cause of death, \"survived by\" lines.[/dim]")
+        console.print("  [dim]  export ANTHROPIC_API_KEY=sk-... && unjiggle obituary[/dim]\n")
 
     # Generate share card → clipboard
     from unjiggle.cards import generate_obituary_card, save_card
