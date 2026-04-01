@@ -214,14 +214,86 @@ def generate_obituaries(
             graveyard_summary="Your phone is surprisingly well-maintained. No funerals today.",
         )
 
+    # Rule-based fallback when no API key
+    if not api_key:
+        return _obituary_rule_based(dead_apps)
+
     context = _build_context(dead_apps, layout, metadata)
 
     if provider == "auto":
-        provider = "openai" if api_key and api_key.startswith("sk-") else "anthropic"
+        provider = "openai" if api_key.startswith("sk-") else "anthropic"
 
     if provider == "openai":
         return _obituary_openai(context, dead_apps, api_key, model or "gpt-4.1")
     return _obituary_anthropic(context, dead_apps, api_key, model or "claude-sonnet-4-20250514")
+
+
+def _obituary_rule_based(dead_apps: list[dict]) -> ObituaryResult:
+    """Generate template-based obituaries. No LLM needed."""
+    _CAUSES = {
+        "Social": "Lost to the endless scroll of its competitors.",
+        "Entertainment": "Replaced by whatever's trending now.",
+        "Games": "Died when the novelty wore off.",
+        "Health": "Succumbed to the couch. The app lived longer than the habit.",
+        "Education": "Downloaded with ambition, abandoned by Thursday.",
+        "Finance": "The market moved on. So did you.",
+        "Shopping": "Outcompeted by the app you actually buy things from.",
+        "Productivity": "Ironic cause of death: you were too busy to use it.",
+        "Utilities": "Replaced by something the phone already does.",
+        "Travel": "Died between trips. Never reopened.",
+        "News": "Lost in the noise.",
+        "Other": "Forgotten. No further details available.",
+    }
+
+    obituaries = []
+    for app in dead_apps[:10]:
+        name = app["name"]
+        cat = app.get("category", "Other")
+        reasons = app.get("reasons", [])
+        page = app.get("page", "?")
+
+        # Estimate birth year from last_updated minus 2-3 years
+        born = None
+        died = "recently"
+        last_updated = app.get("last_updated")
+        if last_updated:
+            try:
+                updated = datetime.fromisoformat(last_updated.replace("Z", "+00:00"))
+                died = str(updated.year)
+                born = str(max(2015, updated.year - 2))
+            except (ValueError, TypeError):
+                pass
+
+        cause = _CAUSES.get(cat, _CAUSES["Other"])
+        location = f"page {page}"
+        if app.get("in_folder"):
+            location = f"a folder on page {page}"
+
+        eulogy = f"Found on {location}. {cause}"
+        if "not updated since" in " ".join(reasons):
+            eulogy += f" Last updated: {died}."
+
+        obituaries.append(Obituary(
+            app_name=name,
+            bundle_id=app["bundle_id"],
+            born=born,
+            died=died,
+            cause_of_death=cause,
+            eulogy=eulogy,
+            survived_by=None,
+        ))
+
+    cats = [a.get("category", "Other") for a in dead_apps]
+    from collections import Counter
+    top_cat = Counter(cats).most_common(1)
+    cat_note = f", mostly {top_cat[0][0].lower()}" if top_cat else ""
+    summary = f"{len(dead_apps)} apps that didn't make it{cat_note}."
+
+    return ObituaryResult(
+        total_dead=len(dead_apps),
+        obituaries=obituaries,
+        graveyard_summary=summary,
+    )
 
 
 def _build_context(dead_apps: list[dict], layout: HomeScreenLayout, metadata: dict) -> str:

@@ -2,7 +2,7 @@
 
 **Your iPhone home screen is a mess. You know it. You've given up fixing it. Unjiggle fixes it for you.**
 
-Unjiggle is an AI-powered CLI that reads your iPhone home screen, scores your organization, tells you what's wrong (and why), and fixes it — one step at a time or all at once.
+Unjiggle is an AI-powered CLI that reads your iPhone home screen, scores your organization, roasts your app collection, writes obituaries for your dead apps, and generates share cards you'll actually want to post.
 
 <p align="center">
   <img src="assets/cli-demo.png" width="600" alt="unjiggle go — one command to scan, score, and analyze your iPhone">
@@ -20,46 +20,49 @@ Connect your iPhone via USB, then:
 unjiggle go
 ```
 
-That's it. One command. It scans your phone, scores your organization, runs AI analysis, and generates a shareable report card.
+One command. It scans your phone, scores your organization, calculates your swipe tax, and generates a share card that auto-copies to your clipboard. Cmd+V to paste into iMessage, Twitter, or Instagram.
 
-## The Share Card
+## Share Cards
 
-Unjiggle generates a Wrapped-style share card with your archetype, score, and App DNA mosaic. Screenshot it. Post it. Challenge your friends.
+Every feature generates a 1080x1350 share card that copies to your clipboard automatically. No screenshots needed — just Cmd+V.
 
 <p align="center">
-  <img src="assets/share-card.png" width="400" alt="Unjiggle share card — The Agile Optimizer, score 70/100">
+  <img src="assets/share-card.png" width="400" alt="Unjiggle share card — The Organized Maximalist, score 70/100">
 </p>
 
-## What It Does
+## Features
 
-**`unjiggle go`** — The full experience in one command:
-- Reads your entire home screen layout over USB (226 apps, 8 pages, 14 folders... or whatever yours looks like)
-- Scores your organization (0-100) across four dimensions
-- Runs AI analysis that actually *sees* your phone: duplicate apps, abandoned apps, scattered categories, cryptic folder names
-- Generates a share card with your archetype and App DNA mosaic
-
-**`unjiggle suggest`** — Interactive AI walkthrough:
-- The AI walks you through 5-7 observations, each with a specific fix
-- For cleanup suggestions: choose **Delete** (with a Marie Kondo gratitude moment), **Archive** (App Library), or **Keep**
-- Every change is previewed before applying
-- Auto-backup before any write. One-command undo.
-
-**`unjiggle safety-test`** — Prove it's safe first:
-- Reads your layout, writes it back unchanged, reads again
-- Verifies the result is identical
-- Your phone doesn't change at all. Run this first if you're nervous.
-
-## Commands
+### Core (no API key needed)
 
 | Command | What it does |
 |---------|-------------|
-| `unjiggle go` | Full experience: scan, score, AI analysis, share card |
+| `unjiggle go` | Full experience: scan, score, archetype, swipe tax, share card |
+| `unjiggle swipetax` | How many unnecessary swipes your layout costs per year |
 | `unjiggle scan` | See your layout color-coded by category |
 | `unjiggle score` | Organization score (0-100) with breakdown |
-| `unjiggle analyze` | AI observations (Claude or GPT-4.1) |
+| `unjiggle demo` | Try it without a phone — see what the output looks like |
+
+### Viral features (works without API key, better with one)
+
+| Command | What it does |
+|---------|-------------|
+| `unjiggle mirror` | Personality roast from your app collection |
+| `unjiggle obituary` | Eulogies for your dead apps |
+
+These generate share cards with or without an API key. With Claude or GPT, the roasts are funnier and more personal. Without, you get a solid rule-based analysis.
+
+### AI-powered (needs API key)
+
+| Command | What it does |
+|---------|-------------|
+| `unjiggle analyze` | Deep AI observations (Claude or GPT-4.1) |
 | `unjiggle suggest` | Interactive walkthrough — apply changes step by step |
 | `unjiggle suggest --apply-all` | Just Fix It mode — apply everything at once |
-| `unjiggle report --open` | Generate share card + full report |
+
+### Safety
+
+| Command | What it does |
+|---------|-------------|
 | `unjiggle safety-test` | Prove read/write works (changes nothing) |
 | `unjiggle backup` | Save current layout |
 | `unjiggle restore` | Undo any changes |
@@ -69,19 +72,21 @@ Unjiggle generates a Wrapped-style share card with your archetype, score, and Ap
 - **macOS** (USB communication with iPhone)
 - **iPhone connected via USB** with "Trust This Computer" accepted
 - **Python 3.10+**
-- **API key** for AI features: set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY`
+- **API key** (optional): set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` for AI features. Core features and share cards work without one.
 
 ## How It Works
 
-Unjiggle uses [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) to communicate with your iPhone's SpringBoard services over USB. It reads the `IconState` (your home screen layout), enriches it with App Store metadata, and uses an LLM to generate observations and layout suggestions.
+Unjiggle uses [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) to communicate with your iPhone's SpringBoard services over USB. It reads the `IconState` (your home screen layout), enriches it with App Store metadata, and generates observations and layout suggestions.
 
-The write path is validated on iPhone 16 Pro, iOS 26.0. Every write is preceded by a verified backup and an optional round-trip safety test.
+On macOS 12-15, it can also read Screen Time data from `knowledgeC.db` for real app usage stats (last opened, daily opens). On newer macOS versions, it falls back to positional heuristics.
+
+Share cards render to PNG via Chrome headless and auto-copy to your macOS clipboard.
+
+The write path is validated on iPhone 16 Pro, iOS 26. Every write is preceded by a verified backup and an optional round-trip safety test.
 
 ## GUI Coming Soon
 
 A native Mac app with live preview, drag-and-drop editing, animated before/after transformations, and a slider to control aggressiveness is in development.
-
-The CLI validates the core value prop. The GUI is the full product.
 
 **Sign up for early access:** [unjiggle.com](https://unjiggle.com)
 

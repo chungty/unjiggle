@@ -685,12 +685,11 @@ def mirror(api_key: str | None, model: str | None):
     from unjiggle.mirror import generate_mirror
     from unjiggle.scoring import compute_score
 
-    if not api_key:
-        console.print("[red]No API key found.[/red] Set ANTHROPIC_API_KEY or OPENAI_API_KEY.")
-        sys.exit(1)
-
     console.print("\n[bold]Unjiggle[/bold] — Personality Mirror\n")
-    console.print("  [dim]Scanning your apps and preparing your roast...[/dim]\n")
+    if not api_key:
+        console.print("  [dim]No API key — using pattern-based analysis. Set ANTHROPIC_API_KEY for a deeper roast.[/dim]\n")
+    else:
+        console.print("  [dim]Scanning your apps and preparing your roast...[/dim]\n")
 
     try:
         lockdown, device = connect()
@@ -763,11 +762,9 @@ def obituary(api_key: str | None, model: str | None):
     from unjiggle.itunes import enrich_layout
     from unjiggle.obituary import generate_obituaries
 
-    if not api_key:
-        console.print("[red]No API key found.[/red] Set ANTHROPIC_API_KEY or OPENAI_API_KEY.")
-        sys.exit(1)
-
     console.print("\n[bold]Unjiggle[/bold] — The Digital Graveyard\n")
+    if not api_key:
+        console.print("  [dim]No API key — using template obituaries. Set ANTHROPIC_API_KEY for wittier eulogies.[/dim]\n")
 
     try:
         lockdown, device = connect()
@@ -908,6 +905,98 @@ def _cat_color(category: str) -> str:
         "Other": "dim",
     }
     return colors.get(category, "white")
+
+
+@main.command()
+def demo():
+    """Try Unjiggle without a phone — see what the output looks like."""
+    from unjiggle.models import AppItem, FolderItem, HomeScreenLayout, LayoutItem
+    from unjiggle.scoring import compute_score
+    from unjiggle.swipetax import compute_swipe_tax
+    from unjiggle.mirror import generate_mirror
+    from unjiggle.obituary import generate_obituaries
+
+    console.print("\n[bold]Unjiggle[/bold] — Demo Mode\n")
+    console.print("  [dim]Using a sample phone layout (no iPhone needed).[/dim]\n")
+
+    # Build a realistic mock layout
+    meta = {
+        "com.apple.mobilesafari": {"name": "Safari", "super_category": "System", "last_updated": "2025-09-01T00:00:00Z", "description": "Web browser"},
+        "com.burbn.instagram": {"name": "Instagram", "super_category": "Social", "last_updated": "2025-12-01T00:00:00Z", "description": "Photo sharing"},
+        "com.spotify.client": {"name": "Spotify", "super_category": "Entertainment", "last_updated": "2025-12-01T00:00:00Z", "description": "Music streaming"},
+        "com.zhiliaoapp.musically": {"name": "TikTok", "super_category": "Entertainment", "last_updated": "2025-12-01T00:00:00Z", "description": "Short video"},
+        "com.slack.Slack": {"name": "Slack", "super_category": "Productivity", "last_updated": "2025-12-01T00:00:00Z", "description": "Team messaging"},
+        "com.notion.Notion": {"name": "Notion", "super_category": "Productivity", "last_updated": "2025-12-01T00:00:00Z", "description": "Notes and docs"},
+        "com.headspace.headspace": {"name": "Headspace", "super_category": "Health", "last_updated": "2025-06-01T00:00:00Z", "description": "Meditation"},
+        "com.calm.Calm": {"name": "Calm", "super_category": "Health", "last_updated": "2025-05-01T00:00:00Z", "description": "Meditation and sleep"},
+        "com.wakingup.app": {"name": "Waking Up", "super_category": "Health", "last_updated": "2025-03-01T00:00:00Z", "description": "Mindfulness"},
+        "com.nike.nrc": {"name": "Nike Run Club", "super_category": "Health", "last_updated": "2025-10-01T00:00:00Z", "description": "Running tracker"},
+        "com.duolingo.DuolingoMobile": {"name": "Duolingo", "super_category": "Education", "last_updated": "2025-10-01T00:00:00Z", "description": "Learn languages"},
+        "com.rosettastone.rosettastone": {"name": "Rosetta Stone", "super_category": "Education", "last_updated": "2023-06-01T00:00:00Z", "description": "Language learning"},
+        "com.memrise.app": {"name": "Memrise", "super_category": "Education", "last_updated": "2023-01-01T00:00:00Z", "description": "Learn with flashcards"},
+        "com.robinhood.release": {"name": "Robinhood", "super_category": "Finance", "last_updated": "2025-12-01T00:00:00Z", "description": "Stock trading"},
+        "com.coinbase.Coinbase": {"name": "Coinbase", "super_category": "Finance", "last_updated": "2025-12-01T00:00:00Z", "description": "Crypto trading"},
+        "com.mint.internal": {"name": "Mint", "super_category": "Finance", "last_updated": "2023-12-01T00:00:00Z", "description": "Budgeting (discontinued)"},
+        "com.doordash.DoorDash": {"name": "DoorDash", "super_category": "Shopping", "last_updated": "2025-12-01T00:00:00Z", "description": "Food delivery"},
+        "com.amazon.Amazon": {"name": "Amazon", "super_category": "Shopping", "last_updated": "2025-12-01T00:00:00Z", "description": "Online shopping"},
+        "com.king.candycrush": {"name": "Candy Crush", "super_category": "Games", "last_updated": "2025-10-01T00:00:00Z", "description": "Match-three puzzle"},
+        "com.nianticlabs.pokemongo": {"name": "Pokemon GO", "super_category": "Games", "last_updated": "2025-09-01T00:00:00Z", "description": "Catch Pokemon"},
+        "com.darksky.weather": {"name": "Dark Sky", "super_category": "Utilities", "last_updated": "2022-01-01T00:00:00Z", "description": "Weather (discontinued by Apple)"},
+        "com.clubhouse.app": {"name": "Clubhouse", "super_category": "Social", "last_updated": "2023-09-01T00:00:00Z", "description": "Audio chat rooms"},
+        "com.purify.app": {"name": "Purify", "super_category": "Utilities", "last_updated": "2021-03-01T00:00:00Z", "description": "Ad blocker (discontinued)"},
+    }
+
+    def _a(bid):
+        return LayoutItem(app=AppItem(bundle_id=bid))
+
+    junk = [AppItem(bundle_id=bid) for bid in ["com.darksky.weather", "com.clubhouse.app", "com.purify.app",
+            "com.rosettastone.rosettastone", "com.memrise.app", "com.mint.internal",
+            "com.duolingo.DuolingoMobile", "com.king.candycrush", "com.nianticlabs.pokemongo"]]
+
+    layout = HomeScreenLayout(
+        dock=[_a("com.apple.mobilesafari")],
+        pages=[
+            [_a("com.burbn.instagram"), _a("com.spotify.client"), _a("com.zhiliaoapp.musically")],
+            [_a("com.slack.Slack"), _a("com.notion.Notion")],
+            [_a("com.headspace.headspace"), _a("com.calm.Calm"), _a("com.wakingup.app"), _a("com.nike.nrc")],
+            [_a("com.robinhood.release"), _a("com.coinbase.Coinbase"), _a("com.doordash.DoorDash"), _a("com.amazon.Amazon")],
+            [LayoutItem(folder=FolderItem(display_name="Stuff", pages=[junk]))],
+        ],
+    )
+
+    # Score
+    score = compute_score(layout, meta)
+    console.print(f"  Organization Score: [bold]{score.total:.0f}/100[/bold] — {score.label}\n")
+
+    from unjiggle.archetypes import assign_archetype
+    archetype, tagline = assign_archetype(layout, meta)
+    console.print(f"  [bold magenta]{archetype}[/bold magenta]")
+    console.print(f"  [dim]{tagline}[/dim]\n")
+
+    # Swipe Tax
+    tax = compute_swipe_tax(layout, meta)
+    console.print(f"  [bold yellow]Swipe Tax:[/bold yellow] {tax.headline}\n")
+
+    # Mirror (rule-based, no API key)
+    mirror = generate_mirror(layout, meta, score)
+    console.print("  [bold cyan]Personality Mirror[/bold cyan]\n")
+    console.print(f"  {mirror.roast}\n")
+    if mirror.one_line:
+        console.print(f"  [italic]\"{mirror.one_line}\"[/italic]\n")
+
+    # Obituary (rule-based, no API key)
+    obits = generate_obituaries(layout, meta)
+    if obits.obituaries:
+        console.print(f"  [bold]Digital Graveyard[/bold] — {obits.total_dead} apps didn't make it.\n")
+        for obit in obits.obituaries[:3]:
+            console.print(f"  [bold]⚰️  {obit.app_name}[/bold]")
+            console.print(f"  {obit.eulogy}\n")
+
+    console.print("  ─────────────────────────────────────────\n")
+    console.print("  [bold]That was demo mode.[/bold] To scan your actual phone:\n")
+    console.print("    1. Connect your iPhone via USB")
+    console.print("    2. [bold]unjiggle go[/bold]\n")
+    console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
 
 
 if __name__ == "__main__":
