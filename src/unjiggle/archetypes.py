@@ -28,7 +28,7 @@ def assign_archetype(layout: HomeScreenLayout, metadata: dict[str, dict]) -> tup
         cat = meta.get("super_category", "Other") if meta else "Other"
         cat_counter[cat] += 1
 
-    top_cat = cat_counter.most_common(1)[0][0] if cat_counter else "Other"
+    cat_counter.most_common(1)[0][0] if cat_counter else "Other"
     unique_cats = len([c for c, n in cat_counter.items() if c not in ("System", "Other") and n > 0])
     games = cat_counter.get("Games", 0)
     productivity = cat_counter.get("Productivity", 0)

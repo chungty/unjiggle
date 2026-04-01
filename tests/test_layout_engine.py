@@ -1,6 +1,5 @@
 """Tests for the layout engine (raw plist operations)."""
 
-import copy
 
 from unjiggle.analyzer import LayoutOperation
 from unjiggle.layout_engine import apply_operations
@@ -50,7 +49,6 @@ def _make_raw_layout() -> dict:
 def _make_layout_with_raw(raw: dict) -> HomeScreenLayout:
     """Create a HomeScreenLayout with the raw dict set."""
     from unjiggle.device import _parse_layout_item
-    from unjiggle.models import LayoutItem
 
     dock = []
     for item in raw.get("buttonBar", []):

@@ -139,13 +139,13 @@ def pre_write_safety_check(lockdown, layout: HomeScreenLayout) -> tuple[bool, Pa
         return False, None
 
     # Step 2: Show backup stats
-    console.print(f"  [bold]Step 2/3:[/bold] Backup contains:")
+    console.print("  [bold]Step 2/3:[/bold] Backup contains:")
     console.print(f"    {layout.page_count} pages, {layout.total_apps} apps, {len(layout.all_folders())} folders")
     console.print(f"    Dock: {len(layout.dock)} items")
     console.print(f"    App Library: {len(layout.ignored)} hidden apps\n")
 
     # Step 3: Offer round-trip test
-    console.print(f"  [bold]Step 3/3:[/bold] Round-trip verification")
+    console.print("  [bold]Step 3/3:[/bold] Round-trip verification")
     console.print("  This writes your current layout back unchanged, then reads it to")
     console.print("  prove the write path works. Your phone won't change at all.")
 

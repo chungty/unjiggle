@@ -1,9 +1,8 @@
 """Tests for the safety module."""
 
 import json
-from pathlib import Path
 
-from unjiggle.safety import list_backups, BACKUP_DIR
+from unjiggle.safety import list_backups
 
 
 class TestVerifiedBackup:

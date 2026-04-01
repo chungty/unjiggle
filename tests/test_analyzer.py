@@ -1,8 +1,8 @@
 """Tests for the LLM analysis engine (layout operations and preview, not LLM calls)."""
 
-from tests.conftest import make_app, make_folder
+from tests.conftest import make_app
 
-from unjiggle.analyzer import LayoutOperation, Observation, preview_operations, _parse_result
+from unjiggle.analyzer import LayoutOperation, preview_operations, _parse_result
 from unjiggle.models import HomeScreenLayout
 
 
@@ -24,7 +24,7 @@ class TestPreviewOperations:
             bundle_ids=["com.darksky.darksky"],
             target_page=0,  # Move to page 1
         )]
-        original_page1_count = len(chaotic_layout.pages[0])
+        len(chaotic_layout.pages[0])
         preview = preview_operations(chaotic_layout, ops)
         # App should be on page 1 now (might also still be in its original location
         # since move_to_page extracts first then adds)

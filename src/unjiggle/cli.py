@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -102,7 +101,7 @@ def go(api_key: str | None, model: str | None):
         if tax.worst_offenders:
             worst = tax.worst_offenders[0]
             console.print(f"  [dim]Worst offender: {worst.name} on page {worst.page} ({worst.annual_wasted_swipes:,} wasted swipes/yr)[/dim]")
-        console.print(f"  [dim]Run [bold]unjiggle swipetax[/bold] for the full breakdown.[/dim]\n")
+        console.print("  [dim]Run [bold]unjiggle swipetax[/bold] for the full breakdown.[/dim]\n")
 
     # AI analysis (optional, needs API key)
     if api_key:
@@ -146,19 +145,19 @@ def go(api_key: str | None, model: str | None):
     import webbrowser
     webbrowser.open(f"file://{share_path.resolve()}")
 
-    console.print(f"  [green]Share card opened in browser.[/green]")
+    console.print("  [green]Share card opened in browser.[/green]")
     console.print(f"  [dim]Full report: {report_path}[/dim]\n")
 
     # The funnel
     console.print("  ─────────────────────────────────────────")
     console.print()
-    console.print(f"  [bold]What's next?[/bold]")
-    console.print(f"    🔧 [bold]unjiggle suggest[/bold] to fix your layout with AI")
-    console.print(f"    🪞 [bold]unjiggle mirror[/bold] for your personality roast")
-    console.print(f"    ⚰️  [bold]unjiggle obituary[/bold] for eulogies of your dead apps")
+    console.print("  [bold]What's next?[/bold]")
+    console.print("    🔧 [bold]unjiggle suggest[/bold] to fix your layout with AI")
+    console.print("    🪞 [bold]unjiggle mirror[/bold] for your personality roast")
+    console.print("    ⚰️  [bold]unjiggle obituary[/bold] for eulogies of your dead apps")
     console.print(f"    ⭐ Star us: {GITHUB_URL}")
     console.print()
-    console.print(f"  [dim]A native Mac app with live preview, drag-and-drop, and animated before/after is coming soon.[/dim]")
+    console.print("  [dim]A native Mac app with live preview, drag-and-drop, and animated before/after is coming soon.[/dim]")
     console.print(f"  [dim]Sign up: {WEBSITE_URL}[/dim]\n")
 
     # Analytics opt-in (once, first run only)
@@ -220,7 +219,7 @@ def scan():
                 app_count = sum(len(p) for p in item.folder.pages)
                 row.append(f"[bold]📁 {item.folder.display_name}[/bold] ({app_count})")
             elif item.is_widget:
-                row.append(f"[dim]⬛ Widget[/dim]")
+                row.append("[dim]⬛ Widget[/dim]")
 
             if len(row) == 4:
                 table.add_row(*row)
@@ -235,8 +234,8 @@ def scan():
         console.print()
 
     console.print("[green]Scan complete.[/green]")
-    console.print(f"  Next: [bold]unjiggle score[/bold] to see your organization score")
-    console.print(f"  Or:   [bold]unjiggle go[/bold] for the full experience (scan → score → AI → share card)\n")
+    console.print("  Next: [bold]unjiggle score[/bold] to see your organization score")
+    console.print("  Or:   [bold]unjiggle go[/bold] for the full experience (scan → score → AI → share card)\n")
 
 
 @main.command()
@@ -264,8 +263,8 @@ def score():
     console.print(f"  Folder Usage:       {breakdown.folder_usage:.0f}/100 (weight 20%)")
     console.print(f"  Dock Quality:       {breakdown.dock_quality:.0f}/100 (weight 20%)")
     console.print()
-    console.print(f"  Next: [bold]unjiggle analyze[/bold] for AI-powered insights")
-    console.print(f"  Or:   [bold]unjiggle suggest[/bold] to fix it interactively\n")
+    console.print("  Next: [bold]unjiggle analyze[/bold] for AI-powered insights")
+    console.print("  Or:   [bold]unjiggle suggest[/bold] to fix it interactively\n")
 
 
 @main.command()
@@ -358,7 +357,7 @@ def safety_test():
         console.print("  [green bold]All safety tests passed.[/green bold]")
         console.print("  Unjiggle can safely read and write your home screen layout.")
         console.print(f"  Your backup is at: {backup_path}")
-        console.print(f"\n  You're safe to run [bold]unjiggle suggest[/bold] now.\n")
+        console.print("\n  You're safe to run [bold]unjiggle suggest[/bold] now.\n")
     else:
         console.print("  [red bold]Safety test failed.[/red bold]")
         console.print("  Do NOT run unjiggle suggest until this is resolved.\n")
@@ -433,8 +432,8 @@ def analyze(api_key: str | None, model: str):
         console.print(f"\n  [italic dim]{result.personality}[/italic dim]\n")
 
     console.print("[green]Analysis complete.[/green]")
-    console.print(f"  Next: [bold]unjiggle suggest[/bold] to apply changes interactively")
-    console.print(f"        [bold]unjiggle report --open[/bold] to generate your shareable report card\n")
+    console.print("  Next: [bold]unjiggle suggest[/bold] to apply changes interactively")
+    console.print("        [bold]unjiggle report --open[/bold] to generate your shareable report card\n")
 
 
 @main.command()
@@ -443,8 +442,8 @@ def analyze(api_key: str | None, model: str):
 @click.option("--apply-all", is_flag=True, help="Apply all suggestions without stepping through (Just Fix It mode)")
 def suggest(api_key: str | None, model: str, apply_all: bool):
     """AI-powered suggestions with live preview. Accept/skip each change."""
-    from unjiggle.analyzer import analyze as run_analysis, preview_operations
-    from unjiggle.device import backup_layout, connect, read_layout, write_layout
+    from unjiggle.analyzer import LayoutOperation, analyze as run_analysis, preview_operations
+    from unjiggle.device import connect, read_layout, write_layout
     from unjiggle.itunes import enrich_layout
     from unjiggle.scoring import compute_score
 
@@ -516,7 +515,7 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
                                 console.print(f"\n    [bold]{name}[/bold]")
                                 console.print(f"    [dim italic]\"{op.gratitude}\"[/dim italic]")
                             choice = click.prompt(
-                                f"    [D]elete / [A]rchive / [K]eep",
+                                "    [D]elete / [A]rchive / [K]eep",
                                 type=click.Choice(["d", "a", "k"], case_sensitive=False),
                                 default="d",
                             )
@@ -525,9 +524,9 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
                                 console.print(f"    [red]Goodbye, {name}.[/red]")
                             elif choice.lower() == "a":
                                 kept_ops.append(LayoutOperation(action="move_to_app_library", bundle_ids=[bid]))
-                                console.print(f"    [yellow]Archived.[/yellow]")
+                                console.print("    [yellow]Archived.[/yellow]")
                             else:
-                                console.print(f"    [dim]Kept.[/dim]")
+                                console.print("    [dim]Kept.[/dim]")
                     else:
                         kept_ops.append(op)
                 accepted_ops.extend(kept_ops)
@@ -556,7 +555,7 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
     final_preview = preview_operations(layout, accepted_ops)
     final_score = compute_score(final_preview, metadata)
 
-    console.print(f"\n  [bold]Summary:[/bold]")
+    console.print("\n  [bold]Summary:[/bold]")
     console.print(f"    Score: {score_before.total:.0f} → {final_score.total:.0f}")
     console.print(f"    Pages: {layout.page_count} → {final_preview.page_count}")
     console.print(f"    Operations: {len(accepted_ops)}")
@@ -585,13 +584,13 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         verify = re_read(lockdown)
         console.print(f"  [dim]Verifying write... {verify.page_count} pages, {verify.total_apps} apps read back.[/dim]")
 
-        console.print(f"\n  [green bold]Done![/green bold] Your iPhone has been reorganized.")
+        console.print("\n  [green bold]Done![/green bold] Your iPhone has been reorganized.")
         console.print(f"  Undo anytime: [bold]unjiggle restore {backup_path}[/bold]")
         console.print()
-        console.print(f"  [bold]Share your transformation:[/bold]")
-        console.print(f"    [bold]unjiggle report --open[/bold] to generate a before/after share card")
+        console.print("  [bold]Share your transformation:[/bold]")
+        console.print("    [bold]unjiggle report --open[/bold] to generate a before/after share card")
         console.print()
-        console.print(f"  [dim]Love Unjiggle? A native Mac app with live preview is coming.[/dim]")
+        console.print("  [dim]Love Unjiggle? A native Mac app with live preview is coming.[/dim]")
         console.print(f"  [dim]Sign up: {WEBSITE_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
     else:
         console.print("  [yellow]Cancelled.[/yellow] No changes made.\n")
@@ -669,10 +668,10 @@ def report(api_key: str | None, model: str, output: str | None, open_browser: bo
         console.print("  [dim]Opened share card in browser.[/dim]")
 
     console.print()
-    console.print(f"  [bold]Share it:[/bold] Screenshot the card and post it!")
-    console.print(f"  [bold]Fix it:[/bold]  [bold]unjiggle suggest[/bold] to apply AI recommendations")
+    console.print("  [bold]Share it:[/bold] Screenshot the card and post it!")
+    console.print("  [bold]Fix it:[/bold]  [bold]unjiggle suggest[/bold] to apply AI recommendations")
     console.print()
-    console.print(f"  [dim]Love Unjiggle? A native Mac app with live preview + slider is coming.[/dim]")
+    console.print("  [dim]Love Unjiggle? A native Mac app with live preview + slider is coming.[/dim]")
     console.print(f"  [dim]Sign up: {WEBSITE_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
 
 
@@ -707,12 +706,12 @@ def mirror(api_key: str | None, model: str | None):
     result = generate_mirror(layout, metadata, score, api_key=api_key, model=model)
 
     # The roast
-    console.print(f"  [bold magenta]The Roast[/bold magenta]\n")
+    console.print("  [bold magenta]The Roast[/bold magenta]\n")
     console.print(f"  {result.roast}\n")
 
     # Life phases
     if result.phases:
-        console.print(f"  [bold cyan]Life Phases Detected[/bold cyan]\n")
+        console.print("  [bold cyan]Life Phases Detected[/bold cyan]\n")
         for phase in result.phases:
             console.print(f"  [bold]{phase.name}[/bold]")
             console.print(f"  {phase.narrative}")
@@ -720,7 +719,7 @@ def mirror(api_key: str | None, model: str | None):
 
     # Contradictions
     if result.contradictions:
-        console.print(f"  [bold yellow]Contradictions[/bold yellow]\n")
+        console.print("  [bold yellow]Contradictions[/bold yellow]\n")
         for c in result.contradictions:
             console.print(f"  [bold]{c.tension}[/bold]")
             console.print(f"  {c.roast}")
@@ -728,7 +727,7 @@ def mirror(api_key: str | None, model: str | None):
 
     # Guilty pleasure
     if result.guilty_pleasure:
-        console.print(f"  [bold red]Guilty Pleasure[/bold red]")
+        console.print("  [bold red]Guilty Pleasure[/bold red]")
         console.print(f"  {result.guilty_pleasure}\n")
 
     # Tweetable one-liner
@@ -747,7 +746,7 @@ def mirror(api_key: str | None, model: str | None):
 
     # Also copy the one-liner for Twitter/text posts
     copy_text(result.one_line)
-    console.print(f"  [dim]One-liner also copied — Cmd+V to tweet it.[/dim]")
+    console.print("  [dim]One-liner also copied — Cmd+V to tweet it.[/dim]")
 
     from unjiggle.telemetry import ask_did_share, send_event
     shared = ask_did_share(console)
@@ -819,7 +818,7 @@ def obituary(api_key: str | None, model: str | None):
     export_card(card_path, console)
 
     copy_text(result.graveyard_summary)
-    console.print(f"  [dim]Summary also copied — Cmd+V to tweet it.[/dim]")
+    console.print("  [dim]Summary also copied — Cmd+V to tweet it.[/dim]")
 
     from unjiggle.telemetry import ask_did_share, send_event
     shared = ask_did_share(console)
@@ -882,13 +881,13 @@ def swipetax():
     export_card(card_path, console)
 
     copy_text(tax.headline)
-    console.print(f"  [dim]Headline also copied — Cmd+V to tweet it.[/dim]")
+    console.print("  [dim]Headline also copied — Cmd+V to tweet it.[/dim]")
 
     from unjiggle.telemetry import ask_did_share, send_event
     shared = ask_did_share(console)
     send_event("swipetax", {"shared": shared or "skip", "savings": tax.savings})
 
-    console.print(f"  [bold]Fix it:[/bold] [bold]unjiggle suggest[/bold] to reorganize with AI")
+    console.print("  [bold]Fix it:[/bold] [bold]unjiggle suggest[/bold] to reorganize with AI")
     console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
 
 

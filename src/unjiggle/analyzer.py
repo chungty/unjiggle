@@ -268,7 +268,7 @@ def _analyze_openai(layout, context, api_key, model) -> AnalysisResult:
 def _parse_result(data: dict, layout: HomeScreenLayout) -> AnalysisResult:
     """Parse and validate the LLM's structured output."""
     valid_bundle_ids = set(layout.all_bundle_ids)
-    valid_folder_names = {f.display_name for f in layout.all_folders()}
+    {f.display_name for f in layout.all_folders()}
 
     observations = []
     for i, obs_data in enumerate(data.get("observations", [])):
@@ -326,7 +326,7 @@ def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperatio
 
         elif op.action == "create_folder":
             if op.folder_name:
-                from unjiggle.models import AppItem, FolderItem, LayoutItem
+                from unjiggle.models import FolderItem, LayoutItem
                 items = _extract_apps_from_layout(preview, op.bundle_ids)
                 apps = [item.app for item in items if item.is_app]
                 if apps:
