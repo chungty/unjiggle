@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "unjiggle"
-version = "0.2.0"
+version = "0.3.0"
 description = "AI-powered iPhone home screen organizer. One command to scan, score, and fix your layout over USB."
 readme = "README.md"
 license = {text = "GPL-3.0-or-later"}
