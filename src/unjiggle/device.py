@@ -131,16 +131,8 @@ def _parse_item(raw_item) -> LayoutItem | None:
     return None
 
 
-def read_layout(lockdown) -> HomeScreenLayout:
-    """Read the current home screen layout from the connected device."""
-    from pymobiledevice3.services.springboard import SpringBoardServicesService
-
-    async def _read():
-        async with SpringBoardServicesService(lockdown) as sbs:
-            return await sbs.get_icon_state(format_version="2")
-
-    raw_state = _run(_read())
-
+def parse_layout_state(raw_state) -> HomeScreenLayout:
+    """Parse a raw icon-state payload into a HomeScreenLayout."""
     # iOS 26 format: flat list of lists
     # state[0] = dock, state[1:] = pages
     if isinstance(raw_state, list):
@@ -187,6 +179,18 @@ def read_layout(lockdown) -> HomeScreenLayout:
         return HomeScreenLayout(dock=dock, pages=pages, ignored=ignored, raw=raw_state)
 
     raise RuntimeError(f"Unexpected icon state format: {type(raw_state)}")
+
+
+def read_layout(lockdown) -> HomeScreenLayout:
+    """Read the current home screen layout from the connected device."""
+    from pymobiledevice3.services.springboard import SpringBoardServicesService
+
+    async def _read():
+        async with SpringBoardServicesService(lockdown) as sbs:
+            return await sbs.get_icon_state(format_version="2")
+
+    raw_state = _run(_read())
+    return parse_layout_state(raw_state)
 
 
 def write_layout(lockdown, state) -> None:

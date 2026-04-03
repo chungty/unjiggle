@@ -104,10 +104,43 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                 if extracted:
                     _raw_add_to_folder(raw, op.folder_name, extracted)
 
+        elif op.action == "compact_to_single_page":
+            extracted = _raw_extract_apps(raw, op.bundle_ids)
+            _set_pages(raw, [extracted] if extracted else [])
+
     # Clean up empty pages
     pages = _get_pages(raw)
     cleaned = [page for page in pages if page]
     _set_pages(raw, cleaned)
+
+    return raw
+
+
+def compact_to_single_page(
+    layout: HomeScreenLayout,
+    keep_visible_bundle_ids: list[str],
+    archive_bundle_ids: list[str],
+):
+    """Rebuild the home screen as a true one-page layout.
+
+    This is the public primitive behind the one-page preset: dock apps stay in
+    the dock, up to 24 kept apps stay visible on page 1, and everything else
+    disappears from the home screen so the result is honestly one page.
+    """
+    raw = copy.deepcopy(layout.raw)
+
+    keep_visible_bundle_ids = list(dict.fromkeys(keep_visible_bundle_ids))[:24]
+    archive_bundle_ids = list(dict.fromkeys(archive_bundle_ids))
+
+    first_page = _raw_extract_apps(raw, keep_visible_bundle_ids) if keep_visible_bundle_ids else []
+    _set_pages(raw, [first_page] if first_page else [])
+
+    if isinstance(raw, dict):
+        ignored = raw.get("ignored", [])
+        for bid in archive_bundle_ids:
+            if bid not in ignored:
+                ignored.append(bid)
+        raw["ignored"] = ignored
 
     return raw
 

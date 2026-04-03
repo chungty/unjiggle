@@ -2,7 +2,7 @@
 
 
 from unjiggle.analyzer import LayoutOperation
-from unjiggle.layout_engine import apply_operations
+from unjiggle.layout_engine import apply_operations, compact_to_single_page
 from unjiggle.models import HomeScreenLayout
 
 
@@ -263,3 +263,38 @@ class TestApplyOperations:
                     assert "com.twitter.twitter" in folder_bids  # Others remain
                     return
         assert False, "Social folder not found"
+
+    def test_compact_to_single_page_keeps_only_requested_apps(self):
+        raw = _make_raw_layout()
+        layout = _make_layout_with_raw(raw)
+
+        result = compact_to_single_page(
+            layout,
+            keep_visible_bundle_ids=[
+                "com.apple.Maps",
+                "com.spotify.client",
+                "com.tinyspeck.chatlyio",
+            ],
+            archive_bundle_ids=[
+                "com.darksky.darksky",
+                "com.carrotweather.CARROT",
+                "com.apple.weather",
+                "com.hp.printer",
+                "com.canon.print",
+                "com.ibm.watson.ios",
+                "com.shazam.Shazam",
+                "com.facebook.Facebook",
+                "com.twitter.twitter",
+                "com.instagram.Instagram",
+                "com.notion.Notion",
+            ],
+        )
+
+        assert len(result["iconLists"]) == 1
+        page1_strings = [item for item in result["iconLists"][0] if isinstance(item, str)]
+        assert page1_strings == [
+            "com.apple.Maps",
+            "com.spotify.client",
+            "com.tinyspeck.chatlyio",
+        ]
+        assert "com.darksky.darksky" in result["ignored"]

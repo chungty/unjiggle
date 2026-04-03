@@ -96,7 +96,7 @@ def compute_swipe_tax(layout: HomeScreenLayout, metadata: dict[str, dict]) -> Sw
         savings=savings,
         worst_offenders=worst,
         per_app=all_costs,
-        headline=f"You waste {savings:,} swipes per year",
+        headline=_build_headline(savings, worst),
     )
 
 
@@ -134,6 +134,18 @@ def _cost(bundle_id: str, page: int, in_folder: bool, metadata: dict, usage: dic
         estimated_daily_opens=round(daily_opens, 1),
         annual_wasted_swipes=annual_wasted,
     )
+
+
+def _build_headline(savings: int, worst: list[AppSwipeCost]) -> str:
+    """Build a headline that adds context beyond the raw number."""
+    if worst:
+        top_name = worst[0].name
+        return f"{top_name} is your biggest swipe tax offender"
+    if savings >= 10000:
+        return "Your layout costs you serious thumb mileage"
+    if savings >= 5000:
+        return "Reorganizing could save thousands of swipes"
+    return "Your layout is fairly efficient"
 
 
 def _optimal_swipes(all_costs: list[AppSwipeCost]) -> int:

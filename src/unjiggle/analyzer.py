@@ -21,7 +21,7 @@ from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 @dataclass
 class LayoutOperation:
     """A single validated layout change."""
-    action: str  # "move_to_app_library", "delete", "move_to_page", "create_folder", "rename_folder", "move_to_folder"
+    action: str  # "move_to_app_library", "delete", "move_to_page", "create_folder", "rename_folder", "move_to_folder", "compact_to_single_page"
     bundle_ids: list[str] = field(default_factory=list)
     target_page: int | None = None
     folder_name: str | None = None
@@ -355,6 +355,21 @@ def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperatio
                         else:
                             folder.pages.append(apps)
                         break
+
+        elif op.action == "compact_to_single_page":
+            items = _extract_apps_from_layout(preview, op.bundle_ids)
+            preview.pages = [items] if items else []
+
+    # Clean up empty folders from pages
+    for page in preview.pages:
+        to_remove = []
+        for i, item in enumerate(page):
+            if item.is_folder:
+                total_apps = sum(len(fp) for fp in item.folder.pages)
+                if total_apps == 0:
+                    to_remove.append(i)
+        for i in reversed(to_remove):
+            page.pop(i)
 
     # Clean up empty pages
     preview.pages = [p for p in preview.pages if p]

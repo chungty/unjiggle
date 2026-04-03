@@ -267,7 +267,8 @@ def _obituary_rule_based(dead_apps: list[dict]) -> ObituaryResult:
         ],
         "Productivity": [
             "Ironic cause of death: you were too busy to use it.",
-            "Replaced by the notes app you already had.",
+            "Replaced by whatever came pre-installed.",
+            "Downloaded on a Sunday planning spree. Forgotten by Monday.",
         ],
         "Utilities": [
             "Replaced by something the phone already does.",
@@ -316,9 +317,18 @@ def _obituary_rule_based(dead_apps: list[dict]) -> ObituaryResult:
         if app.get("in_folder"):
             location = f"a folder on page {page}"
 
-        eulogy = f"Found on {location}. {cause}"
+        # Eulogy is the narrative context; cause is the witty one-liner (kept distinct)
+        eulogy = f"Found on {location}."
         if "not updated since" in " ".join(reasons):
             eulogy += f" Last updated: {died}."
+        elif "not opened in" in " ".join(reasons):
+            days = next((r for r in reasons if "not opened in" in r), "")
+            eulogy += f" {days.capitalize()}." if days else ""
+        elif "last opened" in " ".join(reasons):
+            days = next((r for r in reasons if "last opened" in r), "")
+            eulogy += f" {days.capitalize()}." if days else ""
+        else:
+            eulogy += f" Buried since {died}." if died != "recently" else ""
 
         obituaries.append(Obituary(
             app_name=name,

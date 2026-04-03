@@ -113,7 +113,14 @@ def test_headline_format():
     )
     metadata = {"com.example.a": _meta("App", "Social")}
     tax = compute_swipe_tax(layout, metadata)
-    assert "swipes per year" in tax.headline
+    assert "App" in tax.headline  # top offender name appears in headline
+
+
+def test_headline_no_offenders():
+    """Headline falls back to generic message when no offenders exist."""
+    layout = HomeScreenLayout(dock=[], pages=[])
+    tax = compute_swipe_tax(layout, {})
+    assert tax.headline == "Your layout is fairly efficient"
 
 
 def test_empty_layout():

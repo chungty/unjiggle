@@ -102,6 +102,28 @@ class TestPreviewOperations:
         preview = preview_operations(chaotic_layout, ops)
         assert preview.page_count < chaotic_layout.page_count
 
+    def test_empty_folders_removed(self):
+        """Folders with all apps removed should be cleaned up."""
+        from tests.conftest import make_app, make_folder
+        layout = HomeScreenLayout(
+            dock=[make_app("com.dock.app")],
+            pages=[
+                [make_app("com.keep.app"), make_folder("Utils", ["com.remove.a", "com.remove.b"])],
+                [make_folder("Empty", ["com.remove.c"])],
+            ],
+        )
+        ops = [LayoutOperation(
+            action="move_to_app_library",
+            bundle_ids=["com.remove.a", "com.remove.b", "com.remove.c"],
+        )]
+        preview = preview_operations(layout, ops)
+        # Empty folder "Empty" and its page should be gone
+        assert preview.page_count == 1
+        folder_names = [f.display_name for f in preview.all_folders()]
+        assert "Empty" not in folder_names
+        # "Utils" folder should also be gone (all apps removed)
+        assert "Utils" not in folder_names
+
     def test_multiple_operations_compound(self, chaotic_layout):
         """Multiple operations should accumulate."""
         ops = [

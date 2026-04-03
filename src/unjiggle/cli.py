@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json as _json
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -39,12 +40,12 @@ def main(ctx):
         console.print("  [bold]unjiggle suggest[/bold]         Interactive walkthrough with apply")
         console.print("  [bold]unjiggle report[/bold]          Generate shareable report card")
         console.print()
-        console.print("  [bold magenta]Viral features:[/bold magenta]")
+        console.print("  [bold magenta]Shareable diagnostics:[/bold magenta]")
         console.print("  [bold]unjiggle mirror[/bold]           Personality roast from your app collection")
         console.print("  [bold]unjiggle obituary[/bold]         Eulogies for your dead apps")
         console.print("  [bold]unjiggle swipetax[/bold]         How many swipes your layout wastes")
         console.print()
-        console.print(f"  [dim]GUI coming soon → {WEBSITE_URL}[/dim]")
+        console.print(f"  [dim]Separate native Mac app → {WEBSITE_URL}[/dim]")
         console.print(f"  [dim]Star us on GitHub → {GITHUB_URL}[/dim]\n")
 
 
@@ -157,7 +158,7 @@ def go(api_key: str | None, model: str | None):
     console.print("    ⚰️  [bold]unjiggle obituary[/bold] for eulogies of your dead apps")
     console.print(f"    ⭐ Star us: {GITHUB_URL}")
     console.print()
-    console.print("  [dim]A native Mac app with live preview, drag-and-drop, and animated before/after is coming soon.[/dim]")
+    console.print("  [dim]A separate native Mac app uses this engine for live preview and before/after flows.[/dim]")
     console.print(f"  [dim]Sign up: {WEBSITE_URL}[/dim]\n")
 
     # Analytics opt-in (once, first run only)
@@ -590,7 +591,7 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         console.print("  [bold]Share your transformation:[/bold]")
         console.print("    [bold]unjiggle report --open[/bold] to generate a before/after share card")
         console.print()
-        console.print("  [dim]Love Unjiggle? A native Mac app with live preview is coming.[/dim]")
+        console.print("  [dim]Love Unjiggle? A separate native Mac app builds on this engine.[/dim]")
         console.print(f"  [dim]Sign up: {WEBSITE_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
     else:
         console.print("  [yellow]Cancelled.[/yellow] No changes made.\n")
@@ -671,7 +672,7 @@ def report(api_key: str | None, model: str, output: str | None, open_browser: bo
     console.print("  [bold]Share it:[/bold] Screenshot the card and post it!")
     console.print("  [bold]Fix it:[/bold]  [bold]unjiggle suggest[/bold] to apply AI recommendations")
     console.print()
-    console.print("  [dim]Love Unjiggle? A native Mac app with live preview + slider is coming.[/dim]")
+    console.print("  [dim]Love Unjiggle? A separate native Mac app builds on this engine.[/dim]")
     console.print(f"  [dim]Sign up: {WEBSITE_URL}  |  Star us: {GITHUB_URL}[/dim]\n")
 
 
@@ -1005,6 +1006,1093 @@ def demo():
     console.print("  [dim]With a free API key from anthropic.com, the roasts and obituaries[/dim]")
     console.print("  [dim]get much sharper — personal, witty, and specific to your apps.[/dim]\n")
     console.print(f"  [dim]{WEBSITE_URL}[/dim]\n")
+
+
+# ---------------------------------------------------------------------------
+# JSON API command group — structured output for the Mac app (no Rich, no TTY)
+# ---------------------------------------------------------------------------
+
+
+def _json_out(data: dict) -> None:
+    """Print JSON to stdout and exit cleanly."""
+    click.echo(_json.dumps(data, ensure_ascii=False))
+
+
+def _json_err(message: str) -> None:
+    """Print a JSON error to stdout and exit with code 1."""
+    click.echo(_json.dumps({"error": message}, ensure_ascii=False))
+    sys.exit(1)
+
+
+def _device_dict(device) -> dict:
+    return {
+        "name": device.name,
+        "model": device.model,
+        "ios_version": device.ios_version,
+    }
+
+
+def _layout_items_to_json(items, metadata: dict) -> list:
+    """Convert layout items into tagged JSON matching the Swift LayoutItem enum."""
+    output = []
+    for item in items:
+        if item.is_app:
+            meta = metadata.get(item.app.bundle_id, {})
+            output.append({
+                "type": "app",
+                "app": {
+                    "bundle_id": item.app.bundle_id,
+                    "display_name": meta.get("name", item.app.bundle_id.split(".")[-1]) if meta else item.app.bundle_id.split(".")[-1],
+                    "category": meta.get("super_category", "Other") if meta else "Other",
+                },
+            })
+        elif item.is_folder:
+            folder_pages = []
+            for fpage in item.folder.pages:
+                fpage_apps = []
+                for app in fpage:
+                    fmeta = metadata.get(app.bundle_id, {})
+                    fpage_apps.append({
+                        "bundle_id": app.bundle_id,
+                        "display_name": fmeta.get("name", app.bundle_id.split(".")[-1]) if fmeta else app.bundle_id.split(".")[-1],
+                        "category": fmeta.get("super_category", "Other") if fmeta else "Other",
+                    })
+                folder_pages.append(fpage_apps)
+            output.append({
+                "type": "folder",
+                "folder": {
+                    "display_name": item.folder.display_name,
+                    "apps": folder_pages,
+                },
+            })
+        elif item.is_widget:
+            output.append({
+                "type": "widget",
+                "widget": {
+                    "container_bundle_id": item.widget.container_bundle_id,
+                    "grid_size": item.widget.grid_size.value,
+                },
+            })
+    return output
+
+
+def _layout_to_pages_json(layout, metadata: dict) -> list:
+    """Convert layout pages to tagged JSON matching the Swift LayoutItem enum."""
+    return [_layout_items_to_json(page, metadata) for page in layout.pages]
+
+
+def _layout_summary_to_json(layout, metadata: dict) -> dict:
+    return {
+        "total_apps": layout.total_apps,
+        "page_count": layout.page_count,
+        "folder_count": len(layout.all_folders()),
+        "dock_items": len(layout.dock),
+        "dock": _layout_items_to_json(layout.dock, metadata),
+        "pages": _layout_to_pages_json(layout, metadata),
+    }
+
+
+def _operation_to_json(op) -> dict:
+    op_dict = {
+        "action": op.action,
+        "bundle_ids": op.bundle_ids,
+    }
+    if op.target_page is not None:
+        op_dict["target_page"] = op.target_page
+    if op.folder_name is not None:
+        op_dict["folder_name"] = op.folder_name
+    if op.old_name is not None:
+        op_dict["old_name"] = op.old_name
+    if op.gratitude is not None:
+        op_dict["gratitude"] = op.gratitude
+    return op_dict
+
+
+def _score_trend(before_score: int, after_score: int) -> str:
+    if after_score > before_score:
+        return "improved"
+    if after_score < before_score:
+        return "worse"
+    return "neutral"
+
+
+def _swipe_tax_to_json(tax) -> dict:
+    worst = []
+    for app in tax.worst_offenders:
+        worst.append({
+            "name": app.name,
+            "bundle_id": app.bundle_id,
+            "page": app.page,
+            "in_folder": app.in_folder,
+            "annual_wasted_swipes": app.annual_wasted_swipes,
+        })
+    return {
+        "total_annual": tax.total_annual_swipes,
+        "optimal_annual": tax.optimal_annual_swipes,
+        "savings": tax.savings,
+        "headline": tax.headline,
+        "worst_offenders": worst,
+    }
+
+
+def _mirror_to_json(result) -> dict:
+    return {
+        "roast": result.roast,
+        "phases": [
+            {"name": p.name, "apps": p.apps, "narrative": p.narrative}
+            for p in result.phases
+        ],
+        "contradictions": [
+            {
+                "tension": c.tension,
+                "apps_a": c.apps_a,
+                "apps_b": c.apps_b,
+                "roast": c.roast,
+            }
+            for c in result.contradictions
+        ],
+        "guilty_pleasure": result.guilty_pleasure,
+        "one_line": result.one_line,
+    }
+
+
+def _obituary_to_json(result) -> dict:
+    return {
+        "total_dead": result.total_dead,
+        "obituaries": [
+            {
+                "app_name": o.app_name,
+                "bundle_id": o.bundle_id,
+                "born": o.born,
+                "died": o.died,
+                "cause_of_death": o.cause_of_death,
+                "eulogy": o.eulogy,
+                "survived_by": o.survived_by,
+            }
+            for o in result.obituaries
+        ],
+        "graveyard_summary": result.graveyard_summary,
+    }
+
+
+def _analysis_to_json(result) -> dict:
+    observations = []
+    for obs in result.observations:
+        observations.append({
+            "track": obs.track,
+            "title": obs.title,
+            "narrative": obs.narrative,
+            "operations": [_operation_to_json(op) for op in obs.operations],
+        })
+    return {
+        "observations": observations,
+        "personality": result.personality,
+        "archetype": result.archetype,
+    }
+
+
+@main.group()
+def json():
+    """Machine-readable JSON output for the Mac app. No Rich formatting."""
+    pass
+
+
+@json.command(name="status")
+def json_status():
+    """Check device connection. Returns JSON with connected status."""
+    from unjiggle.device import connect
+
+    try:
+        _lockdown, device = connect()
+        _json_out({"connected": True, "device": _device_dict(device)})
+    except Exception:
+        _json_out({"connected": False})
+
+
+@json.command(name="scan")
+def json_scan():
+    """Full layout data as JSON."""
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+
+    try:
+        lockdown, device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
+    metadata = enrich_layout(layout)
+
+    _json_out({
+        "device": _device_dict(device),
+        "total_apps": layout.total_apps,
+        "page_count": layout.page_count,
+        "folder_count": len(layout.all_folders()),
+        "dock_items": len(layout.dock),
+        "pages": _layout_to_pages_json(layout, metadata),
+    })
+
+
+@json.command(name="diagnose")
+def json_diagnose():
+    """Score + archetype + swipe tax in one call."""
+    from unjiggle.archetypes import assign_archetype
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.scoring import compute_score
+    from unjiggle.swipetax import compute_swipe_tax
+
+    try:
+        lockdown, device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
+    metadata = enrich_layout(layout)
+    score = compute_score(layout, metadata)
+    archetype, tagline = assign_archetype(layout, metadata)
+    tax = compute_swipe_tax(layout, metadata)
+
+    _json_out({
+        "score": {
+            "total": round(score.total),
+            "label": score.label,
+            "page_efficiency": round(score.page_efficiency),
+            "category_coherence": round(score.category_coherence),
+            "folder_usage": round(score.folder_usage),
+            "dock_quality": round(score.dock_quality),
+        },
+        "archetype": archetype,
+        "tagline": tagline,
+        "swipe_tax": _swipe_tax_to_json(tax),
+    })
+
+
+@json.command(name="mirror")
+@click.option("--api-key", envvar=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], default=None)
+@click.option("--model", default=None)
+def json_mirror(api_key: str | None, model: str | None):
+    """Personality roast as JSON."""
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.mirror import generate_mirror
+    from unjiggle.scoring import compute_score
+
+    try:
+        lockdown, device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
+    metadata = enrich_layout(layout)
+    score = compute_score(layout, metadata)
+
+    try:
+        result = generate_mirror(layout, metadata, score, api_key=api_key, model=model)
+    except Exception as e:
+        _json_err(f"Mirror generation failed: {e}")
+
+    _json_out(_mirror_to_json(result))
+
+
+@json.command(name="obituary")
+@click.option("--api-key", envvar=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], default=None)
+@click.option("--model", default=None)
+def json_obituary(api_key: str | None, model: str | None):
+    """Dead app eulogies as JSON."""
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.obituary import generate_obituaries
+
+    try:
+        lockdown, device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
+    metadata = enrich_layout(layout)
+
+    try:
+        result = generate_obituaries(layout, metadata, api_key=api_key, model=model)
+    except Exception as e:
+        _json_err(f"Obituary generation failed: {e}")
+
+    _json_out(_obituary_to_json(result))
+
+
+PRESET_CHOICES = ("focus", "relax", "minimal", "beautiful")
+
+# Category priority tiers for preset-based transformations
+_FOCUS_PAGE1_CATS = {"Productivity", "Utilities", "System", "Finance", "Education"}
+_FOCUS_LATER_CATS = {"Social", "Entertainment", "Games"}
+_RELAX_PAGE1_CATS = {"Entertainment", "Games", "Social"}
+_RELAX_LATER_CATS = {"Productivity", "Finance", "Education"}
+_MINIMAL_KEEP_CATS = {"Social", "Productivity", "Utilities", "System"}
+
+# Color sort order for the "beautiful" preset (based on CATEGORY_COLORS hues)
+_CATEGORY_COLOR_ORDER = [
+    "Games",          # Red
+    "Health",         # Orange
+    "News",           # Yellow
+    "Productivity",   # Green
+    "Finance",        # Teal
+    "Education",      # Cyan
+    "Social",         # Blue
+    "Entertainment",  # Purple
+    "Travel",         # Violet
+    "Shopping",       # Pink
+    "Utilities",      # Gray
+    "System",         # Dark gray
+    "Other",          # Light gray
+]
+
+
+def _get_app_category(bundle_id: str, metadata: dict) -> str:
+    """Get the super_category for a bundle_id from metadata."""
+    meta = metadata.get(bundle_id, {})
+    return meta.get("super_category", "Other") if meta else "Other"
+
+
+def _get_app_name(bundle_id: str, metadata: dict) -> str:
+    """Get the display name for a bundle_id from metadata."""
+    meta = metadata.get(bundle_id, {})
+    return meta.get("name", bundle_id.split(".")[-1]) if meta else bundle_id.split(".")[-1]
+
+
+def _collect_all_apps_with_positions(layout, metadata: dict) -> list[dict]:
+    """Build a list of all non-dock apps with their current page, category, name."""
+    apps = []
+    for page_idx, page in enumerate(layout.pages):
+        for item in page:
+            if item.is_app:
+                bid = item.app.bundle_id
+                apps.append({
+                    "bundle_id": bid,
+                    "name": _get_app_name(bid, metadata),
+                    "category": _get_app_category(bid, metadata),
+                    "from_page": page_idx + 1,  # 1-indexed for display
+                })
+            elif item.is_folder:
+                for fpage in item.folder.pages:
+                    for app in fpage:
+                        bid = app.bundle_id
+                        apps.append({
+                            "bundle_id": bid,
+                            "name": _get_app_name(bid, metadata),
+                            "category": _get_app_category(bid, metadata),
+                            "from_page": page_idx + 1,
+                        })
+    return apps
+
+
+def _transform_preview_payload(
+    intent: str,
+    layout,
+    metadata: dict,
+    before_score: int,
+    after_score: int,
+    before_pages: int,
+    after_pages: int,
+    changes: list[dict],
+    operations: list,
+    proposed_layout=None,
+) -> dict:
+    moved = sum(1 for c in changes if c["action"] == "move_to_page")
+    archived = sum(1 for c in changes if c["action"] in ("move_to_app_library", "delete"))
+    new_folders = sum(1 for c in changes if c["action"] == "create_folder")
+    parts = []
+    if moved:
+        parts.append(f"Moved {moved} apps")
+    if archived:
+        parts.append(f"archived {archived}")
+    if new_folders:
+        parts.append(f"created {new_folders} folders")
+    summary = ", ".join(parts) if parts else "No changes needed"
+    trend = _score_trend(before_score, after_score)
+
+    payload = {
+        "intent": intent,
+        "before_score": before_score,
+        "after_score": after_score,
+        "score_delta": after_score - before_score,
+        "score_trend": trend,
+        "score_improved": trend == "improved",
+        "before_pages": before_pages,
+        "after_pages": after_pages,
+        "moved": moved,
+        "archived": archived,
+        "new_folders": new_folders,
+        "changes": changes,
+        "operations": [_operation_to_json(op) for op in operations],
+        "summary": summary,
+        "current_layout": _layout_summary_to_json(layout, metadata),
+    }
+    if proposed_layout is not None:
+        payload["proposed_layout"] = _layout_summary_to_json(proposed_layout, metadata)
+    return payload
+
+
+def _build_minimal_one_page_plan(layout, metadata: dict) -> tuple[list[str], list[str]]:
+    """Return (keep_visible_bundle_ids, archive_bundle_ids) for the one-page preset."""
+    all_apps = _collect_all_apps_with_positions(layout, metadata)
+
+    dock_bids = set()
+    for item in layout.dock:
+        if item.is_app:
+            dock_bids.add(item.app.bundle_id)
+
+    priority_apps = [a for a in all_apps if a["category"] in _MINIMAL_KEEP_CATS]
+    keep_visible = []
+    seen = set()
+    for app in priority_apps:
+        bid = app["bundle_id"]
+        if bid in seen or bid in dock_bids:
+            continue
+        keep_visible.append(bid)
+        seen.add(bid)
+        if len(keep_visible) >= 24:
+            break
+
+    if len(keep_visible) < 24:
+        for app in all_apps:
+            bid = app["bundle_id"]
+            if bid in seen or bid in dock_bids:
+                continue
+            keep_visible.append(bid)
+            seen.add(bid)
+            if len(keep_visible) >= 24:
+                break
+
+    archive_bids = []
+    archived_seen = set()
+    for app in all_apps:
+        bid = app["bundle_id"]
+        if bid in dock_bids or bid in keep_visible or bid in archived_seen:
+            continue
+        archive_bids.append(bid)
+        archived_seen.add(bid)
+
+    return keep_visible, archive_bids
+
+
+def _generate_preset_transform(preset: str, layout, metadata: dict, score) -> dict:
+    """Generate a TransformPreview dict for a rule-based preset."""
+    from unjiggle.analyzer import LayoutOperation, preview_operations
+    from unjiggle.scoring import compute_score
+
+    all_apps = _collect_all_apps_with_positions(layout, metadata)
+    changes = []
+    operations = []
+
+    if preset == "focus":
+        for app in all_apps:
+            cat = app["category"]
+            if cat in _FOCUS_PAGE1_CATS and app["from_page"] != 1:
+                changes.append({
+                    "action": "move_to_page",
+                    "bundle_id": app["bundle_id"],
+                    "app_name": app["name"],
+                    "from_page": app["from_page"],
+                    "to_page": 1,
+                })
+                operations.append(LayoutOperation(
+                    action="move_to_page",
+                    bundle_ids=[app["bundle_id"]],
+                    target_page=0,  # 0-indexed
+                ))
+            elif cat in _FOCUS_LATER_CATS and app["from_page"] <= 2:
+                target = max(3, layout.page_count)
+                changes.append({
+                    "action": "move_to_page",
+                    "bundle_id": app["bundle_id"],
+                    "app_name": app["name"],
+                    "from_page": app["from_page"],
+                    "to_page": target,
+                })
+                operations.append(LayoutOperation(
+                    action="move_to_page",
+                    bundle_ids=[app["bundle_id"]],
+                    target_page=min(target - 1, len(layout.pages) - 1),
+                ))
+
+    elif preset == "relax":
+        for app in all_apps:
+            cat = app["category"]
+            if cat in _RELAX_PAGE1_CATS and app["from_page"] != 1:
+                changes.append({
+                    "action": "move_to_page",
+                    "bundle_id": app["bundle_id"],
+                    "app_name": app["name"],
+                    "from_page": app["from_page"],
+                    "to_page": 1,
+                })
+                operations.append(LayoutOperation(
+                    action="move_to_page",
+                    bundle_ids=[app["bundle_id"]],
+                    target_page=0,
+                ))
+            elif cat in _RELAX_LATER_CATS and app["from_page"] <= 2:
+                target = max(3, layout.page_count)
+                changes.append({
+                    "action": "move_to_page",
+                    "bundle_id": app["bundle_id"],
+                    "app_name": app["name"],
+                    "from_page": app["from_page"],
+                    "to_page": target,
+                })
+                operations.append(LayoutOperation(
+                    action="move_to_page",
+                    bundle_ids=[app["bundle_id"]],
+                    target_page=min(target - 1, len(layout.pages) - 1),
+                ))
+
+    elif preset == "minimal":
+        keep_visible_bids, archive_bids = _build_minimal_one_page_plan(layout, metadata)
+        keep_visible_set = set(keep_visible_bids)
+
+        for app in all_apps:
+            if app["bundle_id"] in archive_bids:
+                changes.append({
+                    "action": "move_to_app_library",
+                    "bundle_id": app["bundle_id"],
+                    "app_name": app["name"],
+                    "from_page": app["from_page"],
+                    "to_page": None,
+                })
+                operations.append(LayoutOperation(
+                    action="move_to_app_library",
+                    bundle_ids=[app["bundle_id"]],
+                ))
+            elif app["bundle_id"] in keep_visible_set and app["from_page"] != 1:
+                changes.append({
+                    "action": "move_to_page",
+                    "bundle_id": app["bundle_id"],
+                    "app_name": app["name"],
+                    "from_page": app["from_page"],
+                    "to_page": 1,
+                })
+
+        if keep_visible_bids:
+            operations.append(LayoutOperation(
+                action="compact_to_single_page",
+                bundle_ids=keep_visible_bids,
+            ))
+
+    elif preset == "beautiful":
+        # Sort all apps by category color, grouping same-color apps together
+        color_order = {cat: i for i, cat in enumerate(_CATEGORY_COLOR_ORDER)}
+
+        sorted_apps = sorted(all_apps, key=lambda a: (
+            color_order.get(a["category"], 99),
+            a["name"],
+        ))
+
+        # Assign to pages (24 per page)
+        for i, app in enumerate(sorted_apps):
+            target_page = (i // 24) + 1  # 1-indexed
+            if app["from_page"] != target_page:
+                changes.append({
+                    "action": "move_to_page",
+                    "bundle_id": app["bundle_id"],
+                    "app_name": app["name"],
+                    "from_page": app["from_page"],
+                    "to_page": target_page,
+                })
+                # Only create operations for pages that exist
+                target_idx = min(target_page - 1, len(layout.pages) - 1)
+                operations.append(LayoutOperation(
+                    action="move_to_page",
+                    bundle_ids=[app["bundle_id"]],
+                    target_page=target_idx,
+                ))
+
+    # Compute before/after scores and page counts
+    before_score = round(score.total)
+    before_pages = layout.page_count
+    if operations:
+        proposed_layout = preview_operations(layout, operations)
+        after_breakdown = compute_score(proposed_layout, metadata)
+        after_score = round(after_breakdown.total)
+        after_pages = proposed_layout.page_count
+    else:
+        proposed_layout = None
+        after_score = before_score
+        after_pages = before_pages
+
+    return _transform_preview_payload(
+        intent=preset,
+        layout=layout,
+        metadata=metadata,
+        before_score=before_score,
+        after_score=after_score,
+        before_pages=before_pages,
+        after_pages=after_pages,
+        changes=changes,
+        operations=operations,
+        proposed_layout=proposed_layout,
+    )
+
+
+def _generate_intent_transform(
+    intent: str, layout, metadata: dict, score, api_key: str, model: str | None,
+) -> dict:
+    """Generate a TransformPreview using LLM analysis framed around the user's intent."""
+    from unjiggle.analyzer import (
+        ANALYSIS_TOOL,
+        _build_context,
+        _parse_result,
+        preview_operations,
+    )
+    from unjiggle.scoring import compute_score as _compute_score
+
+    context = _build_context(layout, metadata, score)
+
+    intent_prompt = (
+        f"The user wants to transform their home screen with this intent: \"{intent}\"\n\n"
+        f"Analyze the layout and generate observations and operations that specifically "
+        f"serve this intent. Focus your suggestions on achieving what the user asked for.\n\n"
+        f"{context}"
+    )
+
+    intent_system = (
+        "You are Unjiggle's AI layout transformation engine. The user has a specific "
+        "intent for how they want their home screen to feel. Generate observations and "
+        "operations that transform the layout to match their intent.\n\n"
+        "Follow the same output format as a standard analysis, but tailor every suggestion "
+        "to the user's stated intent. Be opinionated and decisive.\n\n"
+        "RULES:\n"
+        "- Reference apps by EXACT bundle ID from the input\n"
+        "- Each observation should directly serve the user's intent\n"
+        "- Be specific about which apps to move and where\n"
+        "- 3-5 observations is ideal\n"
+    )
+
+    # Detect provider
+    if api_key.startswith("sk-"):
+        provider = "openai"
+    else:
+        provider = "anthropic"
+
+    if provider == "openai":
+        import openai as _openai
+
+        client = _openai.OpenAI(api_key=api_key)
+        openai_tool = {
+            "type": "function",
+            "function": {
+                "name": ANALYSIS_TOOL["name"],
+                "description": ANALYSIS_TOOL["description"],
+                "parameters": ANALYSIS_TOOL["input_schema"],
+            },
+        }
+        response = client.chat.completions.create(
+            model=model or "gpt-4.1",
+            max_tokens=4096,
+            messages=[
+                {"role": "system", "content": intent_system},
+                {"role": "user", "content": intent_prompt},
+            ],
+            tools=[openai_tool],
+            tool_choice={"type": "function", "function": {"name": "submit_analysis"}},
+        )
+        for choice in response.choices:
+            if choice.message.tool_calls:
+                for tc in choice.message.tool_calls:
+                    if tc.function.name == "submit_analysis":
+                        data = _json.loads(tc.function.arguments)
+                        result = _parse_result(data, layout)
+                        break
+                else:
+                    continue
+                break
+        else:
+            raise RuntimeError("OpenAI did not return a submit_analysis function call")
+    else:
+        try:
+            import anthropic as _anthropic
+        except ImportError:
+            raise RuntimeError("anthropic package required. pip install anthropic")
+
+        client = _anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model=model or "claude-sonnet-4-20250514",
+            max_tokens=4096,
+            system=intent_system,
+            tools=[ANALYSIS_TOOL],
+            tool_choice={"type": "tool", "name": "submit_analysis"},
+            messages=[{"role": "user", "content": intent_prompt}],
+        )
+        result = None
+        for block in response.content:
+            if block.type == "tool_use" and block.name == "submit_analysis":
+                result = _parse_result(block.input, layout)
+                break
+        if result is None:
+            raise RuntimeError("Anthropic did not return a submit_analysis tool call")
+
+    # Convert AnalysisResult into TransformPreview format
+    all_ops = []
+    for obs in result.observations:
+        all_ops.extend(obs.operations)
+
+    changes = []
+    for op in all_ops:
+        for bid in op.bundle_ids:
+            change = {
+                "action": op.action,
+                "bundle_id": bid,
+                "app_name": _get_app_name(bid, metadata),
+            }
+            # Find current page
+            for page_idx, page in enumerate(layout.pages):
+                for item in page:
+                    if item.is_app and item.app.bundle_id == bid:
+                        change["from_page"] = page_idx + 1
+                        break
+                    elif item.is_folder:
+                        for fpage in item.folder.pages:
+                            if any(a.bundle_id == bid for a in fpage):
+                                change["from_page"] = page_idx + 1
+                                break
+            if "from_page" not in change:
+                change["from_page"] = None
+            change["to_page"] = (op.target_page + 1) if op.target_page is not None else None
+            changes.append(change)
+
+    before_score = round(score.total)
+    before_pages = layout.page_count
+    if all_ops:
+        proposed_layout = preview_operations(layout, all_ops)
+        after_breakdown = _compute_score(proposed_layout, metadata)
+        after_score = round(after_breakdown.total)
+        after_pages = proposed_layout.page_count
+    else:
+        proposed_layout = None
+        after_score = before_score
+        after_pages = before_pages
+
+    return _transform_preview_payload(
+        intent=intent,
+        layout=layout,
+        metadata=metadata,
+        before_score=before_score,
+        after_score=after_score,
+        before_pages=before_pages,
+        after_pages=after_pages,
+        changes=changes,
+        operations=all_ops,
+        proposed_layout=proposed_layout,
+    )
+
+
+@json.command(name="suggest")
+@click.option("--api-key", envvar=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], default=None)
+@click.option("--model", default=None)
+@click.option(
+    "--preset",
+    type=click.Choice(PRESET_CHOICES, case_sensitive=False),
+    default=None,
+    help="Rule-based layout preset: focus, relax, minimal, beautiful. No API key needed.",
+)
+@click.option(
+    "--intent",
+    default=None,
+    help="Free-text intent for LLM-powered transformation (requires API key).",
+)
+def json_suggest(
+    api_key: str | None,
+    model: str | None,
+    preset: str | None,
+    intent: str | None,
+):
+    """AI analysis with suggested operations as JSON.
+
+    Three modes:
+      --preset NAME    Rule-based transformation (no API key needed)
+      --intent TEXT    LLM-powered custom transformation (API key required)
+      (neither)        Rule-based archetype + observations (no API key needed),
+                       or full LLM analysis if --api-key is provided
+    """
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.scoring import compute_score
+
+    if preset and intent:
+        _json_err("Cannot use both --preset and --intent. Pick one.")
+
+    if intent and not api_key:
+        _json_err("--intent requires an API key. Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or pass --api-key.")
+
+    try:
+        lockdown, device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
+    metadata = enrich_layout(layout)
+    score = compute_score(layout, metadata)
+
+    # Mode 1: Preset-based transformation (no API key needed)
+    if preset:
+        try:
+            result = _generate_preset_transform(preset, layout, metadata, score)
+        except Exception as e:
+            _json_err(f"Preset transformation failed: {e}")
+        _json_out(result)
+        return
+
+    # Mode 2: Intent-based LLM transformation
+    if intent:
+        try:
+            result = _generate_intent_transform(
+                intent, layout, metadata, score, api_key, model,
+            )
+        except Exception as e:
+            _json_err(f"Intent transformation failed: {e}")
+        _json_out(result)
+        return
+
+    # Mode 3: No preset, no intent
+    if api_key:
+        # Full LLM analysis (original behavior)
+        from unjiggle.analyzer import analyze as run_analysis
+
+        try:
+            result = run_analysis(layout, metadata, score, api_key=api_key, model=model)
+        except Exception as e:
+            _json_err(f"Analysis failed: {e}")
+        _json_out(_analysis_to_json(result))
+    else:
+        # Rule-based fallback: archetype + observations without API key
+        from unjiggle.archetypes import assign_archetype
+        from unjiggle.swipetax import compute_swipe_tax
+
+        archetype, tagline = assign_archetype(layout, metadata)
+        tax = compute_swipe_tax(layout, metadata)
+
+        _json_out({
+            "observations": [],
+            "personality": tagline,
+            "archetype": archetype,
+            "score": {
+                "total": round(score.total),
+                "label": score.label,
+            },
+            "swipe_tax": _swipe_tax_to_json(tax),
+        })
+
+
+@json.command(name="restore")
+@click.argument("backup_file", type=click.Path(exists=True), required=True)
+def json_restore(backup_file: str):
+    """Restore a previously backed up layout and verify it."""
+    from unjiggle.device import connect, read_layout, restore_layout_from_file, write_layout
+
+    try:
+        lockdown, _device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    try:
+        raw_state = restore_layout_from_file(Path(backup_file))
+    except Exception as e:
+        _json_err(f"Failed to read backup: {e}")
+
+    write_layout(lockdown, raw_state)
+    verify = read_layout(lockdown)
+
+    expected_json = _json.dumps(raw_state, default=str, sort_keys=True)
+    restored_json = _json.dumps(verify.raw, default=str, sort_keys=True)
+    if expected_json != restored_json:
+        _json_err("Restore verification failed.")
+
+    _json_out({
+        "restored": True,
+        "backup": str(Path(backup_file)),
+        "result": {
+            "page_count": verify.page_count,
+            "total_apps": verify.total_apps,
+        },
+    })
+
+
+@json.command(name="render")
+@click.option(
+    "--card",
+    type=click.Choice(("score", "mirror", "obituary", "swipetax", "transform"), case_sensitive=False),
+    required=True,
+)
+@click.option(
+    "--action",
+    type=click.Choice(("preview", "clipboard", "save"), case_sensitive=False),
+    default="preview",
+)
+@click.option("--backup", default=None, help="Backup path required for transform cards.")
+@click.option("--api-key", envvar=["ANTHROPIC_API_KEY", "OPENAI_API_KEY"], default=None)
+@click.option("--model", default=None)
+def json_render(card: str, action: str, backup: str | None, api_key: str | None, model: str | None):
+    """Render a share card to PNG for preview, clipboard, or save."""
+    import shutil
+
+    from unjiggle.archetypes import assign_archetype
+    from unjiggle.cards import (
+        generate_mirror_card,
+        generate_obituary_card,
+        generate_swipetax_card,
+        generate_transform_card,
+        save_card,
+    )
+    from unjiggle.device import (
+        connect,
+        parse_layout_state,
+        read_layout,
+        restore_layout_from_file,
+    )
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.mirror import generate_mirror
+    from unjiggle.obituary import generate_obituaries
+    from unjiggle.render import copy_image, render_to_png
+    from unjiggle.scoring import compute_score
+    from unjiggle.swipetax import compute_swipe_tax
+    from unjiggle.visualize import generate_share_card
+
+    try:
+        lockdown, _device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    current_layout = read_layout(lockdown)
+    current_metadata = enrich_layout(current_layout)
+    timestamp = datetime.now().strftime('%Y%m%d-%H%M%S')
+    html_path = UNJIGGLE_DIR / "reports" / f"{card}-{timestamp}.html"
+
+    if card == "score":
+        score = compute_score(current_layout, current_metadata)
+        archetype, personality = assign_archetype(current_layout, current_metadata)
+        card_html = generate_share_card(
+            current_layout,
+            current_metadata,
+            score,
+            archetype=archetype,
+            personality=personality,
+        )
+    elif card == "mirror":
+        score = compute_score(current_layout, current_metadata)
+        mirror_result = generate_mirror(
+            current_layout, current_metadata, score, api_key=api_key, model=model,
+        )
+        card_html = generate_mirror_card(current_layout, current_metadata, mirror_result)
+    elif card == "obituary":
+        obituary_result = generate_obituaries(
+            current_layout, current_metadata, api_key=api_key, model=model,
+        )
+        card_html = generate_obituary_card(current_layout, current_metadata, obituary_result)
+    elif card == "swipetax":
+        tax = compute_swipe_tax(current_layout, current_metadata)
+        card_html = generate_swipetax_card(current_layout, current_metadata, tax)
+    else:
+        if not backup:
+            _json_err("--backup is required for transform cards.")
+        before_raw = restore_layout_from_file(Path(backup))
+        before_layout = parse_layout_state(before_raw)
+        before_metadata = enrich_layout(before_layout)
+        before_score = round(compute_score(before_layout, before_metadata).total)
+        after_score = round(compute_score(current_layout, current_metadata).total)
+        summary = (
+            f"{before_layout.page_count} pages down to {current_layout.page_count}. "
+            f"{max(before_layout.total_apps - current_layout.total_apps, 0)} apps tucked away."
+        )
+        merged_metadata = dict(before_metadata)
+        merged_metadata.update(current_metadata)
+        card_html = generate_transform_card(
+            before_layout,
+            current_layout,
+            before_score,
+            after_score,
+            summary,
+            merged_metadata,
+        )
+
+    save_card(card_html, html_path)
+    png_path = html_path.with_suffix(".png")
+    if not render_to_png(html_path, png_path):
+        _json_err("PNG render failed. Install a supported Chromium browser.")
+
+    output_path = png_path
+    if action == "clipboard":
+        if not copy_image(png_path):
+            _json_err("Failed to copy image to clipboard.")
+    elif action == "save":
+        output_path = Path.home() / "Downloads" / png_path.name
+        shutil.copy2(png_path, output_path)
+
+    _json_out({
+        "success": True,
+        "action": action,
+        "card": card,
+        "html_path": str(html_path),
+        "path": str(output_path),
+    })
+
+
+@json.command(name="apply")
+def json_apply():
+    """Apply operations from JSON on stdin."""
+    from unjiggle.analyzer import LayoutOperation
+    from unjiggle.device import connect, read_layout, write_layout
+    from unjiggle.layout_engine import apply_operations
+
+    try:
+        raw_input = click.get_text_stream("stdin").read()
+        data = _json.loads(raw_input)
+    except (ValueError, _json.JSONDecodeError) as e:
+        _json_err(f"Invalid JSON input: {e}")
+
+    operations_data = data.get("operations", [])
+    if not operations_data:
+        _json_err("No operations provided. Expected {\"operations\": [...]}")
+
+    try:
+        lockdown, device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
+
+    # Parse operations
+    ops = []
+    for op_data in operations_data:
+        ops.append(LayoutOperation(
+            action=op_data["action"],
+            bundle_ids=op_data.get("bundle_ids", []),
+            target_page=op_data.get("target_page"),
+            folder_name=op_data.get("folder_name"),
+            old_name=op_data.get("old_name"),
+            gratitude=op_data.get("gratitude"),
+        ))
+
+    # Safety: backup first
+    from unjiggle.safety import pre_write_safety_check
+    safe, backup_path = pre_write_safety_check(lockdown, layout)
+    if not safe:
+        _json_err("Safety check failed. No changes made.")
+
+    # Apply and write
+    modified_raw = apply_operations(layout, ops)
+    write_layout(lockdown, modified_raw)
+
+    # Verify
+    from unjiggle.device import read_layout as re_read
+    verify = re_read(lockdown)
+
+    _json_out({
+        "applied": len(ops),
+        "backup": str(backup_path),
+        "result": {
+            "page_count": verify.page_count,
+            "total_apps": verify.total_apps,
+        },
+    })
 
 
 if __name__ == "__main__":

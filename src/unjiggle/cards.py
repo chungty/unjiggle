@@ -1,4 +1,4 @@
-"""Share card generators for viral features.
+"""Share card generators for shareable diagnostics and transforms.
 
 Each card is 1080x1920 (Instagram Stories / iMessage optimized).
 Design system: #0a0a0a background, ambient category glow, SF Pro Display,
@@ -414,6 +414,11 @@ SWIPE_TAX_CARD_TEMPLATE = Template("""\
   font-size: 22px; font-weight: 500; color: rgba(255,255,255,0.5);
 }
 .savings-text strong { color: #4ade80; font-weight: 700; }
+
+.headline {
+  font-size: 24px; font-weight: 600; color: rgba(255,255,255,0.68);
+  max-width: 780px; line-height: 1.45;
+}
 </style>
 </head>
 <body>
@@ -456,8 +461,12 @@ SWIPE_TAX_CARD_TEMPLATE = Template("""\
       </div>
       {% endif %}
 
+      {% if headline %}
+      <div class="headline">{{ headline }}</div>
+      {% endif %}
+
       <div class="savings-text">
-        You could save <strong>{{ savings_formatted }} swipes</strong> every year
+        Current vs. calm: <strong>{{ savings_formatted }} swipes saved</strong> every year
       </div>
     </div>
 
@@ -487,5 +496,165 @@ def generate_swipetax_card(layout: HomeScreenLayout, metadata: dict, tax_result)
         optimal_formatted=f"{tax_result.optimal_annual_swipes:,}",
         optimal_pct=optimal_pct,
         offenders=offenders,
+        headline=tax_result.headline,
         glow_1=g1, glow_2=g2, glow_3=g3,
     )
+
+
+# ──────────────────────────────────────────────────
+# TRANSFORMATION CARD
+# ──────────────────────────────────────────────────
+
+TRANSFORM_CARD_TEMPLATE = Template("""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Unjiggle — Transformation</title>
+<style>
+""" + _BASE_CSS + """
+
+.scores {
+  display: flex; align-items: center; gap: 28px;
+}
+.score-box {
+  min-width: 280px;
+  padding: 28px 32px;
+  border-radius: 18px;
+  background: rgba(255,255,255,0.05);
+  border: 1px solid rgba(255,255,255,0.08);
+}
+.score-label {
+  font-size: 16px; font-weight: 600; letter-spacing: 3px;
+  text-transform: uppercase; color: rgba(255,255,255,0.3);
+}
+.score-value {
+  font-size: 120px; font-weight: 800; line-height: 1;
+  margin-top: 12px;
+}
+.score-value.before {
+  background: linear-gradient(180deg, #f97316 20%, #ef4444 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.score-value.after {
+  background: linear-gradient(180deg, #22c55e 20%, #4ade80 100%);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.score-sub {
+  font-size: 24px; font-weight: 600; color: rgba(255,255,255,0.65);
+  margin-top: 10px;
+}
+.transform-arrow {
+  font-size: 52px; color: rgba(255,255,255,0.25);
+}
+.transform-summary {
+  font-size: 28px; font-weight: 600; color: rgba(255,255,255,0.75);
+  max-width: 840px; line-height: 1.45;
+}
+.transform-stats {
+  display: flex; gap: 40px;
+}
+.transform-stat {
+  min-width: 180px;
+  padding: 20px 24px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
+}
+.transform-stat-value {
+  font-size: 42px; font-weight: 800; color: rgba(255,255,255,0.85);
+}
+.transform-stat-label {
+  font-size: 14px; font-weight: 600; letter-spacing: 3px;
+  text-transform: uppercase; color: rgba(255,255,255,0.3);
+  margin-top: 6px;
+}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="content">
+    <div class="top">
+      <div class="brand">Unjiggle</div>
+      <div class="card-title">Transformation</div>
+      <div class="top-stat">{{ headline }}</div>
+    </div>
+
+    <div class="middle">
+      <div class="scores">
+        <div class="score-box">
+          <div class="score-label">Before</div>
+          <div class="score-value before">{{ before_score }}</div>
+          <div class="score-sub">{{ before_pages }} pages &middot; {{ before_apps }} apps</div>
+        </div>
+        <div class="transform-arrow">&rarr;</div>
+        <div class="score-box">
+          <div class="score-label">After</div>
+          <div class="score-value after">{{ after_score }}</div>
+          <div class="score-sub">{{ after_pages }} page{% if after_pages != 1 %}s{% endif %} &middot; {{ after_apps }} apps</div>
+        </div>
+      </div>
+
+      <div class="transform-summary">{{ summary }}</div>
+
+      <div class="transform-stats">
+        <div class="transform-stat">
+          <div class="transform-stat-value">{{ score_delta }}</div>
+          <div class="transform-stat-label">Score Delta</div>
+        </div>
+        <div class="transform-stat">
+          <div class="transform-stat-value">{{ page_delta }}</div>
+          <div class="transform-stat-label">Pages Removed</div>
+        </div>
+        <div class="transform-stat">
+          <div class="transform-stat-value">{{ apps_delta }}</div>
+          <div class="transform-stat-label">Apps Hidden</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="bottom">
+      <div class="cta">Fix your home screen &rarr; <strong>unjiggle.com</strong></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>
+""")
+
+
+def generate_transform_card(
+    before_layout: HomeScreenLayout,
+    after_layout: HomeScreenLayout,
+    before_score: int,
+    after_score: int,
+    summary: str,
+    metadata: dict,
+) -> str:
+    g1, g2, g3 = _glow_colors(after_layout, metadata)
+    score_delta = after_score - before_score
+    page_delta = max(before_layout.page_count - after_layout.page_count, 0)
+    apps_delta = max(before_layout.total_apps - after_layout.total_apps, 0)
+    headline = "Before and after."
+    if after_score > before_score:
+        headline = "Cleaner, faster, calmer."
+    elif after_score == before_score:
+        headline = "Same score, better clarity."
+
+    return TRANSFORM_CARD_TEMPLATE.render(
+        before_score=before_score,
+        after_score=after_score,
+        before_pages=before_layout.page_count,
+        after_pages=after_layout.page_count,
+        before_apps=before_layout.total_apps,
+        after_apps=after_layout.total_apps,
+        summary=summary,
+        headline=headline,
+        score_delta=f"{score_delta:+d}",
+        page_delta=page_delta,
+        apps_delta=apps_delta,
+        glow_1=g1, glow_2=g2, glow_3=g3,
+    )
+

@@ -31,7 +31,7 @@ GENRE_MAP = {
     "Racing": "Games",
     "Role Playing": "Games",
     "Simulation": "Games",
-    "Sports": "Games",
+    "Sports": "Entertainment",
     "Strategy": "Games",
     "Trivia": "Games",
     "Word": "Games",
