@@ -1,11 +1,19 @@
 # Unjiggle
 
-**Your iPhone home screen is a mess. You know it. You've given up fixing it. Unjiggle fixes it for you.**
+Public engine and CLI for reading, diagnosing, and safely transforming iPhone home screen layouts over USB.
 
-Unjiggle is an AI-powered CLI that reads your iPhone home screen, scores your organization, roasts your app collection, writes obituaries for your dead apps, and generates share cards you'll actually want to post.
+This repository is the open-source core:
+- device connection and layout read/write
+- scoring, diagnostics, and shareable reports
+- safe transforms, backups, and restore
+- a machine-readable JSON API used by separate clients
+
+It is not the private product repo. Named growth mechanics, lifecycle funnels, streaks, and branded campaign wrappers do not belong here.
+
+Boundary details live in [ARCHITECTURE.md](ARCHITECTURE.md). Contribution rules live in [CONTRIBUTING.md](CONTRIBUTING.md).
 
 <p align="center">
-  <img src="assets/cli-demo.png" width="600" alt="unjiggle go — one command to scan, score, and analyze your iPhone">
+  <img src="assets/cli-demo.png" width="600" alt="Unjiggle CLI demo">
 </p>
 
 ## Quick Start
@@ -20,76 +28,74 @@ Connect your iPhone via USB, then:
 unjiggle go
 ```
 
-One command. It scans your phone, scores your organization, calculates your swipe tax, and generates a share card that auto-copies to your clipboard. Cmd+V to paste into iMessage, Twitter, or Instagram.
+That scans your phone, scores the layout, runs diagnostics, and generates a report.
 
-## Share Cards
+## What This Repo Owns
 
-Every feature generates a 1080x1350 share card that copies to your clipboard automatically. No screenshots needed — just Cmd+V.
-
-<p align="center">
-  <img src="assets/share-card.png" width="400" alt="Unjiggle share card — The Organized Maximalist, score 70/100">
-</p>
-
-## Features
-
-### Core (no API key needed)
+### Diagnostics
 
 | Command | What it does |
 |---------|-------------|
-| `unjiggle go` | Full experience: scan, score, archetype, swipe tax, share card |
-| `unjiggle swipetax` | How many unnecessary swipes your layout costs per year |
-| `unjiggle scan` | See your layout color-coded by category |
-| `unjiggle score` | Organization score (0-100) with breakdown |
-| `unjiggle demo` | Try it without a phone — see what the output looks like |
+| `unjiggle go` | Full scan, score, analysis, and report |
+| `unjiggle scan` | Show the current home screen layout |
+| `unjiggle score` | Compute the organization score |
+| `unjiggle analyze` | AI observations about the current layout |
+| `unjiggle mirror` | Personality-style diagnostic from the app collection |
+| `unjiggle obituary` | Dead-app graveyard analysis |
+| `unjiggle swipetax` | Estimate wasted swipes per year |
+| `unjiggle report` | Generate a shareable report card |
+| `unjiggle demo` | Run the CLI without a phone |
 
-### Viral features (works without API key, better with one)
-
-| Command | What it does |
-|---------|-------------|
-| `unjiggle mirror` | Personality roast from your app collection |
-| `unjiggle obituary` | Eulogies for your dead apps |
-
-These generate share cards with or without an API key. With Claude or GPT, the roasts are funnier and more personal. Without, you get a solid rule-based analysis.
-
-### AI-powered (needs API key)
+### Safe transforms
 
 | Command | What it does |
 |---------|-------------|
-| `unjiggle analyze` | Deep AI observations (Claude or GPT-4.1) |
-| `unjiggle suggest` | Interactive walkthrough — apply changes step by step |
-| `unjiggle suggest --apply-all` | Just Fix It mode — apply everything at once |
+| `unjiggle suggest` | Preview changes step by step |
+| `unjiggle suggest --apply-all` | Apply the full suggested transform |
+| `unjiggle backup` | Save the current layout before changes |
+| `unjiggle restore` | Restore a saved backup |
+| `unjiggle safety-test` | Verify the write path without changing layout |
 
-### Safety
+### Machine API
 
-| Command | What it does |
-|---------|-------------|
-| `unjiggle safety-test` | Prove read/write works (changes nothing) |
-| `unjiggle backup` | Save current layout |
-| `unjiggle restore` | Undo any changes |
+`unjiggle json ...` exposes structured output for external clients. That JSON API is public and stable enough to power separate frontends, including the private native Mac app.
 
 ## Requirements
 
-- **macOS** (USB communication with iPhone)
-- **iPhone connected via USB** with "Trust This Computer" accepted
-- **Python 3.10+**
-- **API key** (optional): set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` for AI features. Core features and share cards work without one.
+- macOS
+- iPhone connected via USB with "Trust This Computer" accepted
+- Python 3.10+
+- Optional API key: set `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` for AI features
 
 ## How It Works
 
-Unjiggle uses [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) to communicate with your iPhone's SpringBoard services over USB. It reads the `IconState` (your home screen layout), enriches it with App Store metadata, and generates observations and layout suggestions.
+Unjiggle uses [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) to communicate with iPhone SpringBoard services over USB. It reads `IconState`, enriches the layout with App Store metadata, computes diagnostics, previews transforms, and can safely write changes back after backup.
 
-On macOS 12-15, it can also read Screen Time data from `knowledgeC.db` for real app usage stats (last opened, daily opens). On newer macOS versions, it falls back to positional heuristics.
+On supported macOS versions it can also read Screen Time data from `knowledgeC.db` for usage-aware suggestions. Otherwise it falls back to positional heuristics.
 
-Share cards render to PNG via Chrome headless and auto-copy to your macOS clipboard.
+Share cards render to PNG via headless Chrome and copy cleanly to the macOS clipboard.
 
-The write path is validated on iPhone 16 Pro, iOS 26. Every write is preceded by a verified backup and an optional round-trip safety test.
+## Public vs. Private
 
-## GUI Coming Soon
+The public repo owns generic primitives and diagnostics:
+- layout read/write
+- score and analysis engines
+- shareable single-snapshot diagnostics
+- generic transforms such as a one-page preset
+- backup, restore, and JSON contracts
 
-A native Mac app with live preview, drag-and-drop editing, animated before/after transformations, and a slider to control aggressiveness is in development.
+The private product owns conversion mechanics and branded wrappers:
+- named campaigns and challenges
+- streaks, milestones, and give-up loops
+- growth experiments, funnels, and product marketing strategy
 
-**Sign up for early access:** [unjiggle.com](https://unjiggle.com)
+If a feature blurs that line, update [ARCHITECTURE.md](ARCHITECTURE.md) before shipping it.
+
+## Project Links
+
+- Website: [unjiggle.com](https://unjiggle.com)
+- Repository: [github.com/chungty/unjiggle](https://github.com/chungty/unjiggle)
 
 ## License
 
-GPL-3.0 (matching pymobiledevice3)
+GPL-3.0-or-later

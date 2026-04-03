@@ -14,3 +14,6 @@ build/
 .pytest_cache/
 .ruff_cache/
 .playwright-mcp/
+
+# Strategy docs belong in unjiggle-private, not this public repo
+docs/
