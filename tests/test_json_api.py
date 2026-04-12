@@ -12,6 +12,7 @@ import pytest
 from unjiggle.cli import (
     _analysis_to_json,
     _device_dict,
+    _layout_signature,
     _layout_to_pages_json,
     _layout_summary_to_json,
     _mirror_to_json,
@@ -145,6 +146,26 @@ class TestLayoutToJson:
         layout = HomeScreenLayout(dock=[], pages=[])
         pages = _layout_to_pages_json(layout, {})
         assert pages == []
+
+
+class TestLayoutSignature:
+    def test_stable_for_identical_layouts(self, simple_layout):
+        duplicate = HomeScreenLayout(
+            dock=simple_layout.dock,
+            pages=simple_layout.pages,
+            ignored=list(simple_layout.ignored),
+        )
+
+        assert _layout_signature(simple_layout) == _layout_signature(duplicate)
+
+    def test_changes_when_layout_changes(self, simple_layout):
+        changed = HomeScreenLayout(
+            dock=simple_layout.dock,
+            pages=[list(simple_layout.pages[0][1:])],
+            ignored=list(simple_layout.ignored),
+        )
+
+        assert _layout_signature(simple_layout) != _layout_signature(changed)
 
 
 # -- Tests: _swipe_tax_to_json ----------------------------------------------

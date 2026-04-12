@@ -60,6 +60,10 @@ That scans your phone, scores the layout, runs diagnostics, and generates a repo
 
 `unjiggle json ...` exposes structured output for external clients. That JSON API is public and stable enough to power separate frontends, including the private native Mac app.
 
+Useful preset endpoints:
+- `unjiggle json suggest --preset focus|relax|minimal|beautiful` for one preset preview
+- `unjiggle json presets` for a batch of all built-in preset previews from one shared scan
+
 ## Requirements
 
 - macOS

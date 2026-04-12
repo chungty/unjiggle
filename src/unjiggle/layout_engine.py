@@ -68,15 +68,21 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
 
         elif op.action == "move_to_page":
             if op.target_page is not None:
+                snapshot = copy.deepcopy(raw)
                 extracted = _raw_extract_apps(raw, op.bundle_ids)
                 pages = _get_pages(raw)
                 if 0 <= op.target_page < len(pages):
                     page = pages[op.target_page]
                     if len(page) + len(extracted) <= 24:
                         page.extend(extracted)
+                    else:
+                        raw = snapshot
+                else:
+                    raw = snapshot
 
         elif op.action == "create_folder":
             if op.folder_name and op.bundle_ids:
+                snapshot = copy.deepcopy(raw)
                 extracted = _raw_extract_apps(raw, op.bundle_ids)
                 if extracted:
                     folder_dict = {
@@ -91,8 +97,11 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                             page.append(folder_dict)
                             placed = True
                             break
-                    if not placed and pages:
-                        pages[0].append(folder_dict)
+                    if not placed:
+                        pages.append([folder_dict])
+                    _set_pages(raw, pages)
+                else:
+                    raw = snapshot
 
         elif op.action == "rename_folder":
             if op.old_name and op.folder_name:
@@ -100,13 +109,26 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
 
         elif op.action == "move_to_folder":
             if op.folder_name and op.bundle_ids:
+                snapshot = copy.deepcopy(raw)
                 extracted = _raw_extract_apps(raw, op.bundle_ids)
                 if extracted:
-                    _raw_add_to_folder(raw, op.folder_name, extracted)
+                    added = _raw_add_to_folder(raw, op.folder_name, extracted)
+                    if not added:
+                        raw = snapshot
+                else:
+                    raw = snapshot
 
         elif op.action == "compact_to_single_page":
             extracted = _raw_extract_apps(raw, op.bundle_ids)
             _set_pages(raw, [extracted] if extracted else [])
+
+        elif op.action == "rebuild_pages":
+            extracted = _raw_extract_apps(raw, op.bundle_ids)
+            rebuilt_pages = [
+                extracted[index:index + 24]
+                for index in range(0, len(extracted), 24)
+            ]
+            _set_pages(raw, rebuilt_pages)
 
     # Clean up empty pages
     pages = _get_pages(raw)
@@ -185,7 +207,7 @@ def _raw_remove_apps(raw, bundle_ids: list[str]) -> None:
 def _raw_extract_apps(raw, bundle_ids: list[str]) -> list:
     """Remove apps from the raw state and return the raw items."""
     bid_set = set(bundle_ids)
-    extracted = []
+    extracted_by_bid: dict[str, Any] = {}
 
     all_pages = raw if isinstance(raw, list) else ([raw.get("buttonBar", [])] + raw.get("iconLists", []))
 
@@ -193,19 +215,19 @@ def _raw_extract_apps(raw, bundle_ids: list[str]) -> list:
         for item in page:
             bid = _raw_find_app(item)
             if bid and bid in bid_set:
-                extracted.append(item)
+                extracted_by_bid[bid] = item
             elif _raw_is_folder(item):
                 for folder_page in item.get("iconLists", []):
                     for fi in folder_page:
-                        if _raw_find_app(fi) in bid_set:
-                            extracted.append(fi)
+                        fi_bid = _raw_find_app(fi)
+                        if fi_bid in bid_set:
+                            extracted_by_bid[fi_bid] = fi
 
     _raw_remove_apps(raw, bundle_ids)
 
-    found_bids = {_raw_find_app(e) for e in extracted if _raw_find_app(e)}
+    extracted = []
     for bid in bundle_ids:
-        if bid not in found_bids:
-            extracted.append({"bundleIdentifier": bid, "iconType": "app"})
+        extracted.append(extracted_by_bid.get(bid, {"bundleIdentifier": bid, "iconType": "app"}))
 
     return extracted
 
@@ -220,7 +242,7 @@ def _raw_rename_folder(raw, old_name: str, new_name: str) -> None:
                 return
 
 
-def _raw_add_to_folder(raw, folder_name: str, items: list) -> None:
+def _raw_add_to_folder(raw, folder_name: str, items: list) -> bool:
     """Add items to an existing folder by name."""
     all_pages = raw if isinstance(raw, list) else raw.get("iconLists", [])
     for page in all_pages:
@@ -231,4 +253,5 @@ def _raw_add_to_folder(raw, folder_name: str, items: list) -> None:
                     folder_pages[0].extend(items)
                 else:
                     item["iconLists"] = [items]
-                return
+                return True
+    return False

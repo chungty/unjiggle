@@ -20,6 +20,10 @@ def test_public_cli_excludes_private_challenge_mechanic():
     assert "challenge-giveup" not in json_group.commands
 
 
+def test_public_json_api_exposes_batch_preset_previews():
+    assert "presets" in json_group.commands
+
+
 def test_first_run_help_uses_public_boundary_language():
     result = CliRunner().invoke(main, [])
 

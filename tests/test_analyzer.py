@@ -2,7 +2,7 @@
 
 from tests.conftest import make_app
 
-from unjiggle.analyzer import LayoutOperation, preview_operations, _parse_result
+from unjiggle.analyzer import ALLOWED_LAYOUT_ACTIONS, LayoutOperation, preview_operations, _parse_result
 from unjiggle.models import HomeScreenLayout
 
 
@@ -86,8 +86,44 @@ class TestPreviewOperations:
             target_page=0,
         )]
         preview = preview_operations(layout, ops)
-        # Should not exceed 24 + 1 (extracted then added, but capacity check should block)
-        assert len(preview.pages[0]) <= 25  # Extracted from page 2 adds to page 1
+        assert len(preview.pages[0]) == 24
+        assert preview.pages[1][0].app.bundle_id == "com.test.extra"
+
+    def test_move_to_missing_folder_is_no_op(self):
+        layout = HomeScreenLayout(
+            dock=[],
+            pages=[[make_app("com.apple.Maps"), make_app("com.spotify.client")]],
+        )
+        ops = [LayoutOperation(
+            action="move_to_folder",
+            bundle_ids=["com.apple.Maps"],
+            folder_name="Does Not Exist",
+        )]
+
+        preview = preview_operations(layout, ops)
+
+        assert preview.pages[0][0].app.bundle_id == "com.apple.Maps"
+        assert preview.pages[0][1].app.bundle_id == "com.spotify.client"
+
+    def test_create_folder_adds_new_page_when_all_pages_are_full(self):
+        from tests.conftest import make_folder
+
+        full_page = [make_app(f"com.test.app{i}") for i in range(23)]
+        full_page.append(make_folder("Source", ["com.test.extra", "com.test.extra2"]))
+        layout = HomeScreenLayout(
+            dock=[],
+            pages=[full_page],
+        )
+        ops = [LayoutOperation(
+            action="create_folder",
+            bundle_ids=["com.test.extra", "com.test.extra2"],
+            folder_name="Overflow",
+        )]
+
+        preview = preview_operations(layout, ops)
+
+        assert preview.page_count == 2
+        assert preview.all_folders()[-1].display_name == "Overflow"
 
     def test_empty_pages_removed(self, chaotic_layout):
         """If all apps are removed from a page, the page should be cleaned up."""
@@ -138,6 +174,10 @@ class TestPreviewOperations:
 
 
 class TestParseResult:
+    def test_does_not_expose_preset_specific_engine_actions(self):
+        assert "focus" not in ALLOWED_LAYOUT_ACTIONS
+        assert "relax" not in ALLOWED_LAYOUT_ACTIONS
+
     def test_filters_invalid_bundle_ids(self, chaotic_layout):
         """Bundle IDs not in the layout should be filtered out."""
         data = {
@@ -195,3 +235,23 @@ class TestParseResult:
         result = _parse_result(data, chaotic_layout)
         assert len(result.observations[0].operations) == 1
         assert result.observations[0].operations[0].folder_name == "Transport"
+
+    def test_allows_high_level_primitives(self, chaotic_layout):
+        data = {
+            "observations": [{
+                "track": "organization",
+                "title": "Rebuild",
+                "narrative": "Use the honest primitive.",
+                "operations": [{
+                    "action": "rebuild_pages",
+                    "bundle_ids": chaotic_layout.all_bundle_ids[:3],
+                }],
+            }],
+            "personality": "Test",
+            "archetype": "Test",
+        }
+
+        result = _parse_result(data, chaotic_layout)
+
+        assert len(result.observations[0].operations) == 1
+        assert result.observations[0].operations[0].action == "rebuild_pages"

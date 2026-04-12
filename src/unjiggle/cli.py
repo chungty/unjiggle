@@ -421,6 +421,8 @@ def analyze(api_key: str | None, model: str):
                     "create_folder": "[green]📁 create folder[/green]",
                     "rename_folder": "[cyan]✏️  rename folder[/cyan]",
                     "move_to_folder": "[blue]📁 move to folder[/blue]",
+                    "compact_to_single_page": "[magenta]📱 one-page rebuild[/magenta]",
+                    "rebuild_pages": "[magenta]🎨 rebuild pages[/magenta]",
                 }.get(op.action, op.action)
                 console.print(f"    {action_label}: {names_str}")
                 if op.gratitude:
@@ -443,7 +445,7 @@ def analyze(api_key: str | None, model: str):
 @click.option("--apply-all", is_flag=True, help="Apply all suggestions without stepping through (Just Fix It mode)")
 def suggest(api_key: str | None, model: str, apply_all: bool):
     """AI-powered suggestions with live preview. Accept/skip each change."""
-    from unjiggle.analyzer import LayoutOperation, analyze as run_analysis, preview_operations
+    from unjiggle.analyzer import LayoutOperation, analyze as run_analysis
     from unjiggle.device import connect, read_layout, write_layout
     from unjiggle.itunes import enrich_layout
     from unjiggle.scoring import compute_score
@@ -472,11 +474,14 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
 
     # Collect accepted operations
     accepted_ops = []
+    current_preview = layout
 
     if apply_all:
         # Just Fix It mode: collect all operations
         for obs in result.observations:
-            accepted_ops.extend(obs.operations)
+            obs_preview, obs_effective_ops = _preview_effective_operations(current_preview, obs.operations)
+            accepted_ops.extend(obs_effective_ops)
+            current_preview = obs_preview
         console.print(f"  [bold]Just Fix It mode:[/bold] applying all {len(result.observations)} suggestions\n")
     else:
         # Stepwise mode
@@ -487,20 +492,26 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
             console.print(f"  {obs.narrative}\n")
 
             if obs.operations:
-                # Show what would change
-                preview = preview_operations(layout, accepted_ops + obs.operations)
-                preview_score = compute_score(preview, metadata)
-                current_score = compute_score(
-                    preview_operations(layout, accepted_ops) if accepted_ops else layout,
-                    metadata,
-                )
+                obs_preview, obs_effective_ops = _preview_effective_operations(current_preview, obs.operations)
+                preview_score = compute_score(obs_preview, metadata)
+                current_score = compute_score(current_preview, metadata)
                 delta = preview_score.total - current_score.total
-                delta_pages = preview.page_count - (preview_operations(layout, accepted_ops).page_count if accepted_ops else layout.page_count)
+                delta_pages = obs_preview.page_count - current_preview.page_count
+                changes, moved, archived, new_folders, summary = _derive_realized_changes(
+                    current_preview, obs_preview, metadata, obs_effective_ops,
+                )
 
                 console.print(f"    Preview: score {current_score.total:.0f} → {preview_score.total:.0f} ({'+' if delta >= 0 else ''}{delta:.0f})")
                 if delta_pages != 0:
                     console.print(f"    Pages: {'+' if delta_pages >= 0 else ''}{delta_pages}")
+                if changes:
+                    console.print(f"    {summary}")
+                else:
+                    console.print("    No additional effect from this step.")
                 console.print()
+            else:
+                obs_preview = current_preview
+                obs_effective_ops = []
 
             # For cleanup observations with delete actions, offer granular choices
             has_deletes = any(op.action == "delete" for op in obs.operations)
@@ -530,7 +541,9 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
                                 console.print("    [dim]Kept.[/dim]")
                     else:
                         kept_ops.append(op)
-                accepted_ops.extend(kept_ops)
+                obs_preview, obs_effective_ops = _preview_effective_operations(current_preview, kept_ops)
+                accepted_ops.extend(obs_effective_ops)
+                current_preview = obs_preview
                 console.print()
             else:
                 choice = click.prompt(
@@ -540,7 +553,8 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
                 )
 
                 if choice.lower() == "a":
-                    accepted_ops.extend(obs.operations)
+                    accepted_ops.extend(obs_effective_ops)
+                    current_preview = obs_preview
                     console.print("    [green]Applied.[/green]\n")
                 elif choice.lower() == "q":
                     console.print("    [yellow]Stopped.[/yellow]\n")
@@ -553,13 +567,17 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         return
 
     # Show final summary
-    final_preview = preview_operations(layout, accepted_ops)
+    final_preview = current_preview
     final_score = compute_score(final_preview, metadata)
+    _changes, _moved, _archived, _new_folders, summary = _derive_realized_changes(
+        layout, final_preview, metadata, accepted_ops,
+    )
 
     console.print("\n  [bold]Summary:[/bold]")
     console.print(f"    Score: {score_before.total:.0f} → {final_score.total:.0f}")
     console.print(f"    Pages: {layout.page_count} → {final_preview.page_count}")
     console.print(f"    Operations: {len(accepted_ops)}")
+    console.print(f"    {summary}")
 
     if result.personality:
         console.print(f"\n  [italic dim]{result.personality}[/italic dim]")
@@ -569,13 +587,18 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         from unjiggle.layout_engine import apply_operations
         from unjiggle.safety import pre_write_safety_check
 
+        predicted_layout, effective_ops = _preview_effective_operations(layout, accepted_ops)
+        if not effective_ops:
+            console.print("  [yellow]Nothing left to apply.[/yellow]\n")
+            return
+
         safe, backup_path = pre_write_safety_check(lockdown, layout)
         if not safe:
             console.print("  [red]Safety check failed. No changes made.[/red]\n")
             return
 
         # Build the modified raw plist using the layout engine
-        modified_raw = apply_operations(layout, accepted_ops)
+        modified_raw = apply_operations(layout, effective_ops)
 
         # Write the modified layout to device
         write_layout(lockdown, modified_raw)
@@ -583,6 +606,9 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         # Verify the write took effect
         from unjiggle.device import read_layout as re_read
         verify = re_read(lockdown)
+        if _layout_signature(verify) != _layout_signature(predicted_layout):
+            console.print("  [red]Write verification failed.[/red] The device layout did not match the preview.\n")
+            return
         console.print(f"  [dim]Verifying write... {verify.page_count} pages, {verify.total_apps} apps read back.[/dim]")
 
         console.print("\n  [green bold]Done![/green bold] Your iPhone has been reorganized.")
@@ -1223,14 +1249,16 @@ def json_scan():
     layout = read_layout(lockdown)
     metadata = enrich_layout(layout)
 
-    _json_out({
+    payload = {
         "device": _device_dict(device),
         "total_apps": layout.total_apps,
         "page_count": layout.page_count,
         "folder_count": len(layout.all_folders()),
         "dock_items": len(layout.dock),
         "pages": _layout_to_pages_json(layout, metadata),
-    })
+    }
+    payload.update(_snapshot_metadata(layout))
+    _json_out(payload)
 
 
 @json.command(name="diagnose")
@@ -1253,7 +1281,7 @@ def json_diagnose():
     archetype, tagline = assign_archetype(layout, metadata)
     tax = compute_swipe_tax(layout, metadata)
 
-    _json_out({
+    payload = {
         "score": {
             "total": round(score.total),
             "label": score.label,
@@ -1265,7 +1293,9 @@ def json_diagnose():
         "archetype": archetype,
         "tagline": tagline,
         "swipe_tax": _swipe_tax_to_json(tax),
-    })
+    }
+    payload.update(_snapshot_metadata(layout))
+    _json_out(payload)
 
 
 @json.command(name="mirror")
@@ -1385,6 +1415,179 @@ def _collect_all_apps_with_positions(layout, metadata: dict) -> list[dict]:
     return apps
 
 
+def _layout_app_locations(layout, metadata: dict) -> dict[str, dict]:
+    """Index visible non-dock apps by bundle ID with page/folder metadata."""
+    locations = {}
+    for page_idx, page in enumerate(layout.pages, start=1):
+        for item_idx, item in enumerate(page):
+            if item.is_app:
+                bid = item.app.bundle_id
+                locations[bid] = {
+                    "bundle_id": bid,
+                    "app_name": _get_app_name(bid, metadata),
+                    "page": page_idx,
+                    "folder_name": None,
+                    "item_index": item_idx,
+                    "folder_page_index": -1,
+                    "folder_item_index": -1,
+                }
+            elif item.is_folder:
+                for folder_page_idx, folder_page in enumerate(item.folder.pages):
+                    for folder_item_idx, app in enumerate(folder_page):
+                        bid = app.bundle_id
+                        locations[bid] = {
+                            "bundle_id": bid,
+                            "app_name": _get_app_name(bid, metadata),
+                            "page": page_idx,
+                            "folder_name": item.folder.display_name,
+                            "item_index": item_idx,
+                            "folder_page_index": folder_page_idx,
+                            "folder_item_index": folder_item_idx,
+                        }
+    return locations
+
+
+def _layout_signature(layout) -> str:
+    """Stable signature for comparing predicted and realized layouts."""
+    dock = []
+    for item in layout.dock:
+        if item.is_app:
+            dock.append(item.app.bundle_id)
+        elif item.is_folder:
+            dock.append({
+                "folder": item.folder.display_name,
+                "apps": [[app.bundle_id for app in page] for page in item.folder.pages],
+            })
+        elif item.is_widget:
+            dock.append({
+                "widget": item.widget.container_bundle_id,
+                "size": item.widget.grid_size.value,
+            })
+
+    pages = []
+    for page in layout.pages:
+        page_items = []
+        for item in page:
+            if item.is_app:
+                page_items.append(item.app.bundle_id)
+            elif item.is_folder:
+                page_items.append({
+                    "folder": item.folder.display_name,
+                    "apps": [[app.bundle_id for app in folder_page] for folder_page in item.folder.pages],
+                })
+            elif item.is_widget:
+                page_items.append({
+                    "widget": item.widget.container_bundle_id,
+                    "size": item.widget.grid_size.value,
+                })
+        pages.append(page_items)
+
+    return _json.dumps(
+        {
+            "dock": dock,
+            "pages": pages,
+            "ignored": sorted(layout.ignored),
+        },
+        sort_keys=True,
+    )
+
+
+def _snapshot_metadata(layout) -> dict:
+    """Stable identity for one concrete layout snapshot."""
+    signature = _layout_signature(layout)
+    return {
+        "layout_signature": signature,
+        "snapshot_id": signature,
+    }
+
+
+def _change_sort_key(change: dict) -> tuple:
+    return (
+        change.get("from_page") or 10_000,
+        change.get("to_page") or 10_000,
+        change.get("folder_name") or "",
+        change["app_name"],
+    )
+
+
+def _removed_action_lookup(operations: list) -> dict[str, str]:
+    removed = {}
+    for op in operations:
+        if op.action in ("move_to_app_library", "delete"):
+            for bid in op.bundle_ids:
+                removed[bid] = op.action
+    return removed
+
+
+def _build_transform_summary(moved: int, archived: int, new_folders: int) -> str:
+    parts = []
+    if moved:
+        parts.append(f"Moved {moved} apps")
+    if archived:
+        parts.append(f"archived {archived}")
+    if new_folders:
+        parts.append(f"created {new_folders} folders")
+    return ", ".join(parts) if parts else "No changes needed"
+
+
+def _derive_realized_changes(layout, proposed_layout, metadata: dict, operations: list) -> tuple[list[dict], int, int, int, str]:
+    before_locations = _layout_app_locations(layout, metadata)
+    after_locations = _layout_app_locations(proposed_layout, metadata)
+    removed_actions = _removed_action_lookup(operations)
+    changes = []
+
+    ordered_before = sorted(before_locations.values(), key=lambda item: (
+        item["page"],
+        item["item_index"],
+        item["folder_name"] or "",
+        item["folder_page_index"],
+        item["folder_item_index"],
+        item["bundle_id"],
+    ))
+
+    for before in ordered_before:
+        after = after_locations.get(before["bundle_id"])
+        if after is None:
+            changes.append({
+                "action": removed_actions.get(before["bundle_id"], "move_to_app_library"),
+                "bundle_id": before["bundle_id"],
+                "app_name": before["app_name"],
+                "from_page": before["page"],
+                "to_page": None,
+            })
+            continue
+
+        same_page = before["page"] == after["page"]
+        same_folder = before["folder_name"] == after["folder_name"]
+        if same_page and same_folder:
+            continue
+
+        if after["folder_name"] and not same_folder:
+            changes.append({
+                "action": "move_to_folder",
+                "bundle_id": before["bundle_id"],
+                "app_name": before["app_name"],
+                "from_page": before["page"],
+                "to_page": after["page"],
+                "folder_name": after["folder_name"],
+            })
+        else:
+            changes.append({
+                "action": "move_to_page",
+                "bundle_id": before["bundle_id"],
+                "app_name": before["app_name"],
+                "from_page": before["page"],
+                "to_page": after["page"],
+            })
+
+    changes.sort(key=_change_sort_key)
+    moved = sum(1 for change in changes if change["action"] in ("move_to_page", "move_to_folder"))
+    archived = sum(1 for change in changes if change["action"] in ("move_to_app_library", "delete"))
+    new_folders = max(len(proposed_layout.all_folders()) - len(layout.all_folders()), 0)
+    summary = _build_transform_summary(moved, archived, new_folders)
+    return changes, moved, archived, new_folders, summary
+
+
 def _transform_preview_payload(
     intent: str,
     layout,
@@ -1396,18 +1599,19 @@ def _transform_preview_payload(
     changes: list[dict],
     operations: list,
     proposed_layout=None,
+    moved: int | None = None,
+    archived: int | None = None,
+    new_folders: int | None = None,
+    summary: str | None = None,
 ) -> dict:
-    moved = sum(1 for c in changes if c["action"] == "move_to_page")
-    archived = sum(1 for c in changes if c["action"] in ("move_to_app_library", "delete"))
-    new_folders = sum(1 for c in changes if c["action"] == "create_folder")
-    parts = []
-    if moved:
-        parts.append(f"Moved {moved} apps")
-    if archived:
-        parts.append(f"archived {archived}")
-    if new_folders:
-        parts.append(f"created {new_folders} folders")
-    summary = ", ".join(parts) if parts else "No changes needed"
+    if moved is None:
+        moved = sum(1 for c in changes if c["action"] in ("move_to_page", "move_to_folder"))
+    if archived is None:
+        archived = sum(1 for c in changes if c["action"] in ("move_to_app_library", "delete"))
+    if new_folders is None:
+        new_folders = sum(1 for c in changes if c["action"] == "create_folder")
+    if summary is None:
+        summary = _build_transform_summary(moved, archived, new_folders)
     trend = _score_trend(before_score, after_score)
 
     payload = {
@@ -1432,9 +1636,77 @@ def _transform_preview_payload(
     return payload
 
 
+def _resolve_transform_preview(intent: str, layout, metadata: dict, score, operations: list) -> dict:
+    from unjiggle.analyzer import preview_operations
+    from unjiggle.scoring import compute_score
+
+    before_score = round(score.total)
+    before_pages = layout.page_count
+
+    if operations:
+        proposed_layout = preview_operations(layout, operations)
+        changes, moved, archived, new_folders, summary = _derive_realized_changes(
+            layout, proposed_layout, metadata, operations,
+        )
+        after_breakdown = compute_score(proposed_layout, metadata)
+        after_score = round(after_breakdown.total)
+        after_pages = proposed_layout.page_count
+    else:
+        proposed_layout = None
+        changes = []
+        moved = 0
+        archived = 0
+        new_folders = 0
+        summary = "No changes needed"
+        after_score = before_score
+        after_pages = before_pages
+
+    return _transform_preview_payload(
+        intent=intent,
+        layout=layout,
+        metadata=metadata,
+        before_score=before_score,
+        after_score=after_score,
+        before_pages=before_pages,
+        after_pages=after_pages,
+        changes=changes,
+        operations=operations,
+        proposed_layout=proposed_layout,
+        moved=moved,
+        archived=archived,
+        new_folders=new_folders,
+        summary=summary,
+    )
+
+
+def _preview_effective_operations(layout, operations: list) -> tuple[object, list]:
+    """Resolve operations one by one and keep only the ones that actually change layout."""
+    from unjiggle.analyzer import preview_operations
+
+    current_layout = layout
+    effective_ops = []
+    current_signature = _layout_signature(layout)
+
+    for op in operations:
+        next_layout = preview_operations(current_layout, [op])
+        next_signature = _layout_signature(next_layout)
+        if next_signature == current_signature:
+            continue
+        effective_ops.append(op)
+        current_layout = next_layout
+        current_signature = next_signature
+
+    return current_layout, effective_ops
+
+
 def _build_minimal_one_page_plan(layout, metadata: dict) -> tuple[list[str], list[str]]:
-    """Return (keep_visible_bundle_ids, archive_bundle_ids) for the one-page preset."""
+    """Return (keep_visible_bundle_ids, archive_bundle_ids) for the minimal preset.
+
+    Keeps the most important apps visible on a single physical page.
+    Everything else gets archived so previews and writes stay truthful.
+    """
     all_apps = _collect_all_apps_with_positions(layout, metadata)
+    max_visible = 24
 
     dock_bids = set()
     for item in layout.dock:
@@ -1450,17 +1722,17 @@ def _build_minimal_one_page_plan(layout, metadata: dict) -> tuple[list[str], lis
             continue
         keep_visible.append(bid)
         seen.add(bid)
-        if len(keep_visible) >= 24:
+        if len(keep_visible) >= max_visible:
             break
 
-    if len(keep_visible) < 24:
+    if len(keep_visible) < max_visible:
         for app in all_apps:
             bid = app["bundle_id"]
             if bid in seen or bid in dock_bids:
                 continue
             keep_visible.append(bid)
             seen.add(bid)
-            if len(keep_visible) >= 24:
+            if len(keep_visible) >= max_visible:
                 break
 
     archive_bids = []
@@ -1475,162 +1747,95 @@ def _build_minimal_one_page_plan(layout, metadata: dict) -> tuple[list[str], lis
     return keep_visible, archive_bids
 
 
-def _generate_preset_transform(preset: str, layout, metadata: dict, score) -> dict:
-    """Generate a TransformPreview dict for a rule-based preset."""
-    from unjiggle.analyzer import LayoutOperation, preview_operations
-    from unjiggle.scoring import compute_score
+def _build_weighted_page_operations(layout, metadata: dict, front_cats: set[str], later_cats: set[str]) -> list:
+    from unjiggle.analyzer import LayoutOperation
 
     all_apps = _collect_all_apps_with_positions(layout, metadata)
-    changes = []
     operations = []
-
-    if preset == "focus":
-        for app in all_apps:
-            cat = app["category"]
-            if cat in _FOCUS_PAGE1_CATS and app["from_page"] != 1:
-                changes.append({
-                    "action": "move_to_page",
-                    "bundle_id": app["bundle_id"],
-                    "app_name": app["name"],
-                    "from_page": app["from_page"],
-                    "to_page": 1,
-                })
-                operations.append(LayoutOperation(
-                    action="move_to_page",
-                    bundle_ids=[app["bundle_id"]],
-                    target_page=0,  # 0-indexed
-                ))
-            elif cat in _FOCUS_LATER_CATS and app["from_page"] <= 2:
-                target = max(3, layout.page_count)
-                changes.append({
-                    "action": "move_to_page",
-                    "bundle_id": app["bundle_id"],
-                    "app_name": app["name"],
-                    "from_page": app["from_page"],
-                    "to_page": target,
-                })
-                operations.append(LayoutOperation(
-                    action="move_to_page",
-                    bundle_ids=[app["bundle_id"]],
-                    target_page=min(target - 1, len(layout.pages) - 1),
-                ))
-
-    elif preset == "relax":
-        for app in all_apps:
-            cat = app["category"]
-            if cat in _RELAX_PAGE1_CATS and app["from_page"] != 1:
-                changes.append({
-                    "action": "move_to_page",
-                    "bundle_id": app["bundle_id"],
-                    "app_name": app["name"],
-                    "from_page": app["from_page"],
-                    "to_page": 1,
-                })
-                operations.append(LayoutOperation(
-                    action="move_to_page",
-                    bundle_ids=[app["bundle_id"]],
-                    target_page=0,
-                ))
-            elif cat in _RELAX_LATER_CATS and app["from_page"] <= 2:
-                target = max(3, layout.page_count)
-                changes.append({
-                    "action": "move_to_page",
-                    "bundle_id": app["bundle_id"],
-                    "app_name": app["name"],
-                    "from_page": app["from_page"],
-                    "to_page": target,
-                })
-                operations.append(LayoutOperation(
-                    action="move_to_page",
-                    bundle_ids=[app["bundle_id"]],
-                    target_page=min(target - 1, len(layout.pages) - 1),
-                ))
-
-    elif preset == "minimal":
-        keep_visible_bids, archive_bids = _build_minimal_one_page_plan(layout, metadata)
-        keep_visible_set = set(keep_visible_bids)
-
-        for app in all_apps:
-            if app["bundle_id"] in archive_bids:
-                changes.append({
-                    "action": "move_to_app_library",
-                    "bundle_id": app["bundle_id"],
-                    "app_name": app["name"],
-                    "from_page": app["from_page"],
-                    "to_page": None,
-                })
-                operations.append(LayoutOperation(
-                    action="move_to_app_library",
-                    bundle_ids=[app["bundle_id"]],
-                ))
-            elif app["bundle_id"] in keep_visible_set and app["from_page"] != 1:
-                changes.append({
-                    "action": "move_to_page",
-                    "bundle_id": app["bundle_id"],
-                    "app_name": app["name"],
-                    "from_page": app["from_page"],
-                    "to_page": 1,
-                })
-
-        if keep_visible_bids:
+    for app in all_apps:
+        cat = app["category"]
+        if cat in front_cats and app["from_page"] != 1:
             operations.append(LayoutOperation(
-                action="compact_to_single_page",
-                bundle_ids=keep_visible_bids,
+                action="move_to_page",
+                bundle_ids=[app["bundle_id"]],
+                target_page=0,
             ))
+        elif cat in later_cats and app["from_page"] <= 2:
+            target = max(3, layout.page_count)
+            operations.append(LayoutOperation(
+                action="move_to_page",
+                bundle_ids=[app["bundle_id"]],
+                target_page=min(target - 1, len(layout.pages) - 1),
+            ))
+    return operations
 
-    elif preset == "beautiful":
-        # Sort all apps by category color, grouping same-color apps together
-        color_order = {cat: i for i, cat in enumerate(_CATEGORY_COLOR_ORDER)}
 
-        sorted_apps = sorted(all_apps, key=lambda a: (
-            color_order.get(a["category"], 99),
-            a["name"],
+def _build_focus_preset_operations(layout, metadata: dict) -> list:
+    return _build_weighted_page_operations(layout, metadata, _FOCUS_PAGE1_CATS, _FOCUS_LATER_CATS)
+
+
+def _build_relax_preset_operations(layout, metadata: dict) -> list:
+    return _build_weighted_page_operations(layout, metadata, _RELAX_PAGE1_CATS, _RELAX_LATER_CATS)
+
+
+def _build_minimal_preset_operations(layout, metadata: dict) -> list:
+    from unjiggle.analyzer import LayoutOperation
+
+    operations = []
+    keep_visible_bids, archive_bids = _build_minimal_one_page_plan(layout, metadata)
+    for bid in archive_bids:
+        operations.append(LayoutOperation(
+            action="move_to_app_library",
+            bundle_ids=[bid],
         ))
+    if keep_visible_bids:
+        operations.append(LayoutOperation(
+            action="compact_to_single_page",
+            bundle_ids=keep_visible_bids,
+        ))
+    return operations
 
-        # Assign to pages (24 per page)
-        for i, app in enumerate(sorted_apps):
-            target_page = (i // 24) + 1  # 1-indexed
-            if app["from_page"] != target_page:
-                changes.append({
-                    "action": "move_to_page",
-                    "bundle_id": app["bundle_id"],
-                    "app_name": app["name"],
-                    "from_page": app["from_page"],
-                    "to_page": target_page,
-                })
-                # Only create operations for pages that exist
-                target_idx = min(target_page - 1, len(layout.pages) - 1)
-                operations.append(LayoutOperation(
-                    action="move_to_page",
-                    bundle_ids=[app["bundle_id"]],
-                    target_page=target_idx,
-                ))
 
-    # Compute before/after scores and page counts
-    before_score = round(score.total)
-    before_pages = layout.page_count
-    if operations:
-        proposed_layout = preview_operations(layout, operations)
-        after_breakdown = compute_score(proposed_layout, metadata)
-        after_score = round(after_breakdown.total)
-        after_pages = proposed_layout.page_count
-    else:
-        proposed_layout = None
-        after_score = before_score
-        after_pages = before_pages
+def _build_beautiful_preset_operations(layout, metadata: dict) -> list:
+    from unjiggle.analyzer import LayoutOperation
 
-    return _transform_preview_payload(
-        intent=preset,
-        layout=layout,
-        metadata=metadata,
-        before_score=before_score,
-        after_score=after_score,
-        before_pages=before_pages,
-        after_pages=after_pages,
-        changes=changes,
-        operations=operations,
-        proposed_layout=proposed_layout,
-    )
+    all_apps = _collect_all_apps_with_positions(layout, metadata)
+    color_order = {cat: i for i, cat in enumerate(_CATEGORY_COLOR_ORDER)}
+    sorted_apps = sorted(all_apps, key=lambda app: (
+        color_order.get(app["category"], 99),
+        app["name"],
+    ))
+    return [LayoutOperation(
+        action="rebuild_pages",
+        bundle_ids=[app["bundle_id"] for app in sorted_apps],
+    )]
+
+
+_PRESET_BUILDERS = {
+    "focus": _build_focus_preset_operations,
+    "relax": _build_relax_preset_operations,
+    "minimal": _build_minimal_preset_operations,
+    "beautiful": _build_beautiful_preset_operations,
+}
+
+
+def _generate_preset_transform(preset: str, layout, metadata: dict, score) -> dict:
+    """Generate a TransformPreview dict for a rule-based preset."""
+    try:
+        builder = _PRESET_BUILDERS[preset]
+    except KeyError as exc:
+        raise ValueError(f"Unknown preset: {preset}") from exc
+
+    operations = builder(layout, metadata)
+    return _resolve_transform_preview(preset, layout, metadata, score, operations)
+
+
+def _generate_all_preset_transforms(layout, metadata: dict, score) -> dict[str, dict]:
+    """Generate previews for every built-in preset from one shared layout snapshot."""
+    return {
+        preset: _generate_preset_transform(preset, layout, metadata, score)
+        for preset in PRESET_CHOICES
+    }
 
 
 def _generate_intent_transform(
@@ -1641,9 +1846,7 @@ def _generate_intent_transform(
         ANALYSIS_TOOL,
         _build_context,
         _parse_result,
-        preview_operations,
     )
-    from unjiggle.scoring import compute_score as _compute_score
 
     context = _build_context(layout, metadata, score)
 
@@ -1735,54 +1938,7 @@ def _generate_intent_transform(
     for obs in result.observations:
         all_ops.extend(obs.operations)
 
-    changes = []
-    for op in all_ops:
-        for bid in op.bundle_ids:
-            change = {
-                "action": op.action,
-                "bundle_id": bid,
-                "app_name": _get_app_name(bid, metadata),
-            }
-            # Find current page
-            for page_idx, page in enumerate(layout.pages):
-                for item in page:
-                    if item.is_app and item.app.bundle_id == bid:
-                        change["from_page"] = page_idx + 1
-                        break
-                    elif item.is_folder:
-                        for fpage in item.folder.pages:
-                            if any(a.bundle_id == bid for a in fpage):
-                                change["from_page"] = page_idx + 1
-                                break
-            if "from_page" not in change:
-                change["from_page"] = None
-            change["to_page"] = (op.target_page + 1) if op.target_page is not None else None
-            changes.append(change)
-
-    before_score = round(score.total)
-    before_pages = layout.page_count
-    if all_ops:
-        proposed_layout = preview_operations(layout, all_ops)
-        after_breakdown = _compute_score(proposed_layout, metadata)
-        after_score = round(after_breakdown.total)
-        after_pages = proposed_layout.page_count
-    else:
-        proposed_layout = None
-        after_score = before_score
-        after_pages = before_pages
-
-    return _transform_preview_payload(
-        intent=intent,
-        layout=layout,
-        metadata=metadata,
-        before_score=before_score,
-        after_score=after_score,
-        before_pages=before_pages,
-        after_pages=after_pages,
-        changes=changes,
-        operations=all_ops,
-        proposed_layout=proposed_layout,
-    )
+    return _resolve_transform_preview(intent, layout, metadata, score, all_ops)
 
 
 @json.command(name="suggest")
@@ -1838,6 +1994,7 @@ def json_suggest(
             result = _generate_preset_transform(preset, layout, metadata, score)
         except Exception as e:
             _json_err(f"Preset transformation failed: {e}")
+        result.update(_snapshot_metadata(layout))
         _json_out(result)
         return
 
@@ -1849,6 +2006,7 @@ def json_suggest(
             )
         except Exception as e:
             _json_err(f"Intent transformation failed: {e}")
+        result.update(_snapshot_metadata(layout))
         _json_out(result)
         return
 
@@ -1870,7 +2028,7 @@ def json_suggest(
         archetype, tagline = assign_archetype(layout, metadata)
         tax = compute_swipe_tax(layout, metadata)
 
-        _json_out({
+        payload = {
             "observations": [],
             "personality": tagline,
             "archetype": archetype,
@@ -1879,7 +2037,38 @@ def json_suggest(
                 "label": score.label,
             },
             "swipe_tax": _swipe_tax_to_json(tax),
-        })
+        }
+        payload.update(_snapshot_metadata(layout))
+        _json_out(payload)
+
+
+@json.command(name="presets")
+def json_presets():
+    """Return preview payloads for all built-in presets in one response."""
+    from unjiggle.device import connect, read_layout
+    from unjiggle.itunes import enrich_layout
+    from unjiggle.scoring import compute_score
+
+    try:
+        lockdown, _device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
+    metadata = enrich_layout(layout)
+    score = compute_score(layout, metadata)
+
+    try:
+        presets = _generate_all_preset_transforms(layout, metadata, score)
+    except Exception as e:
+        _json_err(f"Preset generation failed: {e}")
+
+    payload = {
+        "presets": presets,
+        "preset_order": list(PRESET_CHOICES),
+    }
+    payload.update(_snapshot_metadata(layout))
+    _json_out(payload)
 
 
 @json.command(name="restore")
@@ -1909,6 +2098,7 @@ def json_restore(backup_file: str):
     _json_out({
         "restored": True,
         "backup": str(Path(backup_file)),
+        **_snapshot_metadata(verify),
         "result": {
             "page_count": verify.page_count,
             "total_apps": verify.total_apps,
@@ -2071,6 +2261,21 @@ def json_apply():
             gratitude=op_data.get("gratitude"),
         ))
 
+    predicted_layout, effective_ops = _preview_effective_operations(layout, ops)
+    if not effective_ops:
+        _json_out({
+            "requested": len(ops),
+            "applied": 0,
+            "backup": None,
+            "changed": False,
+            **_snapshot_metadata(layout),
+            "result": {
+                "page_count": layout.page_count,
+                "total_apps": layout.total_apps,
+            },
+        })
+        return
+
     # Safety: backup first
     from unjiggle.safety import pre_write_safety_check
     safe, backup_path = pre_write_safety_check(lockdown, layout)
@@ -2078,16 +2283,21 @@ def json_apply():
         _json_err("Safety check failed. No changes made.")
 
     # Apply and write
-    modified_raw = apply_operations(layout, ops)
+    modified_raw = apply_operations(layout, effective_ops)
     write_layout(lockdown, modified_raw)
 
     # Verify
     from unjiggle.device import read_layout as re_read
     verify = re_read(lockdown)
+    if _layout_signature(verify) != _layout_signature(predicted_layout):
+        _json_err("Write verification failed.")
 
     _json_out({
-        "applied": len(ops),
+        "requested": len(ops),
+        "applied": len(effective_ops),
         "backup": str(backup_path),
+        "changed": True,
+        **_snapshot_metadata(verify),
         "result": {
             "page_count": verify.page_count,
             "total_apps": verify.total_apps,

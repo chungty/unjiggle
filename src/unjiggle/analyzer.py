@@ -18,10 +18,22 @@ except ImportError:
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
 
+ALLOWED_LAYOUT_ACTIONS = (
+    "move_to_app_library",
+    "delete",
+    "move_to_page",
+    "create_folder",
+    "rename_folder",
+    "move_to_folder",
+    "compact_to_single_page",
+    "rebuild_pages",
+)
+
+
 @dataclass
 class LayoutOperation:
     """A single validated layout change."""
-    action: str  # "move_to_app_library", "delete", "move_to_page", "create_folder", "rename_folder", "move_to_folder", "compact_to_single_page"
+    action: str  # One of ALLOWED_LAYOUT_ACTIONS.
     bundle_ids: list[str] = field(default_factory=list)
     target_page: int | None = None
     folder_name: str | None = None
@@ -69,6 +81,9 @@ RULES:
 - Detect patterns: duplicate-function apps, abandoned apps (last_updated years ago), apps from the same ecosystem, apps that tell a life story (kids apps, fitness apps, project-specific apps)
 - The personality narrative should feel like someone who KNOWS this person, not a database report
 - Observations should be ordered: cleanup first, then organization, then optimization
+- Use high-level primitives when they fit the job:
+  - "compact_to_single_page" for honest one-page/minimal transforms
+  - "rebuild_pages" for full visual reordering where exact app order matters
 
 MARIE KONDO PRINCIPLE — for cleanup observations:
 - For apps that are truly abandoned, outdated, or superseded, use "delete" action instead of "move_to_app_library". These apps deserve a proper goodbye, not a junk drawer.
@@ -103,7 +118,7 @@ ANALYSIS_TOOL = {
                                 "properties": {
                                     "action": {
                                         "type": "string",
-                                        "enum": ["move_to_app_library", "delete", "move_to_page", "create_folder", "rename_folder", "move_to_folder"]
+                                        "enum": list(ALLOWED_LAYOUT_ACTIONS)
                                     },
                                     "bundle_ids": {"type": "array", "items": {"type": "string"}},
                                     "target_page": {"type": "integer", "description": "0-indexed page number for move_to_page"},
@@ -274,13 +289,20 @@ def _parse_result(data: dict, layout: HomeScreenLayout) -> AnalysisResult:
     for i, obs_data in enumerate(data.get("observations", [])):
         ops = []
         for op_data in obs_data.get("operations", []):
+            action = op_data.get("action")
+            if action not in ALLOWED_LAYOUT_ACTIONS:
+                continue
             # Validate bundle IDs exist
             valid_bids = [bid for bid in op_data.get("bundle_ids", []) if bid in valid_bundle_ids]
-            if not valid_bids and op_data.get("action") != "rename_folder":
+            if not valid_bids and action == "rename_folder":
+                valid_bids = []
+            elif not valid_bids and action in ("compact_to_single_page", "rebuild_pages"):
+                continue
+            elif not valid_bids:
                 continue  # Skip operations with all-invalid bundle IDs
 
             ops.append(LayoutOperation(
-                action=op_data["action"],
+                action=action,
                 bundle_ids=valid_bids,
                 target_page=op_data.get("target_page"),
                 folder_name=op_data.get("folder_name"),
@@ -319,13 +341,17 @@ def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperatio
 
         elif op.action == "move_to_page":
             if op.target_page is not None and 0 <= op.target_page < len(preview.pages):
+                snapshot = copy.deepcopy(preview)
                 items = _extract_apps_from_layout(preview, op.bundle_ids)
                 page = preview.pages[op.target_page]
                 if len(page) + len(items) <= 24:
                     page.extend(items)
+                else:
+                    preview = snapshot
 
         elif op.action == "create_folder":
             if op.folder_name:
+                snapshot = copy.deepcopy(preview)
                 from unjiggle.models import FolderItem, LayoutItem
                 items = _extract_apps_from_layout(preview, op.bundle_ids)
                 apps = [item.app for item in items if item.is_app]
@@ -334,8 +360,14 @@ def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperatio
                         display_name=op.folder_name,
                         pages=[apps],
                     ))
-                    if preview.pages:
-                        preview.pages[0].append(folder)
+                    for page in preview.pages:
+                        if len(page) < 24:
+                            page.append(folder)
+                            break
+                    else:
+                        preview.pages.append([folder])
+                else:
+                    preview = snapshot
 
         elif op.action == "rename_folder":
             if op.old_name and op.folder_name:
@@ -346,19 +378,31 @@ def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperatio
 
         elif op.action == "move_to_folder":
             if op.folder_name:
+                snapshot = copy.deepcopy(preview)
                 items = _extract_apps_from_layout(preview, op.bundle_ids)
                 apps = [item.app for item in items if item.is_app]
+                added = False
                 for folder in preview.all_folders():
                     if folder.display_name == op.folder_name:
                         if folder.pages:
                             folder.pages[0].extend(apps)
                         else:
                             folder.pages.append(apps)
+                        added = True
                         break
+                if not added:
+                    preview = snapshot
 
         elif op.action == "compact_to_single_page":
             items = _extract_apps_from_layout(preview, op.bundle_ids)
             preview.pages = [items] if items else []
+
+        elif op.action == "rebuild_pages":
+            items = _extract_apps_from_layout(preview, op.bundle_ids)
+            preview.pages = [
+                items[index:index + 24]
+                for index in range(0, len(items), 24)
+            ]
 
     # Clean up empty folders from pages
     for page in preview.pages:

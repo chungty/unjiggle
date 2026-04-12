@@ -51,7 +51,7 @@ def render_to_png(html_path: Path, png_path: Path) -> bool:
             ],
             check=True,
             capture_output=True,
-            timeout=15,
+            timeout=30,
         )
         return png_path.exists()
     except (subprocess.SubprocessError, OSError):

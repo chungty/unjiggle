@@ -298,3 +298,88 @@ class TestApplyOperations:
             "com.tinyspeck.chatlyio",
         ]
         assert "com.darksky.darksky" in result["ignored"]
+
+    def test_rebuild_pages_reorders_apps_into_packed_pages(self):
+        raw = _make_raw_layout()
+        layout = _make_layout_with_raw(raw)
+
+        ops = [LayoutOperation(
+            action="rebuild_pages",
+            bundle_ids=[
+                "com.tinyspeck.chatlyio",
+                "com.spotify.client",
+                "com.apple.Maps",
+            ],
+        )]
+
+        result = apply_operations(layout, ops)
+
+        assert len(result["iconLists"]) == 1
+        assert result["iconLists"][0][:3] == [
+            "com.tinyspeck.chatlyio",
+            "com.spotify.client",
+            "com.apple.Maps",
+        ]
+
+    def test_move_to_page_keeps_app_when_target_page_is_full(self):
+        raw = {
+            "buttonBar": [],
+            "iconLists": [
+                [f"com.test.full{i}" for i in range(24)],
+                ["com.test.extra"],
+            ],
+            "ignored": [],
+        }
+        layout = _make_layout_with_raw(raw)
+
+        result = apply_operations(layout, [
+            LayoutOperation(
+                action="move_to_page",
+                bundle_ids=["com.test.extra"],
+                target_page=0,
+            ),
+        ])
+
+        assert len(result["iconLists"][0]) == 24
+        assert result["iconLists"][1] == ["com.test.extra"]
+
+    def test_move_to_missing_folder_is_no_op(self):
+        raw = _make_raw_layout()
+        layout = _make_layout_with_raw(raw)
+
+        result = apply_operations(layout, [
+            LayoutOperation(
+                action="move_to_folder",
+                bundle_ids=["com.apple.Maps"],
+                folder_name="Does Not Exist",
+            ),
+        ])
+
+        assert "com.apple.Maps" in result["iconLists"][0]
+
+    def test_create_folder_adds_new_page_when_existing_pages_are_full(self):
+        raw = {
+            "buttonBar": [],
+            "iconLists": [
+                [
+                    *[f"com.test.full{i}" for i in range(23)],
+                    {
+                        "displayName": "Source",
+                        "iconLists": [["com.test.extra", "com.test.extra2"]],
+                        "listType": "folder",
+                    },
+                ],
+            ],
+            "ignored": [],
+        }
+        layout = _make_layout_with_raw(raw)
+        ops = [LayoutOperation(
+            action="create_folder",
+            bundle_ids=["com.test.extra", "com.test.extra2"],
+            folder_name="Overflow",
+        )]
+
+        result = apply_operations(layout, ops)
+
+        assert len(result["iconLists"]) == 2
+        assert result["iconLists"][1][0]["displayName"] == "Overflow"
