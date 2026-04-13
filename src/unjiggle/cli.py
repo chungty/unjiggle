@@ -1035,7 +1035,7 @@ def demo():
 
 
 # ---------------------------------------------------------------------------
-# JSON API command group — structured output for the Mac app (no Rich, no TTY)
+# JSON API command group — structured output for external clients (no Rich, no TTY)
 # ---------------------------------------------------------------------------
 
 
@@ -1059,7 +1059,7 @@ def _device_dict(device) -> dict:
 
 
 def _layout_items_to_json(items, metadata: dict) -> list:
-    """Convert layout items into tagged JSON matching the Swift LayoutItem enum."""
+    """Convert layout items into tagged JSON for the client interface contract."""
     output = []
     for item in items:
         if item.is_app:
@@ -1103,7 +1103,7 @@ def _layout_items_to_json(items, metadata: dict) -> list:
 
 
 def _layout_to_pages_json(layout, metadata: dict) -> list:
-    """Convert layout pages to tagged JSON matching the Swift LayoutItem enum."""
+    """Convert layout pages to tagged JSON for the client interface contract."""
     return [_layout_items_to_json(page, metadata) for page in layout.pages]
 
 
@@ -1219,7 +1219,7 @@ def _analysis_to_json(result) -> dict:
 
 @main.group()
 def json():
-    """Machine-readable JSON output for the Mac app. No Rich formatting."""
+    """Machine-readable JSON output for external clients. No Rich formatting."""
     pass
 
 
