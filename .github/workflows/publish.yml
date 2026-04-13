@@ -7,7 +7,7 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read   # checkout private repo
+      contents: read
       id-token: write  # trusted publishing via OIDC
     steps:
       - uses: actions/checkout@v4
