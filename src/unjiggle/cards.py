@@ -163,16 +163,16 @@ MIRROR_CARD_TEMPLATE = Template("""\
   text-align: left;
 }
 .phase-name {
-  font-size: 20px; font-weight: 700; color: rgba(255,255,255,0.8);
+  font-size: 22px; font-weight: 700; color: rgba(255,255,255,0.85);
   margin-bottom: 6px;
 }
 .phase-apps {
-  font-size: 14px; color: rgba(255,255,255,0.3); line-height: 1.4;
+  font-size: 20px; color: rgba(255,255,255,0.5); line-height: 1.4;
 }
 
 .roast {
-  font-size: 22px; font-weight: 400; color: rgba(255,255,255,0.4);
-  line-height: 1.65; max-width: 820px;
+  font-size: 28px; font-weight: 400; color: rgba(255,255,255,0.55);
+  line-height: 1.55; max-width: 820px;
   font-style: italic;
 }
 </style>
@@ -191,7 +191,7 @@ MIRROR_CARD_TEMPLATE = Template("""\
 
       {% if phases %}
       <div class="phases">
-        {% for phase in phases[:4] %}
+        {% for phase in phases[:2] %}
         <div class="phase">
           <div class="phase-name">{{ phase.name }}</div>
           <div class="phase-apps">{{ phase.apps[:3]|join(', ') }}</div>
@@ -271,17 +271,17 @@ OBITUARY_CARD_TEMPLATE = Template("""\
   margin-bottom: 10px;
 }
 .tomb-name {
-  font-size: 20px; font-weight: 700; color: rgba(255,255,255,0.85);
+  font-size: 22px; font-weight: 700; color: rgba(255,255,255,0.85);
 }
 .tomb-dates {
-  font-size: 14px; color: rgba(255,255,255,0.25);
+  font-size: 16px; color: rgba(255,255,255,0.35);
 }
 .tomb-eulogy {
-  font-size: 17px; color: rgba(255,255,255,0.45);
-  line-height: 1.55;
+  font-size: 22px; color: rgba(255,255,255,0.55);
+  line-height: 1.5;
 }
 .tomb-cause {
-  font-size: 13px; color: rgba(255,255,255,0.2);
+  font-size: 16px; color: rgba(255,255,255,0.35);
   margin-top: 8px; font-style: italic;
 }
 
@@ -306,7 +306,7 @@ OBITUARY_CARD_TEMPLATE = Template("""\
       </div>
 
       <div class="tombstones">
-        {% for obit in obituaries[:4] %}
+        {% for obit in obituaries[:3] %}
         <div class="tombstone">
           <div class="tomb-header">
             <span class="tomb-name">&#x26B0;&#xFE0F; {{ obit.app_name }}</span>
@@ -374,19 +374,19 @@ SWIPE_TAX_CARD_TEMPLATE = Template("""\
 }
 .bar-row { display: flex; align-items: center; gap: 16px; }
 .bar-label {
-  font-size: 16px; color: rgba(255,255,255,0.4);
-  width: 100px; text-align: right;
+  font-size: 20px; color: rgba(255,255,255,0.5);
+  width: 110px; text-align: right;
 }
 .bar-track {
   flex: 1; height: 32px; background: rgba(255,255,255,0.04);
   border-radius: 8px; overflow: hidden;
 }
-.bar-fill { height: 100%; border-radius: 8px; }
+.bar-fill { height: 100%; border-radius: 8px; min-width: 48px; }
 .bar-fill.current { background: linear-gradient(90deg, #ef4444, #f97316); }
 .bar-fill.optimal { background: linear-gradient(90deg, #22c55e, #4ade80); }
 .bar-value {
-  font-size: 16px; font-weight: 600; color: rgba(255,255,255,0.6);
-  width: 110px;
+  font-size: 20px; font-weight: 600; color: rgba(255,255,255,0.75);
+  width: 120px;
 }
 
 .offenders {
@@ -404,10 +404,10 @@ SWIPE_TAX_CARD_TEMPLATE = Template("""\
   width: 28px;
 }
 .offender-name {
-  font-size: 16px; font-weight: 600; color: rgba(255,255,255,0.65);
+  font-size: 18px; font-weight: 600; color: rgba(255,255,255,0.7);
   flex: 1;
 }
-.offender-page { font-size: 13px; color: rgba(255,255,255,0.25); }
+.offender-page { font-size: 16px; color: rgba(255,255,255,0.35); }
 .offender-waste { font-size: 16px; font-weight: 700; color: #f87171; }
 
 .savings-text {
