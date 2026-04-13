@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Pre-commit hook: scan staged diff for private product references.
+# Skip with: SKIP_IP_CHECK=1 git commit ...
+
+set -euo pipefail
+
+if [[ "${SKIP_IP_CHECK:-}" == "1" ]]; then
+  exit 0
+fi
+
+PATTERNS=(
+  "Swift LayoutItem"
+  "SwiftUI"
+  "UnjiggleApp"
+  "for the Mac app"
+  "Private client"
+  "checkout private repo"
+  "upsell"
+  "funnel"
+  "unjiggle-private"
+  "challenge-take"
+  "challenge-status"
+  "challenge-giveup"
+)
+
+found=0
+for pattern in "${PATTERNS[@]}"; do
+  if git diff --cached --diff-filter=d -U0 | grep -qi "$pattern"; then
+    if [[ $found -eq 0 ]]; then
+      echo ""
+      echo "  IP boundary check failed. Staged diff contains private references:"
+      echo ""
+    fi
+    echo "    - \"$pattern\""
+    found=1
+  fi
+done
+
+if [[ $found -eq 1 ]]; then
+  echo ""
+  echo "  This is a PUBLIC repo. These patterns suggest private product details."
+  echo "  Review your changes, or skip with: SKIP_IP_CHECK=1 git commit ..."
+  echo ""
+  exit 1
+fi
