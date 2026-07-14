@@ -1,6 +1,10 @@
 """Unit tests for IconState write normalization (iOS 27 App Library)."""
 
-from unjiggle.device import _bundle_ids_in_icon_state, icon_state_for_write
+from unjiggle.device import (
+    _augment_ignored_with_off_homescreen_apps,
+    _bundle_ids_in_icon_state,
+    icon_state_for_write,
+)
 
 
 def test_icon_state_for_write_converts_list_to_dict():
@@ -48,3 +52,30 @@ def test_bundle_ids_in_icon_state_includes_folder_apps():
         "com.apple.mobilephone",
         "com.ruanmei.ithome",
     }
+
+
+def test_augment_ignored_includes_system_apps_not_just_user(monkeypatch):
+    """iOS 27 re-adds stock apps unless ignored covers System as well as User."""
+    payload = {
+        "buttonBar": [{"bundleIdentifier": "com.apple.mobilephone"}],
+        "iconLists": [[{"bundleIdentifier": "com.tencent.xin"}]],
+        "ignored": [],
+    }
+
+    monkeypatch.setattr(
+        "unjiggle.device._list_installed_app_bundle_ids",
+        lambda lockdown: [
+            "com.apple.mobilephone",  # on HS → must not be ignored
+            "com.tencent.xin",        # on HS → must not be ignored
+            "com.apple.tips",         # system, off HS
+            "com.apple.mobilemail",   # system, off HS
+            "com.example.thirdparty", # user, off HS
+        ],
+    )
+
+    out = _augment_ignored_with_off_homescreen_apps(lockdown=object(), payload=payload)
+    assert "com.apple.tips" in out["ignored"]
+    assert "com.apple.mobilemail" in out["ignored"]
+    assert "com.example.thirdparty" in out["ignored"]
+    assert "com.apple.mobilephone" not in out["ignored"]
+    assert "com.tencent.xin" not in out["ignored"]

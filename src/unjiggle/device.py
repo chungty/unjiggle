@@ -266,55 +266,85 @@ def icon_state_for_write(
     return payload
 
 
-def _list_user_app_bundle_ids(lockdown) -> list[str]:
-    """Return installed user (third-party) app bundle IDs."""
+def _list_installed_app_bundle_ids(lockdown) -> list[str]:
+    """Return installed home-screen-eligible app bundle IDs (User + System).
+
+    User-only listing is not enough: iOS 27 setIconState re-adds omitted *system*
+    apps (Tips, Mail, Watch, …) unless they appear in ``ignored``.
+    """
     from pymobiledevice3.services.installation_proxy import InstallationProxyService
 
     async def _list():
         async with InstallationProxyService(lockdown=lockdown) as iproxy:
-            apps = await iproxy.get_apps(application_type="User")
+            # No application_type filter → User + System (+ any other types).
+            apps = await iproxy.get_apps()
             if isinstance(apps, dict):
-                return [bid for bid in apps.keys() if bid]
-            return [
-                app.get("CFBundleIdentifier")
-                for app in apps
-                if app.get("CFBundleIdentifier")
-            ]
+                items = apps.items()
+            else:
+                items = [
+                    (app.get("CFBundleIdentifier"), app)
+                    for app in apps
+                    if app.get("CFBundleIdentifier")
+                ]
+
+            bids: list[str] = []
+            for bid, meta in items:
+                if not bid:
+                    continue
+                # Prefer ApplicationType when present; keep unknown types too so we
+                # never miss a SpringBoard-visible system app.
+                if isinstance(meta, dict):
+                    app_type = meta.get("ApplicationType")
+                    if app_type is not None and app_type not in ("User", "System"):
+                        continue
+                bids.append(bid)
+            return bids
 
     return _run(_list())
 
 
-def _augment_ignored_with_off_homescreen_user_apps(lockdown, payload: dict) -> dict:
-    """Ensure third-party apps not on the home screen stay in App Library.
+# Backward-compatible alias
+_list_user_app_bundle_ids = _list_installed_app_bundle_ids
 
-    After a successful archive, getIconState no longer returns those apps or an
-    ``ignored`` list. Subsequent list-shaped writes would otherwise re-materialize
-    them. Seed ``ignored`` from installed user apps missing from the HS payload.
+
+def _augment_ignored_with_off_homescreen_apps(lockdown, payload: dict) -> dict:
+    """Keep off-home-screen apps (user *and* system) in App Library across writes.
+
+    getIconState does not return ``ignored``. On iOS 27, writing a layout without
+    listing omitted apps under ``ignored`` causes SpringBoard to re-materialize
+    them on the home screen — including stock Apple apps, not only third-party.
+    Seed ``ignored`` from every installed User/System app missing from the HS
+    payload.
     """
     try:
-        user_apps = _list_user_app_bundle_ids(lockdown)
+        installed = _list_installed_app_bundle_ids(lockdown)
     except Exception:
         return payload
 
     on_hs = _bundle_ids_in_icon_state(payload)
     ignored = list(payload.get("ignored") or [])
-    for bid in user_apps:
+    for bid in installed:
         if bid and bid not in on_hs and bid not in ignored:
             ignored.append(bid)
     payload["ignored"] = ignored
     return payload
 
 
+# Backward-compatible alias
+_augment_ignored_with_off_homescreen_user_apps = _augment_ignored_with_off_homescreen_apps
+
+
 def write_layout(lockdown, state, ignored: list[str] | None = None) -> None:
     """Write a layout state back to the device.
 
     Always sends dict-form IconState (buttonBar/iconLists/ignored). On iOS 27,
-    list-form setIconState silently puts omitted apps back on the home screen.
+    list-form setIconState silently puts omitted apps back on the home screen
+    (both third-party and system apps) unless they are listed in ``ignored``.
     """
     from pymobiledevice3.services.springboard import SpringBoardServicesService
 
     payload = icon_state_for_write(state, ignored=ignored)
-    payload = _augment_ignored_with_off_homescreen_user_apps(lockdown, payload)
+    payload = _augment_ignored_with_off_homescreen_apps(lockdown, payload)
 
     async def _write():
         async with SpringBoardServicesService(lockdown) as sbs:
