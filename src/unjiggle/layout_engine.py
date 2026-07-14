@@ -17,7 +17,7 @@ from unjiggle.models import HomeScreenLayout
 def _get_pages(raw) -> list[list]:
     """Get the pages list from raw state, handling both formats."""
     if isinstance(raw, list):
-        # iOS 26: raw[0] = dock, raw[1:] = pages
+        # Modern list format: raw[0] = dock, raw[1:] = pages
         return raw[1:] if len(raw) > 1 else []
     else:
         # Legacy dict format
@@ -27,7 +27,7 @@ def _get_pages(raw) -> list[list]:
 def _set_pages(raw, pages: list[list]) -> None:
     """Set the pages in raw state, handling both formats."""
     if isinstance(raw, list):
-        # iOS 26: keep dock (raw[0]), replace pages
+        # Modern list format: keep dock (raw[0]), replace pages
         dock = raw[0] if raw else []
         raw.clear()
         raw.append(dock)
@@ -47,8 +47,8 @@ def _get_dock(raw) -> list:
 def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]):
     """Apply operations to a copy of the raw state and return the modified state.
 
-    This is what gets written to the device. Handles both iOS 26 (list format)
-    and legacy (dict format).
+    This is what gets written to the device. Handles both modern list format
+    and legacy dict format IconState payloads.
     """
     raw = copy.deepcopy(layout.raw)
 
@@ -85,10 +85,12 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                 snapshot = copy.deepcopy(raw)
                 extracted = _raw_extract_apps(raw, op.bundle_ids)
                 if extracted:
+                    # iOS 27 (and current SpringBoard formatVersion 2) accepts
+                    # listType=folder. iconType=folder is silently dropped on write.
                     folder_dict = {
                         "displayName": op.folder_name,
                         "iconLists": [extracted],
-                        "iconType": "folder",
+                        "listType": "folder",
                     }
                     pages = _get_pages(raw)
                     placed = False
@@ -227,7 +229,12 @@ def _raw_extract_apps(raw, bundle_ids: list[str]) -> list:
 
     extracted = []
     for bid in bundle_ids:
-        extracted.append(extracted_by_bid.get(bid, {"bundleIdentifier": bid, "iconType": "app"}))
+        # Prefer the live raw item shape; fall back to a minimal app dict without
+        # iconType (iOS 27 rejects some iconType values on write).
+        extracted.append(extracted_by_bid.get(bid, {
+            "bundleIdentifier": bid,
+            "displayIdentifier": bid,
+        }))
 
     return extracted
 

@@ -149,6 +149,9 @@ class TestApplyOperations:
             for item in page:
                 if isinstance(item, dict) and item.get("displayName") == "Printers":
                     found = True
+                    # iOS 27 requires listType=folder; iconType=folder is dropped on write
+                    assert item.get("listType") == "folder"
+                    assert "iconType" not in item
                     # Should contain the printer apps
                     folder_apps = item["iconLists"][0]
                     folder_bids = [a if isinstance(a, str) else a.get("bundleIdentifier", "") for a in folder_apps]

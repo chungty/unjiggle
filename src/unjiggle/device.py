@@ -1,10 +1,11 @@
 """iPhone device connection and layout reading via pymobiledevice3.
 
-iOS 26 format: get_icon_state() returns a flat list of lists.
+Modern format (iOS 26+/formatVersion 2): get_icon_state() returns a flat list of lists.
   - state[0] = dock items
   - state[1:] = home screen pages
-  - Each item is a dict with bundleIdentifier, displayName, iconType, etc.
-  - Folders have iconLists with nested app dicts
+  - Each app is a dict with bundleIdentifier, displayName, displayIdentifier, etc.
+  - Folders use listType: "folder" with iconLists of nested app dicts
+    (iconType: "folder" is rejected/silently dropped on iOS 27 writes)
   - Widgets have elementType: "widget" or iconType: "custom"
 """
 
@@ -99,9 +100,11 @@ def _parse_item(raw_item) -> LayoutItem | None:
             raw=raw_item,
         ))
 
-    # Folder (has iconLists with actual content)
-    if raw_item.get("iconType") == "folder" or (
-        raw_item.get("iconLists") and any(raw_item.get("iconLists", []))
+    # Folder (iOS 27 normalizes to listType=folder; older paths used iconType)
+    if (
+        raw_item.get("listType") == "folder"
+        or raw_item.get("iconType") == "folder"
+        or (raw_item.get("iconLists") and any(raw_item.get("iconLists", [])))
     ):
         folder_pages = []
         for folder_page in raw_item.get("iconLists", []):
@@ -121,7 +124,7 @@ def _parse_item(raw_item) -> LayoutItem | None:
             raw=raw_item,
         ))
 
-    # Regular app (dict format in iOS 26)
+    # Regular app (dict format in modern IconState)
     if bundle_id:
         return LayoutItem(app=AppItem(
             bundle_id=bundle_id,
@@ -133,7 +136,7 @@ def _parse_item(raw_item) -> LayoutItem | None:
 
 def parse_layout_state(raw_state) -> HomeScreenLayout:
     """Parse a raw icon-state payload into a HomeScreenLayout."""
-    # iOS 26 format: flat list of lists
+    # Modern list format: flat list of lists
     # state[0] = dock, state[1:] = pages
     if isinstance(raw_state, list):
         dock_raw = raw_state[0] if raw_state else []
