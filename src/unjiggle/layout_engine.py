@@ -44,24 +44,46 @@ def _get_dock(raw) -> list:
         return raw.get("buttonBar", [])
 
 
+def _ensure_dict_raw(raw):
+    """Convert list-format IconState to dict form (buttonBar/iconLists/ignored).
+
+    iOS 27 setIconState only honors App Library membership via the ``ignored``
+    key, which exists on dict-form payloads. List-form writes re-add omitted apps.
+    """
+    if isinstance(raw, dict):
+        raw.setdefault("ignored", [])
+        return raw
+    if isinstance(raw, list):
+        return {
+            "buttonBar": raw[0] if raw else [],
+            "iconLists": list(raw[1:] if len(raw) > 1 else []),
+            "ignored": [],
+        }
+    raise TypeError(f"Unexpected icon state type: {type(raw)!r}")
+
+
 def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]):
     """Apply operations to a copy of the raw state and return the modified state.
 
     This is what gets written to the device. Handles both modern list format
     and legacy dict format IconState payloads.
+
+    Archiving (move_to_app_library) always upgrades list-format raw to dict form
+    so the ``ignored`` array is preserved for iOS 27 setIconState.
     """
     raw = copy.deepcopy(layout.raw)
 
     for op in operations:
         if op.action in ("move_to_app_library", "delete"):
+            # App Library membership requires dict-form + ignored on iOS 27.
+            if op.action == "move_to_app_library" or isinstance(raw, list):
+                raw = _ensure_dict_raw(raw)
             _raw_remove_apps(raw, op.bundle_ids)
-            # For dict-format raw (legacy), track ignored apps
-            if isinstance(raw, dict) and op.action == "move_to_app_library":
-                ignored = raw.get("ignored", [])
+            if op.action == "move_to_app_library" and isinstance(raw, dict):
+                ignored = raw.setdefault("ignored", [])
                 for bid in op.bundle_ids:
                     if bid not in ignored:
                         ignored.append(bid)
-                raw["ignored"] = ignored
             # Note: actual app deletion (uninstall) happens via a separate
             # pymobiledevice3 API call, not through IconState. The layout
             # engine just removes the icon from the home screen.
@@ -156,15 +178,18 @@ def compact_to_single_page(
     keep_visible_bundle_ids = list(dict.fromkeys(keep_visible_bundle_ids))[:24]
     archive_bundle_ids = list(dict.fromkeys(archive_bundle_ids))
 
+    # Archiving requires dict-form + ignored on iOS 27.
+    if archive_bundle_ids:
+        raw = _ensure_dict_raw(raw)
+
     first_page = _raw_extract_apps(raw, keep_visible_bundle_ids) if keep_visible_bundle_ids else []
     _set_pages(raw, [first_page] if first_page else [])
 
     if isinstance(raw, dict):
-        ignored = raw.get("ignored", [])
+        ignored = raw.setdefault("ignored", [])
         for bid in archive_bundle_ids:
             if bid not in ignored:
                 ignored.append(bid)
-        raw["ignored"] = ignored
 
     return raw
 
