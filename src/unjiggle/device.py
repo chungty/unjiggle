@@ -1,18 +1,25 @@
 """iPhone device connection and layout reading via pymobiledevice3.
 
-iOS 26 format: get_icon_state() returns a flat list of lists.
+Modern format (iOS 26+/formatVersion 2): get_icon_state() returns a flat list of lists.
   - state[0] = dock items
   - state[1:] = home screen pages
-  - Each item is a dict with bundleIdentifier, displayName, iconType, etc.
-  - Folders have iconLists with nested app dicts
+  - Each app is a dict with bundleIdentifier, displayName, displayIdentifier, etc.
+  - Folders use listType: "folder" with iconLists of nested app dicts
+    (iconType: "folder" is rejected/silently dropped on iOS 27 writes)
   - Widgets have elementType: "widget" or iconType: "custom"
+
+setIconState on iOS 27:
+  - List-format writes omit `ignored`; SpringBoard re-adds missing apps to the HS
+  - Dict form {buttonBar, iconLists, ignored} is required to keep apps in App Library
 """
 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from pathlib import Path
+from typing import Any
 
 from unjiggle.models import (
     AppItem,
@@ -99,9 +106,11 @@ def _parse_item(raw_item) -> LayoutItem | None:
             raw=raw_item,
         ))
 
-    # Folder (has iconLists with actual content)
-    if raw_item.get("iconType") == "folder" or (
-        raw_item.get("iconLists") and any(raw_item.get("iconLists", []))
+    # Folder (iOS 27 normalizes to listType=folder; older paths used iconType)
+    if (
+        raw_item.get("listType") == "folder"
+        or raw_item.get("iconType") == "folder"
+        or (raw_item.get("iconLists") and any(raw_item.get("iconLists", [])))
     ):
         folder_pages = []
         for folder_page in raw_item.get("iconLists", []):
@@ -121,7 +130,7 @@ def _parse_item(raw_item) -> LayoutItem | None:
             raw=raw_item,
         ))
 
-    # Regular app (dict format in iOS 26)
+    # Regular app (dict format in modern IconState)
     if bundle_id:
         return LayoutItem(app=AppItem(
             bundle_id=bundle_id,
@@ -133,7 +142,7 @@ def _parse_item(raw_item) -> LayoutItem | None:
 
 def parse_layout_state(raw_state) -> HomeScreenLayout:
     """Parse a raw icon-state payload into a HomeScreenLayout."""
-    # iOS 26 format: flat list of lists
+    # Modern list format: flat list of lists
     # state[0] = dock, state[1:] = pages
     if isinstance(raw_state, list):
         dock_raw = raw_state[0] if raw_state else []
@@ -193,13 +202,153 @@ def read_layout(lockdown) -> HomeScreenLayout:
     return parse_layout_state(raw_state)
 
 
-def write_layout(lockdown, state) -> None:
-    """Write a layout state back to the device."""
+def _bundle_ids_in_icon_state(state: Any) -> set[str]:
+    """Collect every app bundle ID visible on the dock/pages (including inside folders)."""
+    if isinstance(state, list):
+        pages = state
+    elif isinstance(state, dict):
+        pages = [state.get("buttonBar", [])] + list(state.get("iconLists", []))
+    else:
+        return set()
+
+    found: set[str] = set()
+    for page in pages:
+        if not isinstance(page, list):
+            continue
+        for item in page:
+            if isinstance(item, str):
+                found.add(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+            bid = item.get("bundleIdentifier")
+            if bid:
+                found.add(bid)
+            for folder_page in item.get("iconLists", []) or []:
+                for entry in folder_page:
+                    if isinstance(entry, str):
+                        found.add(entry)
+                    elif isinstance(entry, dict) and entry.get("bundleIdentifier"):
+                        found.add(entry["bundleIdentifier"])
+    return found
+
+
+def icon_state_for_write(
+    state: Any,
+    ignored: list[str] | None = None,
+) -> dict:
+    """Normalize IconState into the dict form SpringBoard needs for setIconState.
+
+    iOS 27 re-adds omitted apps unless they appear in ``ignored`` (App Library).
+    getIconState returns a list and does not include ``ignored``, so writers must
+    always send dict form when any app should stay off the home screen.
+    """
+    if isinstance(state, list):
+        payload = {
+            "buttonBar": copy.deepcopy(state[0]) if state else [],
+            "iconLists": copy.deepcopy(state[1:]) if len(state) > 1 else [],
+            "ignored": [],
+        }
+    elif isinstance(state, dict):
+        payload = copy.deepcopy(state)
+        payload.setdefault("buttonBar", [])
+        payload.setdefault("iconLists", [])
+        payload.setdefault("ignored", [])
+    else:
+        raise TypeError(f"Unexpected icon state type for write: {type(state)!r}")
+
+    on_hs = _bundle_ids_in_icon_state(payload)
+    merged: list[str] = []
+    for bid in list(payload.get("ignored") or []) + list(ignored or []):
+        if bid and bid not in on_hs and bid not in merged:
+            merged.append(bid)
+    payload["ignored"] = merged
+    return payload
+
+
+def _list_installed_app_bundle_ids(lockdown) -> list[str]:
+    """Return installed home-screen-eligible app bundle IDs (User + System).
+
+    User-only listing is not enough: iOS 27 setIconState re-adds omitted *system*
+    apps (Tips, Mail, Watch, …) unless they appear in ``ignored``.
+    """
+    from pymobiledevice3.services.installation_proxy import InstallationProxyService
+
+    async def _list():
+        async with InstallationProxyService(lockdown=lockdown) as iproxy:
+            # No application_type filter → User + System (+ any other types).
+            apps = await iproxy.get_apps()
+            if isinstance(apps, dict):
+                items = apps.items()
+            else:
+                items = [
+                    (app.get("CFBundleIdentifier"), app)
+                    for app in apps
+                    if app.get("CFBundleIdentifier")
+                ]
+
+            bids: list[str] = []
+            for bid, meta in items:
+                if not bid:
+                    continue
+                # Prefer ApplicationType when present; keep unknown types too so we
+                # never miss a SpringBoard-visible system app.
+                if isinstance(meta, dict):
+                    app_type = meta.get("ApplicationType")
+                    if app_type is not None and app_type not in ("User", "System"):
+                        continue
+                bids.append(bid)
+            return bids
+
+    return _run(_list())
+
+
+# Backward-compatible alias
+_list_user_app_bundle_ids = _list_installed_app_bundle_ids
+
+
+def _augment_ignored_with_off_homescreen_apps(lockdown, payload: dict) -> dict:
+    """Keep off-home-screen apps (user *and* system) in App Library across writes.
+
+    getIconState does not return ``ignored``. On iOS 27, writing a layout without
+    listing omitted apps under ``ignored`` causes SpringBoard to re-materialize
+    them on the home screen — including stock Apple apps, not only third-party.
+    Seed ``ignored`` from every installed User/System app missing from the HS
+    payload.
+    """
+    try:
+        installed = _list_installed_app_bundle_ids(lockdown)
+    except Exception:
+        return payload
+
+    on_hs = _bundle_ids_in_icon_state(payload)
+    ignored = list(payload.get("ignored") or [])
+    for bid in installed:
+        if bid and bid not in on_hs and bid not in ignored:
+            ignored.append(bid)
+    payload["ignored"] = ignored
+    return payload
+
+
+# Backward-compatible alias
+_augment_ignored_with_off_homescreen_user_apps = _augment_ignored_with_off_homescreen_apps
+
+
+def write_layout(lockdown, state, ignored: list[str] | None = None) -> None:
+    """Write a layout state back to the device.
+
+    Always sends dict-form IconState (buttonBar/iconLists/ignored). On iOS 27,
+    list-form setIconState silently puts omitted apps back on the home screen
+    (both third-party and system apps) unless they are listed in ``ignored``.
+    """
     from pymobiledevice3.services.springboard import SpringBoardServicesService
+
+    payload = icon_state_for_write(state, ignored=ignored)
+    payload = _augment_ignored_with_off_homescreen_apps(lockdown, payload)
 
     async def _write():
         async with SpringBoardServicesService(lockdown) as sbs:
-            await sbs.set_icon_state(state)
+            await sbs.set_icon_state(payload)
 
     _run(_write())
 

@@ -98,6 +98,45 @@ class TestApplyOperations:
         assert "com.darksky.darksky" in result["ignored"]
         assert "com.ibm.watson.ios" in result["ignored"]
 
+    def test_move_to_app_library_upgrades_list_format_with_ignored(self):
+        """iOS 27 list-format IconState must become dict + ignored to stay hidden."""
+        raw = [
+            [{"bundleIdentifier": "com.apple.mobilephone", "displayName": "Phone"}],
+            [
+                {
+                    "bundleIdentifier": "com.ruanmei.ithome",
+                    "displayName": "IT之家",
+                    "displayIdentifier": "com.ruanmei.ithome",
+                },
+                {
+                    "bundleIdentifier": "com.atebits.Tweetie2",
+                    "displayName": "X",
+                    "displayIdentifier": "com.atebits.Tweetie2",
+                },
+            ],
+        ]
+        layout = HomeScreenLayout(dock=[], pages=[], raw=raw)
+
+        result = apply_operations(layout, [
+            LayoutOperation(
+                action="move_to_app_library",
+                bundle_ids=["com.ruanmei.ithome"],
+            ),
+        ])
+
+        assert isinstance(result, dict)
+        assert "buttonBar" in result
+        assert "iconLists" in result
+        assert "com.ruanmei.ithome" in result["ignored"]
+        page_bids = [
+            item.get("bundleIdentifier")
+            for page in result["iconLists"]
+            for item in page
+            if isinstance(item, dict)
+        ]
+        assert "com.ruanmei.ithome" not in page_bids
+        assert "com.atebits.Tweetie2" in page_bids
+
     def test_empty_pages_cleaned_up(self):
         raw = _make_raw_layout()
         layout = _make_layout_with_raw(raw)
@@ -149,6 +188,9 @@ class TestApplyOperations:
             for item in page:
                 if isinstance(item, dict) and item.get("displayName") == "Printers":
                     found = True
+                    # iOS 27 requires listType=folder; iconType=folder is dropped on write
+                    assert item.get("listType") == "folder"
+                    assert "iconType" not in item
                     # Should contain the printer apps
                     folder_apps = item["iconLists"][0]
                     folder_bids = [a if isinstance(a, str) else a.get("bundleIdentifier", "") for a in folder_apps]

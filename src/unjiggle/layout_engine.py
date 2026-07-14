@@ -17,7 +17,7 @@ from unjiggle.models import HomeScreenLayout
 def _get_pages(raw) -> list[list]:
     """Get the pages list from raw state, handling both formats."""
     if isinstance(raw, list):
-        # iOS 26: raw[0] = dock, raw[1:] = pages
+        # Modern list format: raw[0] = dock, raw[1:] = pages
         return raw[1:] if len(raw) > 1 else []
     else:
         # Legacy dict format
@@ -27,7 +27,7 @@ def _get_pages(raw) -> list[list]:
 def _set_pages(raw, pages: list[list]) -> None:
     """Set the pages in raw state, handling both formats."""
     if isinstance(raw, list):
-        # iOS 26: keep dock (raw[0]), replace pages
+        # Modern list format: keep dock (raw[0]), replace pages
         dock = raw[0] if raw else []
         raw.clear()
         raw.append(dock)
@@ -44,24 +44,46 @@ def _get_dock(raw) -> list:
         return raw.get("buttonBar", [])
 
 
+def _ensure_dict_raw(raw):
+    """Convert list-format IconState to dict form (buttonBar/iconLists/ignored).
+
+    iOS 27 setIconState only honors App Library membership via the ``ignored``
+    key, which exists on dict-form payloads. List-form writes re-add omitted apps.
+    """
+    if isinstance(raw, dict):
+        raw.setdefault("ignored", [])
+        return raw
+    if isinstance(raw, list):
+        return {
+            "buttonBar": raw[0] if raw else [],
+            "iconLists": list(raw[1:] if len(raw) > 1 else []),
+            "ignored": [],
+        }
+    raise TypeError(f"Unexpected icon state type: {type(raw)!r}")
+
+
 def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]):
     """Apply operations to a copy of the raw state and return the modified state.
 
-    This is what gets written to the device. Handles both iOS 26 (list format)
-    and legacy (dict format).
+    This is what gets written to the device. Handles both modern list format
+    and legacy dict format IconState payloads.
+
+    Archiving (move_to_app_library) always upgrades list-format raw to dict form
+    so the ``ignored`` array is preserved for iOS 27 setIconState.
     """
     raw = copy.deepcopy(layout.raw)
 
     for op in operations:
         if op.action in ("move_to_app_library", "delete"):
+            # App Library membership requires dict-form + ignored on iOS 27.
+            if op.action == "move_to_app_library" or isinstance(raw, list):
+                raw = _ensure_dict_raw(raw)
             _raw_remove_apps(raw, op.bundle_ids)
-            # For dict-format raw (legacy), track ignored apps
-            if isinstance(raw, dict) and op.action == "move_to_app_library":
-                ignored = raw.get("ignored", [])
+            if op.action == "move_to_app_library" and isinstance(raw, dict):
+                ignored = raw.setdefault("ignored", [])
                 for bid in op.bundle_ids:
                     if bid not in ignored:
                         ignored.append(bid)
-                raw["ignored"] = ignored
             # Note: actual app deletion (uninstall) happens via a separate
             # pymobiledevice3 API call, not through IconState. The layout
             # engine just removes the icon from the home screen.
@@ -85,10 +107,12 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                 snapshot = copy.deepcopy(raw)
                 extracted = _raw_extract_apps(raw, op.bundle_ids)
                 if extracted:
+                    # iOS 27 (and current SpringBoard formatVersion 2) accepts
+                    # listType=folder. iconType=folder is silently dropped on write.
                     folder_dict = {
                         "displayName": op.folder_name,
                         "iconLists": [extracted],
-                        "iconType": "folder",
+                        "listType": "folder",
                     }
                     pages = _get_pages(raw)
                     placed = False
@@ -154,15 +178,18 @@ def compact_to_single_page(
     keep_visible_bundle_ids = list(dict.fromkeys(keep_visible_bundle_ids))[:24]
     archive_bundle_ids = list(dict.fromkeys(archive_bundle_ids))
 
+    # Archiving requires dict-form + ignored on iOS 27.
+    if archive_bundle_ids:
+        raw = _ensure_dict_raw(raw)
+
     first_page = _raw_extract_apps(raw, keep_visible_bundle_ids) if keep_visible_bundle_ids else []
     _set_pages(raw, [first_page] if first_page else [])
 
     if isinstance(raw, dict):
-        ignored = raw.get("ignored", [])
+        ignored = raw.setdefault("ignored", [])
         for bid in archive_bundle_ids:
             if bid not in ignored:
                 ignored.append(bid)
-        raw["ignored"] = ignored
 
     return raw
 
@@ -227,7 +254,12 @@ def _raw_extract_apps(raw, bundle_ids: list[str]) -> list:
 
     extracted = []
     for bid in bundle_ids:
-        extracted.append(extracted_by_bid.get(bid, {"bundleIdentifier": bid, "iconType": "app"}))
+        # Prefer the live raw item shape; fall back to a minimal app dict without
+        # iconType (iOS 27 rejects some iconType values on write).
+        extracted.append(extracted_by_bid.get(bid, {
+            "bundleIdentifier": bid,
+            "displayIdentifier": bid,
+        }))
 
     return extracted
 
