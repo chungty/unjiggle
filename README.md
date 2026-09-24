@@ -64,6 +64,12 @@ Useful preset endpoints:
 - `unjiggle json suggest --preset focus|relax|minimal|beautiful` for one preset preview
 - `unjiggle json presets` for a batch of all built-in preset previews from one shared scan
 
+### App Library preservation on iOS 27
+
+Layout writes reconstruct the off-home-screen app list from installed User and System apps and send it as `ignored` alongside `buttonBar` and `iconLists`. If the installed-app query fails or returns no eligible apps, the write is aborted before opening the SpringBoard writer. An explicit `ignored` list does not bypass this check.
+
+`getIconState` does not include App Library membership in its list response, so saving and replaying that list alone is not a complete membership backup. This protection does not change App Library categories or Face ID-protected hidden apps. Older iOS versions still need device validation.
+
 ## Requirements
 
 - macOS

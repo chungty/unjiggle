@@ -318,8 +318,13 @@ def _augment_ignored_with_off_homescreen_apps(lockdown, payload: dict) -> dict:
     """
     try:
         installed = _list_installed_app_bundle_ids(lockdown)
-    except Exception:
-        return payload
+    except Exception as exc:
+        raise RuntimeError(
+            "Cannot read installed apps; layout was not written. "
+            "Reconnect the device and retry to preserve App Library membership."
+        ) from exc
+    if not installed:
+        raise RuntimeError("Installed app list is empty; layout was not written.")
 
     on_hs = _bundle_ids_in_icon_state(payload)
     ignored = list(payload.get("ignored") or [])
