@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -296,10 +297,12 @@ def test_context_is_compact_and_marks_archive_candidates():
 
     assert context.startswith("TODAY: ")
     assert "ORGANIZATION SCORE" not in context
-    assert "com.example" not in context  # no bundle IDs
+    # Only an app with no App Store record shows its bundle ID.
+    unnamed = {b for b in layout.all_bundle_ids if b not in metadata}
+    assert unnamed and set(re.findall(r"com\.example\.app\d+", context)) == unnamed
     assert "T00:00:00Z" not in context  # no timestamps
     assert "DOCK (fixed): " in context
-    assert "PAGE 1 NOW: 4 widgets, a1 " in context
+    assert "PAGE 1 NOW: widgets use 16 of 24 slots (4 small), a1 " in context
     assert '"Work" p' in context  # current folders with their page and size
     assert context.count("archive?") == 1
     assert f"{handles.by_bundle_id[candidate]} " in context.split("archive?")[0].splitlines()[-1]
@@ -615,9 +618,57 @@ def test_short_name_drops_the_app_store_subtitle():
         "b": {"name": "Notion: Notes, Docs, Tasks"},
         "c": {"name": "Disneyland®"},
         "d": {"name": "Mercury | Banking"},
+        "e": {"name": "Disneyland® Paris"},
+        "f": {"name": "Chase Mobile®: Bank & Invest"},
     }
-    assert [stylist.short_name(k, metadata, {}) for k in "abcd"] == ["Cal AI", "Notion", "Disneyland", "Mercury"]
-    assert stylist.short_name("com.x.layouts", {}, {}) == "layouts"
+    assert [stylist.short_name(k, metadata, {}) for k in "abcdef"] == [
+        "Cal AI", "Notion", "Disneyland", "Mercury", "Disneyland Paris", "Chase Mobile",
+    ]
+    # With no App Store record, the name is the bundle ID.
+    assert stylist.short_name("com.x.layouts", {}, {}) == "com.x.layouts"
+
+
+def test_plan_names_are_unique_and_show_unknown_apps_by_bundle_id():
+    metadata = {
+        "com.a.hunters": {"name": "Star Wars: Hunters"},
+        "com.a.galaxy": {"name": "Star Wars: Galaxy of Heroes"},
+        "com.b.calc": {"name": "Calculator"},
+        "com.c.calc": {"name": "Calculator"},
+        "com.d.notes": {"name": "Notes+ - Quick notes"},
+        # The App Store cache holds only a guess for an Apple app.
+        "com.apple.DocumentsApp": {"name": "Documentsapp", "super_category": "System"},
+        "com.apple.NewThing": {"name": "Newthing", "super_category": "System"},
+    }
+    display = {"com.chillingo.cuttherope": "Cut the Rope", "com.google.OnHub": "OnHub"}
+    bids = list(metadata) + ["com.chillingo.cuttherope", "com.google.OnHub", "com.webex.meeting"]
+    names = stylist.plan_names(bids, metadata, display)
+    assert names == {
+        "com.a.hunters": "Star Wars: Hunters",
+        "com.a.galaxy": "Star Wars: Galaxy of Heroes",
+        "com.b.calc": "Calculator (com.b.calc)",
+        "com.c.calc": "Calculator (com.c.calc)",
+        "com.d.notes": "Notes+",
+        "com.apple.DocumentsApp": "Files",
+        "com.apple.NewThing": "com.apple.NewThing",
+        "com.chillingo.cuttherope": "Cut the Rope (com.chillingo.cuttherope)",
+        "com.google.OnHub": "com.google.OnHub",
+        "com.webex.meeting": "com.webex.meeting",
+    }
+    assert len({n.casefold() for n in names.values()}) == len(names)
+
+
+def test_two_apps_with_one_short_name_get_their_full_names_in_the_context():
+    fmt = "ios26"
+    pages = [[_app("com.disney.DLR", fmt), _app("fr.disneylandparis.iphone", fmt), _app("com.x.other", fmt)]]
+    layout = device.parse_layout_state(_state([_app("com.dock", fmt)], pages, fmt))
+    metadata = {
+        "com.disney.DLR": {"name": "Disneyland®: Resort", "genre": "Travel", "super_category": "Travel"},
+        "fr.disneylandparis.iphone": {"name": "Disneyland®: Paris", "genre": "Travel", "super_category": "Travel"},
+        "com.x.other": {"name": "Other", "genre": "Travel", "super_category": "Travel"},
+    }
+    context = stylist.build_plan_context(layout, metadata, stylist.build_handles(layout))
+    assert "a1 Disneyland: Resort, p1" in context
+    assert "a2 Disneyland: Paris, p1" in context
 
 
 # --- the write path -------------------------------------------------------------------------

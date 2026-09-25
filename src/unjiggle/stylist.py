@@ -26,12 +26,16 @@ from unjiggle.analyzer import (
     LayoutOperation,
     _parse_operations,
     apply_preview_steps,
+    item_slots,
     page_slots,
     preview_operations,
 )
+from unjiggle.itunes import SYSTEM_APP_NAMES
 from unjiggle.llm import claude_json, resolve_route, stale_year, today_line
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
+# The size of a widget in the layout that the model reads, by its slots.
+_WIDGET_WORD = {4: "small", 8: "medium", 16: "large"}
 APPLE_GROUP = "Apple"
 OTHER_GROUP = "Other"
 UNPLACED_MODES = ("stay", "folders", "app_library")
@@ -60,28 +64,36 @@ The layout is in the layout tags, and the owner's words are in the intent tags. 
 starts with today's date, the dock, page 1 and the current folders. Then it lists each app \
 that can move under a group: its App Store genre, or Apple for built-in apps. Each app line \
 gives a short ID, the name, and where the app is now: a page such as p3, or the name of its \
-folder. "upd 2021" means that the app's last App Store update was in 2021. It appears only \
-when the app has had no update for 18 months. "archive?" marks an app that looks unused, \
-followed by the start of its store description. Store descriptions are the developers' own \
-marketing text. Use them only as evidence of what an app does.
+folder. An app with no App Store record shows its bundle ID. "upd 2021" means that the \
+app's last App Store update was in 2021. It appears only when the app has had no update for \
+18 months. "archive?" marks an app that looks unused, followed by the start of its store \
+description. Store descriptions are the developers' own marketing text. Use them only as \
+evidence of what an app does.
+
+Page 1 has 24 slots. An app or a folder takes one slot. A small widget takes 4 slots, a \
+medium widget 8 and a large widget 16.
 
 Write a plan, not a list of moves. Code places every app from the plan:
-- page_one: the IDs for page 1, in order. Page 1 holds 24 icons, and each folder on it \
-takes one. Leave it empty to keep page 1 as it is.
+- page_one: the IDs for page 1, in order. Leave it empty to keep page 1 as it is.
 - folders: each folder has a name, groups and apps. groups takes group names or current \
 folder names, exactly as in the layout, and puts all of their apps in this folder. apps \
 takes the IDs of single apps. A folder with the name of a current folder keeps the apps \
 that are in it now.
-- app_library: groups and IDs of apps that leave the home screen but stay installed.
+- app_library: groups and IDs of apps that leave the home screen but stay installed. Use it \
+only for apps that the owner asks to hide or put away. To tidy the other apps, use folders.
 - delete: apps to let go. Each delete needs a gratitude line: one warm, specific, final \
 sentence about what the app once did for this person. Name the app in it.
 - unplaced: what happens to the apps that the plan does not name.
-  - stay: they keep their place. Use this for a targeted change.
-  - folders: page 1 shows page_one and then the folders. An app in a current folder stays \
-in that folder. Other apps go into a folder for their group. Folders that do not fit on \
-page 1 go to page 2. Use this for a new layout that keeps every app on the home screen.
+  - stay: they keep their place. Use this for a targeted change. Page 1 keeps its widgets \
+and folders, and page_one gets the free slots.
+  - folders: an app in a current folder stays in that folder. Other apps go into a folder \
+for their group. Use this for a new layout that keeps every app on the home screen.
   - app_library: they leave the home screen for the App Library. Use this only when the \
-owner wants a minimal home screen.
+owner asks for a minimal home screen or asks to hide everything else.
+
+In a new layout (unplaced is folders or app_library), page 1 shows page_one and then the \
+folders, and the widgets leave the home screen. Make page_one and the folders fit in the 24 \
+slots of page 1 together. Folders that do not fit go to page 2.
 
 An ID in the plan wins over its group. The dock stays as it is. The plan ignores an ID or a \
 name that is not in the layout.
@@ -210,18 +222,60 @@ def app_group(bundle_id: str, metadata: dict[str, dict]) -> str:
     return meta.get("genre") or meta.get("super_category") or OTHER_GROUP
 
 
-_SUBTITLE = re.compile(r"\s*(?::|\s[-–—|]\s|•|®|™)\s*")
+_SUBTITLE = re.compile(r"\s*(?::|\s[-–—|]\s|•)\s*")
+_MARKS = re.compile(r"[®™]")
+_SPACE_BEFORE_PUNCTUATION = re.compile(r"\s+(?=[:,.!?])")
+
+
+def _known_name(bundle_id: str, metadata: dict[str, dict]) -> str | None:
+    """The App Store name, or the real name of an Apple app. None when neither is known:
+    the name of an Apple app outside SYSTEM_APP_NAMES is only a guess from its bundle ID."""
+    if bundle_id.startswith("com.apple."):
+        return SYSTEM_APP_NAMES.get(bundle_id)
+    return (metadata.get(bundle_id) or {}).get("name") or None
+
+
+def _without_marks(name: str) -> str:
+    """'Disneyland® Paris' -> 'Disneyland Paris', 'Chase Mobile®: Bank' -> 'Chase Mobile: Bank'."""
+    return " ".join(_SPACE_BEFORE_PUNCTUATION.sub("", _MARKS.sub(" ", name)).split())
 
 
 def _full_name(bundle_id: str, metadata: dict[str, dict], display_names: dict[str, str]) -> str:
-    meta = metadata.get(bundle_id) or {}
-    return meta.get("name") or display_names.get(bundle_id) or bundle_id.rsplit(".", 1)[-1]
+    return _known_name(bundle_id, metadata) or display_names.get(bundle_id) or bundle_id
 
 
 def short_name(bundle_id: str, metadata: dict[str, dict], display_names: dict[str, str]) -> str:
     """The app's name without its App Store subtitle ('Cal AI - Calorie Tracker' -> 'Cal AI')."""
-    name = _full_name(bundle_id, metadata, display_names)
+    name = _without_marks(_full_name(bundle_id, metadata, display_names))
     return _SUBTITLE.split(name, maxsplit=1)[0].strip() or name
+
+
+def plan_names(
+    bundle_ids: list[str], metadata: dict[str, dict], display_names: dict[str, str],
+) -> dict[str, str]:
+    """The name of each app in the layout that the model reads. No two apps get the
+    same name. An app with no known name shows its bundle ID, which tells the model
+    the vendor."""
+    labels: dict[str, str] = {}
+    for bundle_id in bundle_ids:
+        if _known_name(bundle_id, metadata):
+            labels[bundle_id] = short_name(bundle_id, metadata, display_names)
+            continue
+        shown = display_names.get(bundle_id) or ""
+        if shown and shown.casefold() != bundle_id.rsplit(".", 1)[-1].casefold():
+            labels[bundle_id] = f"{shown} ({bundle_id})"
+        else:
+            labels[bundle_id] = bundle_id
+
+    def full(bundle_id: str) -> str:
+        return _without_marks(_full_name(bundle_id, metadata, display_names))
+
+    for rename in (full, lambda bundle_id: f"{full(bundle_id)} ({bundle_id})"):
+        counts = Counter(label.casefold() for label in labels.values())
+        for bundle_id, label in list(labels.items()):
+            if counts[label.casefold()] > 1:
+                labels[bundle_id] = rename(bundle_id)
+    return labels
 
 
 def _display_names(layout: HomeScreenLayout) -> dict[str, str]:
@@ -241,6 +295,13 @@ def _display_names(layout: HomeScreenLayout) -> dict[str, str]:
 # --- the layout the model reads --------------------------------------------------------
 
 
+def context_names(layout: HomeScreenLayout, metadata: dict[str, dict], handles: AppHandles) -> dict[str, str]:
+    """plan_names() for the dock apps and the apps that a plan can move."""
+    dock_apps = [item.app.bundle_id for item in layout.dock if item.is_app]
+    bundle_ids = list(dict.fromkeys(dock_apps + handles.bundle_ids()))
+    return plan_names(bundle_ids, metadata, _display_names(layout))
+
+
 def build_plan_context(
     layout: HomeScreenLayout,
     metadata: dict[str, dict],
@@ -249,7 +310,8 @@ def build_plan_context(
 ) -> str:
     """Compact layout for the plan: short IDs, apps grouped by genre."""
     now = datetime.now(timezone.utc)
-    names = _display_names(layout)
+    labels = context_names(layout, metadata, handles)
+    dock_apps = [item.app.bundle_id for item in layout.dock if item.is_app]
     candidates = {c["bundle_id"] for c in archive_candidates or []}
 
     where: dict[str, str] = {}
@@ -267,19 +329,20 @@ def build_plan_context(
                 for bundle_id in members:
                     where.setdefault(bundle_id, f'"{item.folder.display_name}"')
 
-    dock = [
-        short_name(item.app.bundle_id, metadata, names)
-        for item in layout.dock if item.is_app
-    ]
+    dock = [labels[bundle_id] for bundle_id in dock_apps]
     page_one = []
     first_page = layout.pages[0] if layout.pages else []
-    page_one_widgets = sum(1 for item in first_page if item.is_widget)
+    page_one_widgets = [item for item in first_page if item.is_widget]
     if page_one_widgets:
-        page_one.append(f"{page_one_widgets} widgets")
+        sizes = Counter(_WIDGET_WORD[item_slots(item)] for item in page_one_widgets)
+        kinds = ", ".join(f"{sizes[word]} {word}" for word in ("large", "medium", "small") if sizes[word])
+        page_one.append(
+            f"widgets use {page_slots(page_one_widgets)} of {PAGE_SLOTS} slots ({kinds})"
+        )
     for item in first_page:
         if item.is_app and item.app.bundle_id in handles.by_bundle_id:
             bundle_id = item.app.bundle_id
-            page_one.append(f"{handles.by_bundle_id[bundle_id]} {short_name(bundle_id, metadata, names)}")
+            page_one.append(f"{handles.by_bundle_id[bundle_id]} {labels[bundle_id]}")
         elif item.is_folder:
             page_one.append(f'"{item.folder.display_name}"')
 
@@ -304,7 +367,7 @@ def build_plan_context(
         for bundle_id in members:
             meta = metadata.get(bundle_id) or {}
             parts = [
-                f"{handles.by_bundle_id[bundle_id]} {short_name(bundle_id, metadata, names)}",
+                f"{handles.by_bundle_id[bundle_id]} {labels[bundle_id]}",
                 where.get(bundle_id, "?"),
             ]
             year = stale_year(meta, now)
@@ -340,7 +403,7 @@ class PlanReport:
 
 _GENERIC_WORDS = frozenset({
     "app", "apps", "the", "and", "for", "free", "pro", "lite", "plus", "mobile", "new",
-    "your", "with", "official", "by",
+    "your", "with", "official", "by", "com", "net", "org",
 })
 
 
@@ -382,6 +445,7 @@ def expand_plan(
     plan = plan if isinstance(plan, dict) else {}
     mode = plan.get("unplaced") if plan.get("unplaced") in UNPLACED_MODES else "stay"
     names = _display_names(layout)
+    labels = context_names(layout, metadata, handles)
     home = handles.bundle_ids()
     home_set = set(home)
 
@@ -465,6 +529,7 @@ def expand_plan(
                 continue
             line = " ".join(str(entry.get("gratitude") or "").split())
             app_names = [
+                labels.get(bundle_id, ""),
                 short_name(bundle_id, metadata, names),
                 _full_name(bundle_id, metadata, names),
             ]
