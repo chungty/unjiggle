@@ -369,12 +369,12 @@ def _parse_result(data: dict, layout: HomeScreenLayout) -> AnalysisResult:
     )
 
 
-# The AI Stylist is interactive: clients wait on `json suggest --intent` under a
-# timeout of about a minute that also covers the USB read and the App Store
-# lookup. On Claude Opus 5.5, low effort comes close to medium on quality with
-# much less thinking, and less thinking is what shortens the wait. Time a real
-# request against a full phone before raising it. The plan is still previewed
-# before anything is written to the phone.
+# The AI Stylist is interactive: a person waits for `json suggest --intent`, and
+# a client's time limit covers the USB read and the App Store lookup as well as
+# the model reply. On Claude Opus 5.5, low effort comes close to medium on quality
+# with much less thinking, and less thinking is what shortens the wait. Time a
+# real request against a full phone before raising it. The plan is still
+# previewed before anything is written to the phone.
 INTENT_EFFORT = "low"
 
 INTENT_SYSTEM_PROMPT = """\
