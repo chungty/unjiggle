@@ -158,6 +158,16 @@ def widget_phone(fmt: str = "ios26"):
     return device.parse_layout_state(_state(dock, pages, fmt)), metadata
 
 
+def unparsed_raw_phone():
+    """widget_phone (iOS 26) with raw entries that the parser drops: an empty raw page
+    after page 1, and an entry with no bundle ID on page 2."""
+    layout, metadata = widget_phone("ios26")
+    raw = [list(page) for page in layout.raw]
+    raw[2].append({"iconType": "custom", "displayName": "Web clip"})
+    raw.insert(2, [])
+    return device.parse_layout_state(raw), metadata
+
+
 PHONES = {
     "big-ios26": lambda: big_phone(1, "ios26"),
     "big-legacy": lambda: big_phone(2, "legacy"),
@@ -167,6 +177,7 @@ PHONES = {
     "sparse-ios26": lambda: sparse_phone("ios26"),
     "widgets-ios26": lambda: widget_phone("ios26"),
     "widgets-legacy": lambda: widget_phone("legacy"),
+    "unparsed-raw-ios26": unparsed_raw_phone,
 }
 
 
@@ -591,6 +602,137 @@ def test_a_dock_folder_with_a_page_folder_name_does_not_stop_the_plan():
         ops, report = check_expansion(layout, metadata, rename)
         assert [(op.action, op.folder_name) for op in ops] == [("create_folder", "Tools"), ("move_to_app_library", None)]
         assert report.dropped_operations == []
+
+
+def _stay_plan(**parts):
+    plan = {"page_one": [], "folders": [], "app_library": {"groups": [], "apps": []},
+            "delete": [], "unplaced": "stay"}
+    plan.update(parts)
+    return plan
+
+
+def _page_one_apps(layout):
+    return [i.app.bundle_id for i in layout.pages[0] if i.is_app]
+
+
+def _folder_pages(layout):
+    return {i.folder.display_name: n for n, page in enumerate(layout.pages) for i in page if i.is_folder}
+
+
+@pytest.mark.parametrize("fmt", ["ios26", "legacy"])
+def test_stay_mode_page_one_gets_the_free_slots_before_a_new_folder(fmt):
+    layout, metadata = widget_phone(fmt)
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    wanted = ["com.example.wd02", "com.example.wd03", "com.example.wd50", "com.example.wd51"]
+    plan = _stay_plan(
+        page_one=[h(b) for b in wanted],
+        folders=[{"name": "Trips", "groups": [], "apps": [h(f"com.example.wd{i}") for i in (52, 53, 54)]}],
+    )
+    ops, report = check_expansion(layout, metadata, plan)
+    after = preview_operations(layout, ops)
+    # The widgets use 20 slots and page_one fills the other 4. The new folder goes later.
+    assert _page_one_apps(after) == wanted
+    assert stylist.page_slots(after.pages[0]) == 24
+    assert _folder_pages(after)["Trips"] > 0
+    assert report.page_one_overflow == [] and report.dropped_operations == []
+
+
+def test_stay_mode_new_folder_waits_behind_page_one_apps_that_did_not_fit():
+    layout, metadata = widget_phone()
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    wanted = ["com.example.wd02", "com.example.wd03"] + [f"com.example.wd{i}" for i in range(50, 55)]
+    # Trips takes both loose apps of page 1, so page 1 has 4 free slots for 5 apps.
+    plan = _stay_plan(
+        page_one=[h(b) for b in wanted[2:]],
+        folders=[{"name": "Trips", "groups": [], "apps": [h(b) for b in wanted[:2]]}],
+    )
+    ops, report = check_expansion(layout, metadata, plan)
+    after = preview_operations(layout, ops)
+    assert _page_one_apps(after) == wanted[2:6]
+    assert _folder_pages(after)["Trips"] > 0
+    assert report.page_one_overflow == [h(wanted[6])]
+
+
+@pytest.mark.parametrize("fmt", ["ios26", "legacy"])
+def test_stay_mode_rebuilds_a_folder_with_a_dock_twin_in_its_own_place(fmt):
+    layout, metadata = widget_phone(fmt)
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    plan = _stay_plan(folders=[{"name": "Work", "groups": [], "apps": [h("com.example.wd20")]}])
+    ops, report = check_expansion(layout, metadata, plan)
+    after = preview_operations(layout, ops)
+    assert [(op.action, op.folder_name, op.old_name) for op in ops] == [("create_folder", "Work", "Work")]
+    # Page 1 does not change, and the Work folder stays first on page 2.
+    assert [stylist._item_key(i) for i in after.pages[0]] == [stylist._item_key(i) for i in layout.pages[0]]
+    assert after.pages[1][0].is_folder and after.pages[1][0].folder.display_name == "Work"
+    assert sorted(a.bundle_id for p in after.pages[1][0].folder.pages for a in p) == \
+        [f"com.example.wd{i:02d}" for i in (4, 5, 6, 7, 20)]
+    assert report.dropped_operations == []
+
+
+@pytest.mark.parametrize("kind", ["delete", "app_library"])
+def test_stay_mode_removed_page_one_apps_free_their_slots_for_page_one(kind):
+    layout, metadata = widget_phone()
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    names = stylist._display_names(layout)
+    gone = ["com.example.wd02", "com.example.wd03"]
+    wanted = [f"com.example.wd{i}" for i in range(50, 54)]
+    plan = _stay_plan(page_one=[h(b) for b in wanted])
+    if kind == "delete":
+        plan["delete"] = [{"app": h(b), "gratitude": f"{stylist.short_name(b, metadata, names)} helped."}
+                          for b in gone]
+    else:
+        plan["app_library"] = {"groups": [], "apps": [h(b) for b in gone]}
+    ops, report = check_expansion(layout, metadata, plan)
+    after = preview_operations(layout, ops)
+    assert _page_one_apps(after) == wanted
+    assert stylist.page_slots(after.pages[0]) == 24
+    assert report.page_one_overflow == [] and report.dropped_deletes == []
+
+
+def _split_phone():
+    """Page 1: 22 of 24 slots. Page 2: 24 items, with the folders Social (6) and
+    Pictures (3). Page 3: 10 loose apps."""
+    fmt = "ios26"
+    bids = [f"com.split.app{i:02d}" for i in range(44)]
+    metadata = _metadata(bids, random.Random(5))
+    pages = [
+        [_widget(0, "medium"), _widget(1), _widget(2), _widget(3), _app(bids[1], fmt), _app(bids[2], fmt)],
+        [_folder("Social", bids[3:9], fmt), _folder("Pictures", bids[9:12], fmt)]
+        + [_app(b, fmt) for b in bids[12:34]],
+        [_app(b, fmt) for b in bids[34:44]],
+    ]
+    return device.parse_layout_state(_state([_app(bids[0], fmt)], pages, fmt)), metadata
+
+
+def test_splitting_current_folders_into_new_folders_keeps_every_new_folder():
+    layout, metadata = _split_phone()
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    social = [f"com.split.app{i:02d}" for i in range(3, 9)]
+    pictures = [f"com.split.app{i:02d}" for i in range(9, 12)]
+    plan = _stay_plan(folders=[
+        {"name": "Chat", "groups": [], "apps": [h(b) for b in social[:4]]},
+        {"name": "Feeds", "groups": [], "apps": [h(b) for b in social[4:]]},
+        {"name": "Camera", "groups": [], "apps": [h(b) for b in pictures[:2]]},
+        {"name": "Art", "groups": [], "apps": [h(b) for b in pictures[2:]]},
+    ])
+    ops, report = check_expansion(layout, metadata, plan)
+    after = preview_operations(layout, ops)
+    # An emptied folder takes no slot while the operations run, so every preview
+    # places each new folder on the same page, and none is dropped.
+    assert [op.folder_name for op in ops] == ["Chat", "Feeds", "Camera", "Art"]
+    assert report.dropped_operations == []
+    assert set(_folder_pages(after)) == {"Chat", "Feeds", "Camera", "Art"}
+
+
+def test_many_small_new_folders_are_all_kept():
+    layout, metadata = _split_phone()
+    handles = stylist.build_handles(layout)
+    ids = list(handles.by_handle)
+    plan = _stay_plan(folders=[{"name": f"F{i}", "groups": [], "apps": ids[2 * i:2 * i + 2]}
+                               for i in range(len(ids) // 2)])
+    ops, report = check_expansion(layout, metadata, plan)
+    assert report.dropped_operations == []
+    assert len(ops) == len(ids) // 2
 
 
 def test_unknown_ids_and_names_are_reported_and_ignored():

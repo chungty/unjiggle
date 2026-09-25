@@ -10,8 +10,9 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from unjiggle.analyzer import PAGE_SLOTS, LayoutOperation, add_to_folder_pages
-from unjiggle.models import HomeScreenLayout, WidgetSize
+from unjiggle.analyzer import LayoutOperation, add_to_folder_pages, item_slots, place_new_folder
+from unjiggle.device import _parse_item
+from unjiggle.models import HomeScreenLayout
 
 
 def _get_pages(raw) -> list[list]:
@@ -49,12 +50,28 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
 
     This is what gets written to the device. Handles both iOS 26 (list format)
     and legacy (dict format).
+
+    The preview works on the parsed layout, so this function counts pages and slots
+    as the parser sees them. A raw entry that device._parse_item drops takes no slot
+    and stays where it is. A raw page with no entry that the parser keeps has no page
+    index, so target_page and folder placement skip it.
     """
     raw = copy.deepcopy(layout.raw)
     # An app that an earlier operation took off the home screen (compact_to_single_page
     # or rebuild_pages) can come back in a later one (create_folder). It comes back as
     # the item it was in the original state, with all of its fields.
     originals = _raw_app_items(layout.raw)
+    # Raw indexes of the pages that parse_layout_state drops. Until the cleanup, an
+    # operation only adds pages at the end or replaces all of them, so the indexes stay
+    # valid. Pages that the operations empty keep their index until the cleanup, as in
+    # analyzer.apply_preview_steps.
+    unparsed = {
+        index for index, page in enumerate(_get_pages(raw))
+        if not any(_parse_item(item) for item in page)
+    }
+
+    def parsed_pages() -> list[list]:
+        return [page for index, page in enumerate(_get_pages(raw)) if index not in unparsed]
 
     for op in operations:
         if op.action in ("move_to_app_library", "delete"):
@@ -74,10 +91,10 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
             if op.target_page is not None:
                 snapshot = copy.deepcopy(raw)
                 extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
-                pages = _get_pages(raw)
+                pages = parsed_pages()
                 if 0 <= op.target_page < len(pages):
                     page = pages[op.target_page]
-                    if len(page) + len(extracted) <= 24:
+                    if _raw_page_items(page) + len(extracted) <= 24:
                         page.extend(extracted)
                     else:
                         raw = snapshot
@@ -87,6 +104,7 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
         elif op.action == "create_folder":
             if op.folder_name and op.bundle_ids:
                 snapshot = copy.deepcopy(raw)
+                anchor = _raw_page_folder_named(parsed_pages(), op.old_name)
                 extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
                 if extracted:
                     folder_pages: list[list] = []
@@ -96,16 +114,11 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                         "iconLists": folder_pages,
                         "iconType": "folder",
                     }
-                    pages = _get_pages(raw)
-                    placed = False
-                    for page in pages:
-                        if _raw_page_slots(page) < PAGE_SLOTS:
-                            page.append(folder_dict)
-                            placed = True
-                            break
-                    if not placed:
-                        pages.append([folder_dict])
-                    _set_pages(raw, pages)
+                    pages = parsed_pages()
+                    count = len(pages)
+                    place_new_folder(pages, folder_dict, _raw_item_slots, anchor, op.target_page)
+                    if len(pages) > count:
+                        _set_pages(raw, _get_pages(raw) + pages[count:])
                 else:
                     raw = snapshot
 
@@ -127,6 +140,7 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
         elif op.action == "compact_to_single_page":
             extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
             _set_pages(raw, [extracted] if extracted else [])
+            unparsed.clear()
 
         elif op.action == "rebuild_pages":
             extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
@@ -135,6 +149,7 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                 for index in range(0, len(extracted), 24)
             ]
             _set_pages(raw, rebuilt_pages)
+            unparsed.clear()
 
     # Clean up folders the operations emptied, then empty pages, as the preview does.
     pages = [
@@ -204,19 +219,27 @@ def _raw_is_widget(item: Any) -> bool:
     )
 
 
-def _raw_page_slots(page: list) -> int:
-    """The icon slots that a raw page uses, counted as analyzer.page_slots counts the
-    parsed page. An unknown widget size counts as small, as device.py parses it."""
-    slots = 0
-    for item in page:
-        if _raw_is_widget(item):
-            try:
-                slots += WidgetSize(item.get("gridSize", "small")).slots
-            except ValueError:
-                slots += WidgetSize.SMALL.slots
-        else:
-            slots += 1
-    return slots
+def _raw_item_slots(item: Any) -> int:
+    """The icon slots of a raw item, as analyzer.item_slots counts the parsed item.
+    An entry that the parser drops takes no slot, and neither does a folder with no apps."""
+    parsed = _parse_item(item)
+    return 0 if parsed is None else item_slots(parsed)
+
+
+def _raw_page_items(page: list) -> int:
+    """The items that take a slot, as analyzer.page_items counts them."""
+    return sum(1 for item in page if _raw_item_slots(item))
+
+
+def _raw_page_folder_named(pages: list[list], name: str | None):
+    """The first folder on these pages with this name and at least one app."""
+    if not name:
+        return None
+    for page in pages:
+        for item in page:
+            if _raw_is_folder(item) and item.get("displayName") == name and not _raw_is_empty_folder(item):
+                return item
+    return None
 
 
 def _raw_app_items(raw) -> dict[str, Any]:
@@ -298,10 +321,14 @@ def _raw_extract_apps(raw, bundle_ids: list[str], originals: dict[str, Any] | No
     return extracted
 
 
+def _raw_dock_and_pages(raw) -> list[list]:
+    """The dock, then the pages: the order in which the preview finds a folder by name."""
+    return raw if isinstance(raw, list) else [raw.get("buttonBar", [])] + raw.get("iconLists", [])
+
+
 def _raw_rename_folder(raw, old_name: str, new_name: str) -> None:
     """Rename a folder in the raw state."""
-    all_pages = raw if isinstance(raw, list) else raw.get("iconLists", [])
-    for page in all_pages:
+    for page in _raw_dock_and_pages(raw):
         for item in page:
             if _raw_is_folder(item) and item.get("displayName") == old_name:
                 item["displayName"] = new_name
@@ -310,8 +337,7 @@ def _raw_rename_folder(raw, old_name: str, new_name: str) -> None:
 
 def _raw_add_to_folder(raw, folder_name: str, items: list) -> bool:
     """Add items to an existing folder by name."""
-    all_pages = raw if isinstance(raw, list) else raw.get("iconLists", [])
-    for page in all_pages:
+    for page in _raw_dock_and_pages(raw):
         for item in page:
             if _raw_is_folder(item) and item.get("displayName") == folder_name:
                 add_to_folder_pages(item.setdefault("iconLists", []), items)

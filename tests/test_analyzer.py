@@ -125,7 +125,7 @@ class TestPreviewOperations:
         from tests.conftest import make_folder
 
         full_page = [make_app(f"com.test.app{i}") for i in range(23)]
-        full_page.append(make_folder("Source", ["com.test.extra", "com.test.extra2"]))
+        full_page.append(make_folder("Source", ["com.test.extra", "com.test.extra2", "com.test.stays"]))
         layout = HomeScreenLayout(
             dock=[],
             pages=[full_page],
@@ -140,6 +140,24 @@ class TestPreviewOperations:
 
         assert preview.page_count == 2
         assert preview.all_folders()[-1].display_name == "Overflow"
+
+    def test_a_folder_that_the_operation_empties_frees_its_slot(self):
+        from tests.conftest import make_folder
+
+        full_page = [make_app(f"com.test.app{i}") for i in range(23)]
+        full_page.append(make_folder("Source", ["com.test.extra", "com.test.extra2"]))
+        layout = HomeScreenLayout(dock=[], pages=[full_page])
+        ops = [LayoutOperation(
+            action="create_folder",
+            bundle_ids=["com.test.extra", "com.test.extra2"],
+            folder_name="Overflow",
+        )]
+
+        preview = preview_operations(layout, ops)
+
+        # Source has no apps left, and the cleanup removes it, so Overflow fits on page 1.
+        assert preview.page_count == 1
+        assert [folder.display_name for folder in preview.all_folders()] == ["Overflow"]
 
     def test_empty_pages_removed(self, chaotic_layout):
         """If all apps are removed from a page, the page should be cleaned up."""

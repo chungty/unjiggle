@@ -116,7 +116,8 @@ OPERATION_SCHEMA = {
                 "move_to_page: appends the listed apps to target_page; skipped if that page "
                 "would pass 24 icons. "
                 "create_folder: makes a new folder named folder_name from the listed apps, "
-                "placed on the first page with room. "
+                "placed on the first page with room (from target_page, if given), or in "
+                "the place of the folder old_name, if given. "
                 "rename_folder: renames the folder old_name to folder_name; bundle_ids may "
                 "be empty. "
                 "move_to_folder: adds the listed apps to the existing folder named "
@@ -137,7 +138,7 @@ OPERATION_SCHEMA = {
         "target_page": {
             "type": "integer",
             "description": "For move_to_page: the page index counting from 0, so the "
-            "layout's PAGE 1 is 0.",
+            "layout's PAGE 1 is 0. For create_folder (optional): the first page to try.",
         },
         "folder_name": {
             "type": "string",
@@ -147,7 +148,8 @@ OPERATION_SCHEMA = {
         "old_name": {
             "type": "string",
             "description": "For rename_folder: the folder's current name, exactly as it "
-            "appears in the layout.",
+            "appears in the layout. For create_folder (optional): a current folder "
+            "whose place the new folder takes.",
         },
         "gratitude": {
             "type": "string",
@@ -422,7 +424,7 @@ def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperati
                 snapshot = copy.deepcopy(preview)
                 items = _extract_apps_from_layout(preview, op.bundle_ids)
                 page = preview.pages[op.target_page]
-                if len(page) + len(items) <= 24:
+                if page_items(page) + len(items) <= 24:
                     page.extend(items)
                 else:
                     preview = snapshot
@@ -431,6 +433,7 @@ def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperati
             if op.folder_name:
                 snapshot = copy.deepcopy(preview)
                 from unjiggle.models import FolderItem, LayoutItem
+                anchor = _page_folder_named(preview, op.old_name)
                 items = _extract_apps_from_layout(preview, op.bundle_ids)
                 apps = [item.app for item in items if item.is_app]
                 if apps:
@@ -440,12 +443,7 @@ def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperati
                         display_name=op.folder_name,
                         pages=folder_pages,
                     ))
-                    for page in preview.pages:
-                        if page_slots(page) < PAGE_SLOTS:
-                            page.append(folder)
-                            break
-                    else:
-                        preview.pages.append([folder])
+                    place_new_folder(preview.pages, folder, item_slots, anchor, op.target_page)
                 else:
                     preview = snapshot
 
@@ -490,11 +488,68 @@ PAGE_SLOTS = 24
 
 
 def item_slots(item) -> int:
-    return item.widget.grid_size.slots if item.is_widget else 1
+    """The slots that an item takes. A folder with no apps takes none: an operation
+    emptied it, and the cleanup after the last operation removes it. The one-at-a-time
+    preview of `json apply` removes it at once, so both previews must count it as gone."""
+    if item.is_widget:
+        return item.widget.grid_size.slots
+    if item.is_folder and not any(item.folder.pages):
+        return 0
+    return 1
 
 
 def page_slots(page) -> int:
     return sum(item_slots(item) for item in page)
+
+
+def page_items(page) -> int:
+    """The items on a page that take a slot. move_to_page counts these, not slots."""
+    return sum(1 for item in page if item_slots(item))
+
+
+def live_page(page) -> bool:
+    """False for a page that the operations emptied. The cleanup removes it."""
+    return any(item_slots(item) for item in page)
+
+
+def place_new_folder(pages: list[list], folder, slots_of, anchor=None, start: int | None = None) -> None:
+    """Put a new folder on a page, in place. The preview and layout_engine share this rule.
+
+    anchor is the current folder that the new folder replaces (create_folder with
+    old_name). The new folder goes right after it when its page has a free slot.
+    Otherwise the new folder goes at the end of the first page, from index ``start``
+    (target_page, 0 when it is not given), that has a free slot. A page that the
+    operations emptied is skipped, because the cleanup removes it. With no such page,
+    the folder gets a new last page. ``slots_of`` gives the slots of one item.
+    """
+    start = start if isinstance(start, int) and start > 0 else 0
+    if anchor is not None:
+        for index, page in enumerate(pages):
+            position = next((i for i, item in enumerate(page) if item is anchor), None)
+            if position is None:
+                continue
+            if sum(slots_of(item) for item in page) < PAGE_SLOTS:
+                page.insert(position + 1, folder)
+                return
+            start = max(start, index)
+            break
+    for page in pages[start:]:
+        slots = [slots_of(item) for item in page]
+        if any(slots) and sum(slots) < PAGE_SLOTS:
+            page.append(folder)
+            return
+    pages.append([folder])
+
+
+def _page_folder_named(layout: HomeScreenLayout, name: str | None):
+    """The first folder on a page (not in the dock) with this name and at least one app."""
+    if not name:
+        return None
+    for page in layout.pages:
+        for item in page:
+            if item.is_folder and item.folder.display_name == name and any(item.folder.pages):
+                return item
+    return None
 
 
 # An iPhone folder shows 9 apps on each page (3 by 3), and the phone stores a folder

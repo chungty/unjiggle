@@ -27,6 +27,8 @@ from unjiggle.analyzer import (
     _parse_operations,
     apply_preview_steps,
     item_slots,
+    live_page,
+    page_items,
     page_slots,
     preview_operations,
 )
@@ -606,7 +608,7 @@ def expand_plan(
         _stay_operations(
             sequence, handles, plan_folders, folder_title, members, current,
             current_title, name_count, [b for b in page_one if dest.get(b) == ("page1", "")],
-            dest, home_set, deletes + archive,
+            dest, home_set, deletes, library_apps,
         )
     else:
         page1 = [b for b in page_one if dest.get(b) == ("page1", "")]
@@ -641,92 +643,169 @@ def expand_plan(
 
 def _stay_operations(
     sequence, handles, plan_folders, folder_title, members, current,
-    current_title, name_count, page_one, dest, home_set, removals,
+    current_title, name_count, page_one, dest, home_set, deletes, library_apps,
 ) -> None:
-    """A targeted change: folder moves, then page 1, then deletes and the App Library.
-    Additions to current folders come before new folders, and removals come last,
-    so that a folder is not emptied before a later step adds to it."""
-    kept = [key for key in plan_folders if key in current and name_count[key] == 1]
-    for key in kept + [key for key in plan_folders if key not in kept]:
-        wanted = members.get(key, [])
-        if not wanted:
-            continue
-        candidates = []
-        if key in current and name_count[key] == 1:
-            already = set(current[key])
-            new = [b for b in wanted if b not in already]
-            if new:
-                candidates.append(LayoutOperation("move_to_folder", new, folder_name=current_title[key]))
-        else:
-            # A rename is safe only when no folder has the new name yet.
-            source = next((
-                other for other in current
-                if other != key and name_count[other] == 1 and other not in members
-                and current[other] and all(dest.get(b) == ("folder", key) for b in current[other])
-            ), None) if name_count[key] == 0 else None
-            if source is not None:
-                # All of one folder's apps go to a new name: rename it, then add the rest.
-                candidates.append(LayoutOperation(
-                    "rename_folder", [], folder_name=folder_title[key], old_name=current_title[source],
-                ))
-                new = [b for b in wanted if b not in set(current[source])]
-                if new:
-                    candidates.append(LayoutOperation("move_to_folder", new, folder_name=folder_title[key]))
-            else:
-                candidates.append(LayoutOperation("create_folder", wanted, folder_name=folder_title[key]))
-        if candidates:
-            sequence.add(*candidates)
+    """A targeted change, in this order:
 
-    if page_one:
-        _page_one_moves(sequence, handles, page_one, dest, home_set)
-    for op in removals:
+    1. Apps added to current folders.
+    2. Renamed folders, and folders rebuilt in the place of a current folder.
+    3. Deletes and App Library moves of loose page 1 apps, when page_one has apps
+       and the removal empties no folder and no page. They free slots for page_one.
+    4. page_one: its apps come to page 1, and page 1's other loose apps move on.
+    5. New folders. While page_one still has apps that did not fit, a new folder
+       goes after page 1. Otherwise it takes the first free slot.
+    6. The page_one moves again, into the slots that step 5 freed.
+    7. The other deletes and App Library moves.
+
+    page_one gets page 1's free slots before a new folder does. Removals that can
+    empty a folder come last, so that a folder is not emptied before a later step
+    adds to it.
+    """
+    kept = [key for key in plan_folders if key in current and name_count[key] == 1]
+    for key in kept:
+        already = set(current[key])
+        new = [b for b in members.get(key, []) if b not in already]
+        if new:
+            sequence.add(LayoutOperation("move_to_folder", new, folder_name=current_title[key]))
+
+    new_folders = []
+    for key in plan_folders:
+        wanted = members.get(key, [])
+        if key in kept or not wanted:
+            continue
+        if key in current:
+            # The dock or another page folder has the same name, so an operation that
+            # names this folder could find the wrong one. The folder is rebuilt in its
+            # own place.
+            sequence.add(LayoutOperation(
+                "create_folder", wanted, folder_name=folder_title[key], old_name=current_title[key],
+            ))
+            continue
+        # A rename is safe only when no folder has the new name yet.
+        source = next((
+            other for other in current
+            if other != key and name_count[other] == 1 and other not in members
+            and current[other] and all(dest.get(b) == ("folder", key) for b in current[other])
+        ), None) if name_count[key] == 0 else None
+        if source is None:
+            new_folders.append(key)
+            continue
+        # All of one folder's apps go to a new name: rename it, then add the rest.
+        candidates = [LayoutOperation(
+            "rename_folder", [], folder_name=folder_title[key], old_name=current_title[source],
+        )]
+        new = [b for b in wanted if b not in set(current[source])]
+        if new:
+            candidates.append(LayoutOperation("move_to_folder", new, folder_name=folder_title[key]))
+        sequence.add(*candidates)
+
+    early = _early_removals(sequence, deletes, library_apps) if page_one else set()
+    removals_first = [op for op in deletes if op.bundle_ids[0] in early]
+    removals_last = [op for op in deletes if op.bundle_ids[0] not in early]
+    for bucket, apps in ((removals_first, [b for b in library_apps if b in early]),
+                         (removals_last, [b for b in library_apps if b not in early])):
+        if apps:
+            bucket.append(LayoutOperation("move_to_app_library", apps))
+    for op in removals_first:
+        sequence.add(op)
+
+    moves = _PageOneMoves(sequence, page_one, dest, home_set) if page_one else None
+    if moves:
+        moves.run()
+
+    for key in new_folders:
+        pages = sequence.pages()
+        after_page_one = bool(moves and moves.arriving and pages and live_page(pages[0]))
+        sequence.add(LayoutOperation(
+            "create_folder", members[key], folder_name=folder_title[key],
+            target_page=1 if after_page_one else None,
+        ))
+
+    if moves:
+        moves.finish()
+        moves.report(handles)
+    for op in removals_last:
         sequence.add(op)
 
 
-def _page_one_moves(sequence, handles, page_one, dest, home_set) -> None:
-    """Bring page_one's apps to page 1 and move page 1's other apps to later pages
-    with free slots. A widget uses the slots of its size. Nothing moves to a page
-    after one that is empty at that step, and page 1 is never emptied while apps
-    still have to arrive."""
+def _early_removals(sequence, deletes, library_apps) -> set[str]:
+    """The removed apps that are loose on page 1 and can go before page_one: taking
+    them off the home screen together empties no folder and no page. An emptied folder
+    or page stays until the cleanup in one preview and goes at once in the other, so a
+    later operation could give two different results."""
+
+    def emptied(layout) -> tuple[int, int]:
+        folders = sum(1 for page in layout.pages for item in page if item.is_folder and not item_slots(item))
+        return folders, sum(1 for page in layout.pages if not live_page(page))
+
     pages = sequence.pages()
-    if not pages:
-        return
-    first = [item.app.bundle_id for item in pages[0] if item.is_app]
-    arriving = [b for b in page_one if b not in first]
-    leaving = [b for b in dict.fromkeys(first) if b in home_set and b not in page_one and b not in dest]
+    first = [item.app.bundle_id for item in pages[0] if item.is_app] if pages else []
+    removed = [op.bundle_ids[0] for op in deletes] + list(library_apps)
+    base = apply_preview_steps(sequence.layout, sequence.ops)
+    before = emptied(base)
+    early: list[str] = []
+    for bundle_id in dict.fromkeys(b for b in removed if b in first):
+        trial = apply_preview_steps(base, [LayoutOperation("delete", early + [bundle_id])])
+        if emptied(trial) == before:
+            early.append(bundle_id)
+    return set(early)
 
-    def move_in():
-        nonlocal arriving
+
+class _PageOneMoves:
+    """Bring page_one's apps to page 1 and move page 1's other loose apps to later
+    pages with free slots. A widget uses the slots of its size. Nothing moves to a
+    page after one that is empty at that step, and page 1 is never emptied while
+    apps still have to arrive."""
+
+    def __init__(self, sequence, page_one, dest, home_set):
+        self.sequence = sequence
+        self.page_one = page_one
         pages = sequence.pages()
-        room = PAGE_SLOTS - page_slots(pages[0]) if pages and pages[0] else 0
-        if room > 0 and arriving:
-            batch, arriving = arriving[:room], arriving[room:]
-            sequence.add(LayoutOperation("move_to_page", batch, target_page=0))
+        self.first = [item.app.bundle_id for item in pages[0] if item.is_app] if pages else []
+        self.arriving = [b for b in page_one if b not in self.first] if pages else []
+        self.leaving = [
+            b for b in dict.fromkeys(self.first) if b in home_set and b not in page_one and b not in dest
+        ]
 
-    def move_out(keep_one: bool):
-        nonlocal leaving
+    def run(self) -> None:
+        self.move_in()
+        self.move_out(keep_one=bool(self.arriving))
+        self.move_in()
+        self.move_out(keep_one=False)
+
+    def finish(self) -> None:
+        """After the new folders: they can free slots on page 1 and on later pages."""
+        self.move_out(keep_one=bool(self.arriving))
+        self.move_in()
+        self.move_out(keep_one=False)
+
+    def move_in(self) -> None:
+        pages = self.sequence.pages()
+        room = PAGE_SLOTS - page_slots(pages[0]) if pages and live_page(pages[0]) else 0
+        if room > 0 and self.arriving:
+            batch = self.arriving[:room]
+            if self.sequence.add(LayoutOperation("move_to_page", batch, target_page=0)):
+                self.arriving = self.arriving[room:]
+
+    def move_out(self, keep_one: bool) -> None:
         index = 1
-        while leaving:
-            pages = sequence.pages()
-            if index >= len(pages) or any(not page for page in pages[: index + 1]):
+        while self.leaving:
+            pages = self.sequence.pages()
+            if index >= len(pages) or not all(live_page(page) for page in pages[: index + 1]):
                 break
             free = PAGE_SLOTS - page_slots(pages[index])
-            limit = len(pages[0]) - 1 if keep_one else len(leaving)
-            count = min(free, len(leaving), limit)
+            limit = page_items(pages[0]) - 1 if keep_one else len(self.leaving)
+            count = min(free, len(self.leaving), limit)
             if count > 0:
-                batch, leaving = leaving[:count], leaving[count:]
-                sequence.add(LayoutOperation("move_to_page", batch, target_page=index))
+                batch = self.leaving[:count]
+                if self.sequence.add(LayoutOperation("move_to_page", batch, target_page=index)):
+                    self.leaving = self.leaving[count:]
             index += 1
 
-    move_in()
-    move_out(keep_one=bool(arriving))
-    move_in()
-    move_out(keep_one=False)
-
-    placed = {b for op in sequence.ops if op.action == "move_to_page" for b in op.bundle_ids}
-    report = sequence.report
-    report.page_one_overflow += [handles.by_bundle_id[b] for b in page_one if b not in placed and b not in first]
-    report.not_moved += [handles.by_bundle_id[b] for b in leaving]
+    def report(self, handles) -> None:
+        report = self.sequence.report
+        report.page_one_overflow += [handles.by_bundle_id[b] for b in self.arriving]
+        report.not_moved += [handles.by_bundle_id[b] for b in self.leaving]
 
 
 # --- consistency checks ----------------------------------------------------------------

@@ -365,7 +365,7 @@ class TestApplyOperations:
                     *[f"com.test.full{i}" for i in range(23)],
                     {
                         "displayName": "Source",
-                        "iconLists": [["com.test.extra", "com.test.extra2"]],
+                        "iconLists": [["com.test.extra", "com.test.extra2", "com.test.stays"]],
                         "listType": "folder",
                     },
                 ],
@@ -383,6 +383,25 @@ class TestApplyOperations:
 
         assert len(result["iconLists"]) == 2
         assert result["iconLists"][1][0]["displayName"] == "Overflow"
+
+    def test_a_folder_that_the_operation_empties_frees_its_slot(self):
+        raw = {
+            "buttonBar": [],
+            "iconLists": [[
+                *[f"com.test.full{i}" for i in range(23)],
+                {"displayName": "Source", "iconLists": [["com.test.extra", "com.test.extra2"]], "listType": "folder"},
+            ]],
+            "ignored": [],
+        }
+        layout = _make_layout_with_raw(raw)
+        ops = [LayoutOperation(
+            action="create_folder", bundle_ids=["com.test.extra", "com.test.extra2"], folder_name="Overflow",
+        )]
+
+        result = apply_operations(layout, ops)
+
+        assert len(result["iconLists"]) == 1
+        assert [item["displayName"] for item in result["iconLists"][0] if isinstance(item, dict)] == ["Overflow"]
 
 
 class TestWritePathMatchesPreview:
@@ -489,3 +508,48 @@ class TestWritePathMatchesPreview:
         assert result[2][-1]["displayName"] == "F"
         preview = preview_operations(layout, ops)
         assert _layout_signature(parse_layout_state(result)) == _layout_signature(preview)
+
+    @staticmethod
+    def _agree(raw, op):
+        from unjiggle.analyzer import preview_operations
+        from unjiggle.cli import _layout_signature
+        from unjiggle.device import parse_layout_state
+
+        layout = parse_layout_state(raw)
+        written = parse_layout_state(apply_operations(layout, [op]))
+        preview = preview_operations(layout, [op])
+        return _layout_signature(written) == _layout_signature(preview), written
+
+    def test_raw_entries_that_the_parser_drops_take_no_slot_and_no_page_index(self):
+        from unjiggle.device import parse_layout_state
+
+        def app(b):
+            return {"bundleIdentifier": b, "iconType": "app"}
+
+        clip = {"iconType": "custom", "displayName": "Web clip"}  # no bundle ID: the parser drops it
+        new_folder = LayoutOperation(action="create_folder", bundle_ids=["com.p2.x", "com.p2.y"], folder_name="New")
+        move = LayoutOperation(action="move_to_page", bundle_ids=["com.p1.a0"], target_page=1)
+        states = [
+            [[app("com.d")], [app(f"com.p1.a{i}") for i in range(23)] + [clip], [app("com.p2.x"), app("com.p2.y")]],
+            [[app("com.d")], [app(f"com.p1.a{i}") for i in range(24)], [], [app("com.p2.x"), app("com.p2.y")]],
+            [[app("com.d")], [app(f"com.p1.a{i}") for i in range(24)], [clip], [app("com.p2.x"), app("com.p2.y")]],
+        ]
+        for raw in states:
+            for op in (new_folder, move):
+                same, _written = self._agree(raw, op)
+                assert same, (raw, op.action)
+        # The entry that the parser drops stays where it was.
+        result = apply_operations(parse_layout_state(states[0]), [new_folder])
+        assert clip in result[1]
+
+    def test_a_dock_folder_is_found_first_in_the_legacy_state(self):
+        dock = ["com.d1", {"displayName": "Work", "iconLists": [["com.d2"]], "listType": "folder"}]
+        pages = [["com.p1", {"displayName": "Work", "iconLists": [["com.p2"]], "listType": "folder"}, "com.p3"]]
+        raw = {"buttonBar": dock, "iconLists": pages, "ignored": []}
+        for op in (
+            LayoutOperation(action="move_to_folder", bundle_ids=["com.p3"], folder_name="Work"),
+            LayoutOperation(action="rename_folder", bundle_ids=[], folder_name="Tools", old_name="Work"),
+        ):
+            same, written = self._agree(raw, op)
+            assert same, op.action
+            assert written.dock[1].folder.display_name == ("Work" if op.action == "move_to_folder" else "Tools")
