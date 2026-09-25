@@ -3,14 +3,15 @@
 The model reads a compact layout. Each app that can move gets a short ID
 (a1, a2, ...) in layout order, and the apps are listed under a group: the App
 Store genre, or Apple for built-in apps. The model answers with a plan: the apps
-for page 1, the folders, the apps for the App Library, the deletes, and a rule
-for the apps that the plan does not name.
+for page 1, the folders, the apps for the App Library, the deletes, a rule for
+the apps that the plan does not name, and a note for the owner.
 
 expand_plan() turns the plan into the LayoutOperation list that the rest of the
 engine uses. Code, not the model, places every app. The expansion does not lose,
 duplicate or invent an app, and it keeps only operations that give the same
 result in the preview, in `json apply` (one operation at a time) and in the
-write path (all operations, then cleanup).
+write path (all operations, then cleanup). plan_warnings() tells the owner what
+the preview does not do.
 """
 
 from __future__ import annotations
