@@ -6,11 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-try:
-    import anthropic
-except ImportError:
-    anthropic = None
-
+from unjiggle.llm import claude_json, resolve_route
 from unjiggle.models import HomeScreenLayout
 
 
@@ -167,17 +163,22 @@ Great causes of death:
 - "Passed peacefully in a folder labeled 'Stuff' after a 3-year coma"
 """
 
+# Short, single-shot creative writing that the owner waits on: keep thinking brief.
+OBITUARY_EFFORT = "low"
+
 OBITUARY_TOOL = {
     "name": "submit_obituaries",
     "description": "Submit obituaries for dead apps.",
     "input_schema": {
         "type": "object",
+        "additionalProperties": False,
         "required": ["obituaries", "graveyard_summary"],
         "properties": {
             "obituaries": {
                 "type": "array",
                 "items": {
                     "type": "object",
+                    "additionalProperties": False,
                     "required": ["bundle_id", "eulogy", "cause_of_death"],
                     "properties": {
                         "bundle_id": {"type": "string"},
@@ -219,13 +220,11 @@ def generate_obituaries(
         return _obituary_rule_based(dead_apps)
 
     context = _build_context(dead_apps, layout, metadata)
-
-    if provider == "auto":
-        provider = "openai" if api_key.startswith("sk-") else "anthropic"
+    provider, api_key, model = resolve_route(api_key, model, provider)
 
     if provider == "openai":
-        return _obituary_openai(context, dead_apps, api_key, model or "gpt-4.1")
-    return _obituary_anthropic(context, dead_apps, api_key, model or "claude-sonnet-4-20250514")
+        return _obituary_openai(context, dead_apps, api_key, model)
+    return _obituary_anthropic(context, dead_apps, api_key, model)
 
 
 def _obituary_rule_based(dead_apps: list[dict]) -> ObituaryResult:
@@ -390,19 +389,15 @@ def _build_context(dead_apps: list[dict], layout: HomeScreenLayout, metadata: di
 
 
 def _obituary_anthropic(context: str, dead_apps: list[dict], api_key: str | None, model: str) -> ObituaryResult:
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
+    data = claude_json(
+        api_key=api_key,
         model=model,
-        max_tokens=3000,
         system=SYSTEM_PROMPT,
-        tools=[OBITUARY_TOOL],
-        tool_choice={"type": "tool", "name": "submit_obituaries"},
-        messages=[{"role": "user", "content": f"Write obituaries for these dead apps:\n\n{context}"}],
+        user=f"Write obituaries for these dead apps:\n\n{context}",
+        schema=OBITUARY_TOOL["input_schema"],
+        effort=OBITUARY_EFFORT,
     )
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "submit_obituaries":
-            return _parse_obituaries(block.input, dead_apps)
-    raise RuntimeError("LLM did not return obituaries")
+    return _parse_obituaries(data, dead_apps)
 
 
 def _obituary_openai(context: str, dead_apps: list[dict], api_key: str | None, model: str) -> ObituaryResult:

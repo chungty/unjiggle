@@ -5,11 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
-try:
-    import anthropic
-except ImportError:
-    anthropic = None
-
+from unjiggle.llm import claude_json, resolve_route
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
 
@@ -57,11 +53,15 @@ RULES:
 - Contradictions should highlight genuine tensions (productivity vs. distraction, etc.)
 """
 
+# Short, single-shot creative writing that the owner waits on: keep thinking brief.
+MIRROR_EFFORT = "low"
+
 MIRROR_TOOL = {
     "name": "submit_mirror",
     "description": "Submit the personality mirror analysis.",
     "input_schema": {
         "type": "object",
+        "additionalProperties": False,
         "required": ["roast", "phases", "contradictions", "guilty_pleasure", "one_line"],
         "properties": {
             "roast": {
@@ -73,6 +73,7 @@ MIRROR_TOOL = {
                 "description": "2-4 detected life phases",
                 "items": {
                     "type": "object",
+                    "additionalProperties": False,
                     "required": ["name", "apps", "narrative"],
                     "properties": {
                         "name": {"type": "string"},
@@ -86,6 +87,7 @@ MIRROR_TOOL = {
                 "description": "1-3 contradictions",
                 "items": {
                     "type": "object",
+                    "additionalProperties": False,
                     "required": ["tension", "apps_a", "apps_b", "roast"],
                     "properties": {
                         "tension": {"type": "string"},
@@ -179,13 +181,11 @@ def generate_mirror(
         return _mirror_rule_based(layout, metadata, score)
 
     context = _build_context(layout, metadata, score)
-
-    if provider == "auto":
-        provider = "openai" if api_key.startswith("sk-") else "anthropic"
+    provider, api_key, model = resolve_route(api_key, model, provider)
 
     if provider == "openai":
-        return _mirror_openai(context, api_key, model or "gpt-4.1")
-    return _mirror_anthropic(context, api_key, model or "claude-sonnet-4-20250514")
+        return _mirror_openai(context, api_key, model)
+    return _mirror_anthropic(context, api_key, model)
 
 
 def _mirror_rule_based(layout: HomeScreenLayout, metadata: dict[str, dict], score: ScoreBreakdown) -> MirrorResult:
@@ -293,19 +293,15 @@ def _mirror_rule_based(layout: HomeScreenLayout, metadata: dict[str, dict], scor
 
 
 def _mirror_anthropic(context: str, api_key: str | None, model: str) -> MirrorResult:
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
+    data = claude_json(
+        api_key=api_key,
         model=model,
-        max_tokens=2048,
         system=SYSTEM_PROMPT,
-        tools=[MIRROR_TOOL],
-        tool_choice={"type": "tool", "name": "submit_mirror"},
-        messages=[{"role": "user", "content": f"Analyze this person's app collection:\n\n{context}"}],
+        user=f"Analyze this person's app collection:\n\n{context}",
+        schema=MIRROR_TOOL["input_schema"],
+        effort=MIRROR_EFFORT,
     )
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "submit_mirror":
-            return _parse_mirror(block.input)
-    raise RuntimeError("LLM did not return a submit_mirror tool call")
+    return _parse_mirror(data)
 
 
 def _mirror_openai(context: str, api_key: str | None, model: str) -> MirrorResult:

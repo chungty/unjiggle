@@ -10,11 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-try:
-    import anthropic
-except ImportError:
-    anthropic = None
-
+from unjiggle.llm import claude_json, resolve_route
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
 
@@ -94,17 +90,23 @@ MARIE KONDO PRINCIPLE — for cleanup observations:
 OUTPUT FORMAT: You must respond with a JSON object matching this exact schema.
 """
 
+# Operations from this analysis can be written to the phone, so it runs one level
+# above the latency-bound features.
+ANALYSIS_EFFORT = "medium"
+
 ANALYSIS_TOOL = {
     "name": "submit_analysis",
     "description": "Submit the complete home screen analysis with observations and personality narrative.",
     "input_schema": {
         "type": "object",
+        "additionalProperties": False,
         "required": ["observations", "personality", "archetype"],
         "properties": {
             "observations": {
                 "type": "array",
                 "items": {
                     "type": "object",
+                    "additionalProperties": False,
                     "required": ["track", "title", "narrative", "operations"],
                     "properties": {
                         "track": {"type": "string", "enum": ["cleanup", "organization", "optimization"]},
@@ -114,6 +116,7 @@ ANALYSIS_TOOL = {
                             "type": "array",
                             "items": {
                                 "type": "object",
+                                "additionalProperties": False,
                                 "required": ["action", "bundle_ids"],
                                 "properties": {
                                     "action": {
@@ -135,6 +138,7 @@ ANALYSIS_TOOL = {
             "archetype": {"type": "string", "description": "A 2-4 word archetype label (e.g., 'The Digital Archaeologist', 'The Reluctant Organizer')"},
             "stats": {
                 "type": "object",
+                "additionalProperties": False,
                 "description": "Key statistics to highlight",
                 "properties": {
                     "duplicate_groups": {"type": "string"},
@@ -206,41 +210,26 @@ def analyze(
 ) -> AnalysisResult:
     """Run LLM analysis on the layout. Returns structured observations.
 
-    provider: "anthropic", "openai", or "auto" (detect from api_key prefix).
+    provider: "anthropic", "openai", or "auto" (see unjiggle.llm.resolve_provider).
     """
     context = _build_context(layout, metadata, score)
-
-    if provider == "auto":
-        if api_key and api_key.startswith("sk-"):
-            provider = "openai"
-        else:
-            provider = "anthropic"
+    provider, api_key, model = resolve_route(api_key, model, provider)
 
     if provider == "openai":
-        return _analyze_openai(layout, context, api_key, model or "gpt-4.1")
-    else:
-        return _analyze_anthropic(layout, context, api_key, model or "claude-sonnet-4-20250514")
+        return _analyze_openai(layout, context, api_key, model)
+    return _analyze_anthropic(layout, context, api_key, model)
 
 
 def _analyze_anthropic(layout, context, api_key, model) -> AnalysisResult:
-    client = anthropic.Anthropic(api_key=api_key)
-
-    response = client.messages.create(
+    data = claude_json(
+        api_key=api_key,
         model=model,
-        max_tokens=4096,
         system=SYSTEM_PROMPT,
-        tools=[ANALYSIS_TOOL],
-        tool_choice={"type": "tool", "name": "submit_analysis"},
-        messages=[
-            {"role": "user", "content": f"Analyze this iPhone home screen layout:\n\n{context}"}
-        ],
+        user=f"Analyze this iPhone home screen layout:\n\n{context}",
+        schema=ANALYSIS_TOOL["input_schema"],
+        effort=ANALYSIS_EFFORT,
     )
-
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "submit_analysis":
-            return _parse_result(block.input, layout)
-
-    raise RuntimeError("Anthropic did not return a submit_analysis tool call")
+    return _parse_result(data, layout)
 
 
 def _analyze_openai(layout, context, api_key, model) -> AnalysisResult:
@@ -323,6 +312,91 @@ def _parse_result(data: dict, layout: HomeScreenLayout) -> AnalysisResult:
         archetype=data.get("archetype", "The Collector"),
         stats=data.get("stats", {}),
     )
+
+
+# The AI Stylist's operations are previewed and can then be written to the phone.
+INTENT_EFFORT = "medium"
+
+INTENT_SYSTEM_PROMPT = (
+    "You are Unjiggle's AI layout transformation engine. The user has a specific "
+    "intent for how they want their home screen to feel. Generate observations and "
+    "operations that transform the layout to match their intent.\n\n"
+    "Follow the same output format as a standard analysis, but tailor every suggestion "
+    "to the user's stated intent. Be opinionated and decisive.\n\n"
+    "RULES:\n"
+    "- Reference apps by EXACT bundle ID from the input\n"
+    "- Each observation should directly serve the user's intent\n"
+    "- Be specific about which apps to move and where\n"
+    "- 3-5 observations is ideal\n"
+)
+
+
+def _intent_message(intent: str, context: str) -> str:
+    return (
+        f"The user wants to transform their home screen with this intent: \"{intent}\"\n\n"
+        f"Analyze the layout and generate observations and operations that specifically "
+        f"serve this intent. Focus your suggestions on achieving what the user asked for.\n\n"
+        f"{context}"
+    )
+
+
+def plan_intent_operations(
+    intent: str,
+    layout: HomeScreenLayout,
+    metadata: dict[str, dict],
+    score: ScoreBreakdown,
+    api_key: str | None = None,
+    model: str | None = None,
+    provider: str = "auto",
+) -> list[LayoutOperation]:
+    """AI Stylist: turn the owner's free-text intent into validated layout operations."""
+    context = _build_context(layout, metadata, score)
+    user = _intent_message(intent, context)
+    provider, api_key, model = resolve_route(api_key, model, provider)
+
+    if provider == "openai":
+        data = _intent_openai(user, api_key, model)
+    else:
+        data = claude_json(
+            api_key=api_key,
+            model=model,
+            system=INTENT_SYSTEM_PROMPT,
+            user=user,
+            schema=ANALYSIS_TOOL["input_schema"],
+            effort=INTENT_EFFORT,
+        )
+
+    result = _parse_result(data, layout)
+    return [op for obs in result.observations for op in obs.operations]
+
+
+def _intent_openai(user: str, api_key: str | None, model: str) -> dict:
+    import openai
+
+    client = openai.OpenAI(api_key=api_key)
+    openai_tool = {
+        "type": "function",
+        "function": {
+            "name": ANALYSIS_TOOL["name"],
+            "description": ANALYSIS_TOOL["description"],
+            "parameters": ANALYSIS_TOOL["input_schema"],
+        },
+    }
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=4096,
+        messages=[
+            {"role": "system", "content": INTENT_SYSTEM_PROMPT},
+            {"role": "user", "content": user},
+        ],
+        tools=[openai_tool],
+        tool_choice={"type": "function", "function": {"name": ANALYSIS_TOOL["name"]}},
+    )
+    for choice in response.choices:
+        for tc in choice.message.tool_calls or []:
+            if tc.function.name == ANALYSIS_TOOL["name"]:
+                return json.loads(tc.function.arguments)
+    raise RuntimeError("OpenAI did not return a submit_analysis function call")
 
 
 def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]) -> HomeScreenLayout:

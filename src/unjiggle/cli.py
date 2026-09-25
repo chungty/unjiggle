@@ -1841,104 +1841,13 @@ def _generate_all_preset_transforms(layout, metadata: dict, score) -> dict[str, 
 def _generate_intent_transform(
     intent: str, layout, metadata: dict, score, api_key: str, model: str | None,
 ) -> dict:
-    """Generate a TransformPreview using LLM analysis framed around the user's intent."""
-    from unjiggle.analyzer import (
-        ANALYSIS_TOOL,
-        _build_context,
-        _parse_result,
+    """Generate a TransformPreview from the AI Stylist's operations for the user's intent."""
+    from unjiggle.analyzer import plan_intent_operations
+
+    operations = plan_intent_operations(
+        intent, layout, metadata, score, api_key=api_key, model=model,
     )
-
-    context = _build_context(layout, metadata, score)
-
-    intent_prompt = (
-        f"The user wants to transform their home screen with this intent: \"{intent}\"\n\n"
-        f"Analyze the layout and generate observations and operations that specifically "
-        f"serve this intent. Focus your suggestions on achieving what the user asked for.\n\n"
-        f"{context}"
-    )
-
-    intent_system = (
-        "You are Unjiggle's AI layout transformation engine. The user has a specific "
-        "intent for how they want their home screen to feel. Generate observations and "
-        "operations that transform the layout to match their intent.\n\n"
-        "Follow the same output format as a standard analysis, but tailor every suggestion "
-        "to the user's stated intent. Be opinionated and decisive.\n\n"
-        "RULES:\n"
-        "- Reference apps by EXACT bundle ID from the input\n"
-        "- Each observation should directly serve the user's intent\n"
-        "- Be specific about which apps to move and where\n"
-        "- 3-5 observations is ideal\n"
-    )
-
-    # Detect provider
-    if api_key.startswith("sk-"):
-        provider = "openai"
-    else:
-        provider = "anthropic"
-
-    if provider == "openai":
-        import openai as _openai
-
-        client = _openai.OpenAI(api_key=api_key)
-        openai_tool = {
-            "type": "function",
-            "function": {
-                "name": ANALYSIS_TOOL["name"],
-                "description": ANALYSIS_TOOL["description"],
-                "parameters": ANALYSIS_TOOL["input_schema"],
-            },
-        }
-        response = client.chat.completions.create(
-            model=model or "gpt-4.1",
-            max_tokens=4096,
-            messages=[
-                {"role": "system", "content": intent_system},
-                {"role": "user", "content": intent_prompt},
-            ],
-            tools=[openai_tool],
-            tool_choice={"type": "function", "function": {"name": "submit_analysis"}},
-        )
-        for choice in response.choices:
-            if choice.message.tool_calls:
-                for tc in choice.message.tool_calls:
-                    if tc.function.name == "submit_analysis":
-                        data = _json.loads(tc.function.arguments)
-                        result = _parse_result(data, layout)
-                        break
-                else:
-                    continue
-                break
-        else:
-            raise RuntimeError("OpenAI did not return a submit_analysis function call")
-    else:
-        try:
-            import anthropic as _anthropic
-        except ImportError:
-            raise RuntimeError("anthropic package required. pip install anthropic")
-
-        client = _anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=model or "claude-sonnet-4-20250514",
-            max_tokens=4096,
-            system=intent_system,
-            tools=[ANALYSIS_TOOL],
-            tool_choice={"type": "tool", "name": "submit_analysis"},
-            messages=[{"role": "user", "content": intent_prompt}],
-        )
-        result = None
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "submit_analysis":
-                result = _parse_result(block.input, layout)
-                break
-        if result is None:
-            raise RuntimeError("Anthropic did not return a submit_analysis tool call")
-
-    # Convert AnalysisResult into TransformPreview format
-    all_ops = []
-    for obs in result.observations:
-        all_ops.extend(obs.operations)
-
-    return _resolve_transform_preview(intent, layout, metadata, score, all_ops)
+    return _resolve_transform_preview(intent, layout, metadata, score, operations)
 
 
 @json.command(name="suggest")
