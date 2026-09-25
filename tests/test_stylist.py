@@ -747,6 +747,55 @@ def test_unknown_ids_and_names_are_reported_and_ignored():
     assert report.unknown_groups == ["Nope"]
 
 
+def test_a_gratitude_line_about_another_app_of_the_same_vendor_is_dropped():
+    fmt = "ios26"
+    raw = [[_app("com.apple.mobilephone", fmt)],
+           [{"bundleIdentifier": "com.google.Maps", "iconType": "app", "displayName": "Google Maps"},
+            {"bundleIdentifier": "com.google.OnHub", "iconType": "app", "displayName": "OnHub"},
+            _app("com.x.y", fmt)]]
+    layout = device.parse_layout_state(raw)
+    metadata = {"com.google.Maps": {"name": "Google Maps - Transit & Food", "genre": "Navigation",
+                                    "super_category": "Navigation"}}
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    # OnHub has no App Store record, so the layout shows its bundle ID.
+    assert f"{h('com.google.OnHub')} com.google.OnHub, p1" in stylist.build_plan_context(
+        layout, metadata, stylist.build_handles(layout))
+    wrong = _stay_plan(delete=[{"app": h("com.google.OnHub"), "gratitude": "Google Maps got you home."}])
+    ops, report = check_expansion(layout, metadata, wrong)
+    assert ops == [] and report.dropped_deletes == [h("com.google.OnHub")]
+    right = _stay_plan(delete=[{"app": h("com.google.OnHub"), "gratitude": "OnHub ran your Wi-Fi."}])
+    ops, report = check_expansion(layout, metadata, right)
+    assert [op.bundle_ids for op in ops] == [["com.google.OnHub"]]
+
+
+def test_gratitude_names_leave_out_the_bundle_id():
+    assert stylist.gratitude_names("com.google.OnHub", ["com.google.OnHub", "OnHub (com.google.OnHub)"]) == \
+        ["OnHub"]
+    assert stylist.gratitude_names("com.b.calc", ["Calculator (com.b.calc)", "Calculator"]) == ["Calculator"]
+    assert stylist.gratitude_names("io.x", ["io.x"]) == ["x"]
+
+
+@pytest.mark.parametrize("mode", ["stay", "folders"])
+def test_a_folder_name_that_ends_in_a_count_is_kept(mode):
+    fmt = "ios26"
+    raw = [[_app("com.d.00", fmt)],
+           [_app("com.p.01", fmt), _folder("Kids (5)", ["com.p.02", "com.p.03"], fmt), _app("com.p.04", fmt)]]
+    layout = device.parse_layout_state(raw)
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    plan = _stay_plan(folders=[{"name": "Kids (5)", "groups": [], "apps": [h("com.p.04")]}], unplaced=mode)
+    ops, _ = check_expansion(layout, {}, plan)
+    after = preview_operations(layout, ops)
+    folders = {i.folder.display_name: sorted(a.bundle_id for p in i.folder.pages for a in p)
+               for page in after.pages for i in page if i.is_folder}
+    assert folders["Kids (5)"] == ["com.p.02", "com.p.03", "com.p.04"]
+    assert "Kids" not in folders
+    # A count that the model copies from the layout is still removed: "Kids (5) (2)".
+    plan["folders"][0]["name"] = '"Kids (5)" (2)'
+    ops, _ = check_expansion(layout, {}, plan)
+    assert "Kids (5)" in {i.folder.display_name for page in preview_operations(layout, ops).pages
+                          for i in page if i.is_folder}
+
+
 def test_gratitude_names_app():
     assert stylist.gratitude_names_app("1Password guarded you.", ["1Password 7"])
     assert stylist.gratitude_names_app("Match Tennis Team kept score.", ["Match Tennis Team"])

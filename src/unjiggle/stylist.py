@@ -428,10 +428,43 @@ def gratitude_names_app(line: str, names: list[str]) -> bool:
     return False
 
 
-def _clean_name(value) -> str:
-    """A group or folder name as the model may quote it: 'Games (12)' or '"Social"'."""
-    text = " ".join(str(value or "").split()).strip("\"'“”")
-    return re.sub(r"\s*\(\d+\)$", "", text).strip()
+def gratitude_names(bundle_id: str, names: list[str]) -> list[str]:
+    """The names that a gratitude line can use for an app, without its bundle ID.
+
+    An app with no App Store record is labelled by its bundle ID. The vendor part of
+    the ID ('com.google') would let a line about another app of the same vendor pass,
+    so only the part after the vendor stays: 'com.google.OnHub' -> 'OnHub'.
+    """
+    parts = bundle_id.split(".")
+    product = ".".join(parts[2:]) if len(parts) > 2 else parts[-1]
+    out: list[str] = []
+    for name in names:
+        text = str(name or "").replace(f"({bundle_id})", " ")
+        text = " ".join(text.split())
+        if text.casefold() == bundle_id.casefold():
+            text = product
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
+def _name_forms(value) -> list[str]:
+    """A group or folder name as the model may quote it: '"Social"', or with the count
+    of the layout, 'Games (12)'. The exact name comes first, then the name without a
+    count: a folder can itself be named 'Kids (5)'."""
+    text = " ".join(str(value or "").split()).strip("\"'“”").strip()
+    bare = re.sub(r"\s*\(\d+\)$", "", text).strip()
+    return [form for form in dict.fromkeys((text, bare)) if form]
+
+
+def _clean_name(value, known=()) -> str:
+    """The first form of the name that is in ``known`` (casefold keys), else the name
+    without a count."""
+    forms = _name_forms(value)
+    for form in forms:
+        if form.casefold() in known:
+            return form
+    return forms[-1] if forms else ""
 
 
 def expand_plan(
@@ -493,7 +526,7 @@ def expand_plan(
     def named_apps(values) -> list[str]:
         out: list[str] = []
         for value in values or []:
-            key = _clean_name(value).casefold()
+            key = _clean_name(value, groups.keys() | current.keys()).casefold()
             found = [source[key] for source in (groups, current) if key in source]
             if not found:
                 report.unknown_groups.append(str(value))
@@ -512,7 +545,7 @@ def expand_plan(
     folder_title: dict[str, str] = {}
 
     def folder_key(name) -> str | None:
-        title = _clean_name(name)
+        title = _clean_name(name, current_title.keys() | folder_title.keys())
         if not title:
             return None
         key = title.casefold()
@@ -535,7 +568,7 @@ def expand_plan(
                 short_name(bundle_id, metadata, names),
                 _full_name(bundle_id, metadata, names),
             ]
-            if line and gratitude_names_app(line, app_names):
+            if line and gratitude_names_app(line, gratitude_names(bundle_id, app_names)):
                 dest[bundle_id] = ("delete", "")
                 gratitude[bundle_id] = line
             else:
@@ -557,15 +590,21 @@ def expand_plan(
     # 3. Page 1. An app that the plan names for page 1 is never cut for a folder: in a
     # new layout, page 1 shows page_one and then the folders, and the folders that do
     # not fit go to page 2. Apps after the first 24 go to page 2.
+    library = plan.get("app_library") if isinstance(plan.get("app_library"), dict) else {}
     page_one = [b for b in ids(plan.get("page_one")) if b not in dest]
     if mode != "stay" and not page_one:
+        # The plan names no apps for page 1, so page 1 keeps its loose apps, except
+        # the ones that the plan names for a folder or the App Library.
+        values = list(library.get("apps") or [])
+        for key in plan_folders:
+            values += specs[key]["apps"]
+        named = {handles.lookup(value) for value in values}
         first_page = layout.pages[0] if layout.pages else []
         loose = [item.app.bundle_id for item in first_page if item.is_app]
-        page_one = [b for b in dict.fromkeys(loose) if b in home_set and b not in dest]
+        page_one = [b for b in dict.fromkeys(loose) if b in home_set and b not in dest and b not in named]
     claim(page_one, "page1")
 
     # 4. Single apps, then folders kept by name, then whole groups and folders.
-    library = plan.get("app_library") if isinstance(plan.get("app_library"), dict) else {}
     for key in plan_folders:
         claim(ids(specs[key]["apps"]), "folder", key)
     claim(ids(library.get("apps")), "library")
