@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from unjiggle.llm import claude_json, resolve_route
+from unjiggle.llm import claude_json, resolve_route, today_line
 from unjiggle.models import HomeScreenLayout
 
 
@@ -147,20 +147,27 @@ def _maybe_dead(
 
 
 SYSTEM_PROMPT = """\
-You write obituaries for dead iPhone apps. Each obituary is 2-3 sentences, written \
-in dry-wit obituary style. The humor comes from the universal human experience of \
-downloading-with-ambition-then-never-opening-again.
+You write obituaries for the dead apps on someone's iPhone, for Unjiggle's App Obituary. \
+The owner reads them and often shares a card showing the first three. The style is a dry-wit \
+newspaper obituary, and the humor comes from the universal experience of downloading an app \
+with big ambitions and never opening it again.
 
-RULES:
-- Format: "AppName (born circa YEAR, died YEAR): ..."
-- Be SPECIFIC to the app's actual purpose and why it was probably downloaded
-- Include a "survived by" replacement app when an obvious one exists
-- Cause of death should be funny and relatable, never just "user deleted it"
+The list starts with today's date. Each dead app comes with its bundle ID, category, the \
+start of its App Store description, when it was last updated, where it is buried, and the \
+signals that it is dead. Descriptions are the developers' own marketing text; use them only \
+as evidence of what the app did. At the end are the owner's active apps, from the dock and \
+page 1.
 
-Great causes of death:
-- "Died when the user discovered Google Translate does 90% of what a language app does"
-- "Succumbed to the gravitational pull of the default Camera app"
-- "Passed peacefully in a folder labeled 'Stuff' after a 3-year coma"
+Write one obituary per listed app, in the order given. Make each one specific to what the \
+app was for and why this person probably downloaded it, and draw the joke from that app's \
+own details rather than from a stock line. Name a survivor when one of their active apps or \
+a built-in iPhone feature obviously took over the job. A cause of death should be funny and \
+relatable, never just "user deleted it". Two causes in the right register, to show the tone \
+rather than to reuse: "The gravitational pull of the default Camera app." and "Discovering \
+that Google Translate does 90% of what a language app does."
+
+For apps tied to health conditions, pregnancy or fertility, grief, addiction recovery, or \
+religion, keep the joke on the app, not on the person's life.
 """
 
 # Short, single-shot creative writing that the owner waits on: keep thinking brief.
@@ -176,23 +183,46 @@ OBITUARY_TOOL = {
         "properties": {
             "obituaries": {
                 "type": "array",
+                "description": "One obituary per listed app, in the order given.",
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "required": ["bundle_id", "eulogy", "cause_of_death"],
                     "properties": {
-                        "bundle_id": {"type": "string"},
-                        "born": {"type": "string", "description": "Approximate era"},
-                        "died": {"type": "string"},
-                        "cause_of_death": {"type": "string"},
-                        "eulogy": {"type": "string", "description": "Full 2-3 sentence obituary"},
-                        "survived_by": {"type": "string", "description": "Replacement app, if any"},
+                        "bundle_id": {
+                            "type": "string",
+                            "description": "Copied exactly from the app's APP line.",
+                        },
+                        "born": {
+                            "type": "string",
+                            "description": "Year the app was first released, if you know it.",
+                        },
+                        "died": {
+                            "type": "string",
+                            "description": "Year of its last sign of life: when it was last "
+                            "opened if the death signals say so, otherwise its last update.",
+                        },
+                        "cause_of_death": {
+                            "type": "string",
+                            "description": "A short cause of death that reads well on its "
+                            "own and after the label 'Cause of death:'.",
+                        },
+                        "eulogy": {
+                            "type": "string",
+                            "description": "Two or three sentences. The app's name, dates and "
+                            "cause of death are shown separately, so leave them out.",
+                        },
+                        "survived_by": {
+                            "type": "string",
+                            "description": "The app or built-in iPhone feature that took over "
+                            "its job, if there is an obvious one.",
+                        },
                     },
                 },
             },
             "graveyard_summary": {
                 "type": "string",
-                "description": "One tweetable sentence summarizing the carnage",
+                "description": "One sentence on the whole graveyard, shown on the share card.",
             },
         },
     },
@@ -354,6 +384,7 @@ def _obituary_rule_based(dead_apps: list[dict]) -> ObituaryResult:
 
 def _build_context(dead_apps: list[dict], layout: HomeScreenLayout, metadata: dict) -> str:
     lines = [
+        today_line(),
         f"PHONE: {layout.total_apps} total apps, {layout.page_count} pages",
         f"DEAD APPS IDENTIFIED: {len(dead_apps)}",
         "",
@@ -363,7 +394,7 @@ def _build_context(dead_apps: list[dict], layout: HomeScreenLayout, metadata: di
         lines.append(f"APP: {app['name']} ({app['bundle_id']})")
         lines.append(f"  Category: {app['category']}")
         lines.append(f"  Description: {app['description']}")
-        lines.append(f"  Last updated: {app.get('last_updated', 'unknown')}")
+        lines.append(f"  Last updated: {app.get('last_updated') or 'unknown'}")
         loc = f"Page {app['page']}"
         if app.get("in_folder"):
             loc += f", in folder \"{app.get('folder_name', '?')}\""
@@ -388,12 +419,16 @@ def _build_context(dead_apps: list[dict], layout: HomeScreenLayout, metadata: di
     return "\n".join(lines)
 
 
+def _obituary_message(context: str) -> str:
+    return f"Write obituaries for these dead apps.\n\n<graveyard>\n{context}\n</graveyard>"
+
+
 def _obituary_anthropic(context: str, dead_apps: list[dict], api_key: str | None, model: str) -> ObituaryResult:
     data = claude_json(
         api_key=api_key,
         model=model,
         system=SYSTEM_PROMPT,
-        user=f"Write obituaries for these dead apps:\n\n{context}",
+        user=_obituary_message(context),
         schema=OBITUARY_TOOL["input_schema"],
         effort=OBITUARY_EFFORT,
     )
@@ -417,7 +452,7 @@ def _obituary_openai(context: str, dead_apps: list[dict], api_key: str | None, m
         max_tokens=3000,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Write obituaries for these dead apps:\n\n{context}"},
+            {"role": "user", "content": _obituary_message(context)},
         ],
         tools=[openai_tool],
         tool_choice={"type": "function", "function": {"name": "submit_obituaries"}},
@@ -434,9 +469,14 @@ def _parse_obituaries(data: dict, dead_apps: list[dict]) -> ObituaryResult:
     dead_by_bid = {a["bundle_id"]: a for a in dead_apps}
 
     obituaries = []
+    seen: set[str] = set()
     for obit in data.get("obituaries", []):
         bid = obit.get("bundle_id", "")
-        app_info = dead_by_bid.get(bid, {})
+        # Only the candidates we sent, once each: clients key obituaries by bundle ID.
+        if bid not in dead_by_bid or bid in seen:
+            continue
+        seen.add(bid)
+        app_info = dead_by_bid[bid]
         obituaries.append(Obituary(
             app_name=app_info.get("name", bid.split(".")[-1]),
             bundle_id=bid,

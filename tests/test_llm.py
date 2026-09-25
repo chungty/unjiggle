@@ -13,9 +13,16 @@ from types import SimpleNamespace
 import pytest
 
 from unjiggle import llm
-from unjiggle.analyzer import ANALYSIS_TOOL, analyze, plan_intent_operations
-from unjiggle.mirror import MIRROR_TOOL, generate_mirror
-from unjiggle.obituary import OBITUARY_TOOL, generate_obituaries
+from unjiggle.analyzer import (
+    ANALYSIS_TOOL,
+    INTENT_TOOL,
+    _build_context,
+    _parse_result,
+    analyze,
+    plan_intent_operations,
+)
+from unjiggle.mirror import MIRROR_TOOL, _parse_mirror, generate_mirror
+from unjiggle.obituary import OBITUARY_TOOL, _parse_obituaries, generate_obituaries
 from unjiggle.scoring import compute_score
 
 anthropic = pytest.importorskip("anthropic")
@@ -33,6 +40,9 @@ ANALYSIS_REPLY = {
     }],
     "personality": "Organized chaos.",
     "archetype": "The Collector",
+}
+INTENT_REPLY = {
+    "operations": [{"action": "move_to_app_library", "bundle_ids": ["com.apple.weather"]}],
 }
 MIRROR_REPLY = {
     "roast": "You have apps.",
@@ -169,15 +179,17 @@ def test_analysis_request_targets_opus_5_5_with_structured_output(
 def test_intent_request_targets_opus_5_5_with_structured_output(
     fake_claude, chaotic_layout, sample_metadata,
 ):
-    fake_claude.reply = _json_reply(ANALYSIS_REPLY)
+    fake_claude.reply = _json_reply(INTENT_REPLY)
     score = compute_score(chaotic_layout, sample_metadata)
     ops = plan_intent_operations(
         "calm and minimal", chaotic_layout, sample_metadata, score, api_key=ANTHROPIC_KEY,
     )
 
     request = fake_claude.last
-    _assert_opus_request(request, ANALYSIS_TOOL["input_schema"], "medium")
-    assert "calm and minimal" in request.body["messages"][0]["content"]
+    _assert_opus_request(request, INTENT_TOOL["input_schema"], "medium")
+    user = request.body["messages"][0]["content"]
+    assert user.startswith("<intent>\ncalm and minimal\n</intent>")
+    assert "<layout>\nTODAY: " in user
     assert [op.action for op in ops] == ["move_to_app_library"]
 
 
@@ -245,7 +257,7 @@ def test_schemas_are_valid_for_structured_outputs():
             for i, value in enumerate(node):
                 walk(value, f"{path}[{i}]")
 
-    for tool in (ANALYSIS_TOOL, MIRROR_TOOL, OBITUARY_TOOL):
+    for tool in (ANALYSIS_TOOL, INTENT_TOOL, MIRROR_TOOL, OBITUARY_TOOL):
         walk(tool["input_schema"], tool["name"])
 
 
@@ -395,7 +407,7 @@ def test_openai_key_uses_function_calling(monkeypatch, fake_claude, chaotic_layo
 
 
 def test_openai_intent_path_returns_operations(monkeypatch, chaotic_layout, sample_metadata):
-    fake = FakeOpenAI(ANALYSIS_REPLY)
+    fake = FakeOpenAI(INTENT_REPLY)
     monkeypatch.setitem(sys.modules, "openai", fake)
     score = compute_score(chaotic_layout, sample_metadata)
 
@@ -403,5 +415,133 @@ def test_openai_intent_path_returns_operations(monkeypatch, chaotic_layout, samp
         "calm", chaotic_layout, sample_metadata, score, api_key=OPENAI_KEY,
     )
 
-    assert fake.calls[-1]["model"] == "gpt-4.1"
+    call = fake.calls[-1]
+    assert call["model"] == "gpt-4.1"
+    assert call["tools"][0]["function"]["parameters"] == INTENT_TOOL["input_schema"]
     assert [op.bundle_ids for op in ops] == [["com.apple.weather"]]
+
+
+# --- prompt inputs and output contracts ------------------------------------------------
+
+
+def test_analysis_context_lists_folder_members_by_bundle_id(chaotic_layout, sample_metadata):
+    score = compute_score(chaotic_layout, sample_metadata)
+    context = _build_context(chaotic_layout, sample_metadata, score)
+
+    assert context.startswith("TODAY: ")
+    assert '[FOLDER "Social"] (4 apps):' in context
+    assert "\n    com.facebook.Facebook" in context
+    assert "\n    com.linkedin.LinkedIn" in context
+
+
+def test_mirror_and_obituary_contexts_start_with_today(
+    fake_claude, no_screen_time, chaotic_layout, sample_metadata,
+):
+    fake_claude.reply = _json_reply(MIRROR_REPLY)
+    _mirror(fake_claude, chaotic_layout, sample_metadata)
+    assert "<apps>\nTODAY: " in fake_claude.last.body["messages"][0]["content"]
+
+    layout, metadata = _dead_app_layout()
+    fake_claude.reply = _json_reply({"obituaries": [], "graveyard_summary": "Quiet."})
+    generate_obituaries(layout, metadata, api_key=ANTHROPIC_KEY)
+    user = fake_claude.last.body["messages"][0]["content"]
+    assert "<graveyard>\nTODAY: " in user
+    assert "APP: Dead0 (com.example.dead0)" in user
+
+
+def test_observations_are_ordered_by_track(chaotic_layout):
+    data = {
+        "observations": [
+            {"track": "optimization", "title": "C", "narrative": "", "operations": []},
+            {"track": "cleanup", "title": "A", "narrative": "", "operations": []},
+            {"track": "organization", "title": "B", "narrative": "", "operations": []},
+            {"track": "cleanup", "title": "A2", "narrative": "", "operations": []},
+        ],
+        "personality": "",
+        "archetype": "X",
+    }
+    result = _parse_result(data, chaotic_layout)
+    assert [obs.title for obs in result.observations] == ["A", "A2", "B", "C"]
+
+
+def test_mirror_drops_repeated_phases_and_tensions():
+    result = _parse_mirror({
+        "roast": "r",
+        "phases": [
+            {"name": "The Fitness Phase", "apps": ["Strava"], "narrative": "a"},
+            {"name": "the fitness phase ", "apps": ["Peloton"], "narrative": "b"},
+        ],
+        "contradictions": [
+            {"tension": "Calm vs. chaos", "apps_a": [], "apps_b": [], "roast": "a"},
+            {"tension": "Calm vs. chaos", "apps_a": [], "apps_b": [], "roast": "b"},
+        ],
+        "guilty_pleasure": "g",
+        "one_line": "o",
+    })
+    assert [p.apps for p in result.phases] == [["Strava"]]
+    assert [c.roast for c in result.contradictions] == ["a"]
+
+
+def test_obituaries_keep_only_candidates_once_each():
+    dead_apps = [
+        {"bundle_id": "com.example.a", "name": "A"},
+        {"bundle_id": "com.example.b", "name": "B"},
+    ]
+    result = _parse_obituaries({
+        "obituaries": [
+            {"bundle_id": "com.example.a", "eulogy": "first", "cause_of_death": "x"},
+            {"bundle_id": "com.example.invented", "eulogy": "?", "cause_of_death": "x"},
+            {"bundle_id": "com.example.a", "eulogy": "again", "cause_of_death": "x"},
+            {"bundle_id": "com.example.b", "eulogy": "second", "cause_of_death": "x"},
+        ],
+        "graveyard_summary": "Two.",
+    }, dead_apps)
+    assert [(o.bundle_id, o.eulogy) for o in result.obituaries] == [
+        ("com.example.a", "first"), ("com.example.b", "second"),
+    ]
+    assert result.total_dead == 2
+
+
+@pytest.fixture
+def phone(monkeypatch, chaotic_layout, sample_metadata):
+    """A connected phone with the chaotic layout, for CLI tests."""
+    from unjiggle import device, itunes
+
+    monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
+    monkeypatch.setattr(device, "read_layout", lambda lockdown: chaotic_layout)
+    monkeypatch.setattr(itunes, "enrich_layout", lambda layout: sample_metadata)
+
+
+def _json_suggest_intent():
+    from click.testing import CliRunner
+
+    from unjiggle.cli import json as json_group
+
+    return CliRunner().invoke(
+        json_group, ["suggest", "--intent", "calm", "--api-key", ANTHROPIC_KEY],
+    )
+
+
+def test_json_suggest_intent_keeps_the_transform_preview_contract(fake_claude, phone):
+    fake_claude.reply = _json_reply(INTENT_REPLY)
+
+    result = _json_suggest_intent()
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["intent"] == "calm"
+    assert payload["operations"] == [
+        {"action": "move_to_app_library", "bundle_ids": ["com.apple.weather"]},
+    ]
+    for key in ("summary", "changes", "before_score", "after_score", "before_pages", "after_pages"):
+        assert key in payload
+    assert fake_claude.last.body["model"] == "claude-opus-5-5"
+
+
+def test_json_suggest_intent_reports_a_refusal_as_json_error(fake_claude, phone):
+    fake_claude.reply = _message([], stop_reason="refusal")
+
+    result = _json_suggest_intent()
+
+    assert result.exit_code == 1
+    assert "declined" in json.loads(result.output)["error"]

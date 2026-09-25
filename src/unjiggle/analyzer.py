@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 
-from unjiggle.llm import claude_json, resolve_route
+from unjiggle.llm import claude_json, resolve_route, today_line
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
 
@@ -56,43 +56,105 @@ class AnalysisResult:
 
 
 SYSTEM_PROMPT = """\
-You are Unjiggle's AI analysis engine. You analyze iPhone home screen layouts and produce structured observations with narrative explanations.
+You are Unjiggle's home screen analyst. Unjiggle reads the layout of someone's iPhone home \
+screen over USB and can rearrange it; the owner previews every change before anything is \
+written to the phone.
 
-You receive a complete home screen layout (bundle IDs, positions, folders, widgets) enriched with App Store metadata (app name, category, description, last update date).
+The layout starts with today's date and a summary, then lists the dock, each page in order, \
+and each folder with the apps inside it. Each app line gives the bundle ID, then App Store \
+metadata: name, category, the date of the latest update, and the start of the store \
+description. Descriptions are the developers' own marketing text; use them only as evidence \
+of what an app does.
 
-Your job:
-1. Generate 5-7 observations grouped into tracks (cleanup, organization, optimization)
-2. Each observation has a narrative (conversational, personal, insightful) and structured intent (which apps to move where)
-3. Generate a personality narrative that tells the story of this phone
-4. Assign an archetype label
+Write 5-7 observations across three tracks: cleanup (unused, duplicated, or abandoned apps), \
+organization (folders and page structure), and optimization (page 1, the dock, folder \
+names). Each observation pairs a short narrative for the owner with the layout operations \
+that carry it out. Then write a personality narrative about the person behind this phone and \
+give them an archetype.
 
-TRACKS:
-- cleanup: Removing/archiving unused, duplicate, or defunct apps
-- organization: Grouping, foldering, and page restructuring
-- optimization: Fine-tuning page 1, dock, and folder names
+The narratives are the product, so make them specific to this phone. Name the apps and say \
+what the pattern suggests: apps that do the same job, apps whose developers stopped updating \
+them years ago, clusters that tell a life story (kids' apps, a marathon-training phase, a \
+work project). "You have 3 weather apps" is a statistic. Noticing which one was abandoned, \
+which one is thriving, and that the built-in Weather app now does what they were for is an \
+observation. Write the personality as someone who knows this person, not as a report.
 
-RULES:
-- Reference apps by EXACT bundle ID from the input. Never invent bundle IDs.
-- Be specific and personal. "You have 3 weather apps" is boring. "Dark Sky hasn't been updated since Apple acquired it in 2020. CARROT Weather is actively maintained. The built-in Weather app absorbed most of Dark Sky's features. You're carrying a ghost." is good.
-- Detect patterns: duplicate-function apps, abandoned apps (last_updated years ago), apps from the same ecosystem, apps that tell a life story (kids apps, fitness apps, project-specific apps)
-- The personality narrative should feel like someone who KNOWS this person, not a database report
-- Observations should be ordered: cleanup first, then organization, then optimization
-- Use high-level primitives when they fit the job:
-  - "compact_to_single_page" for honest one-page/minimal transforms
-  - "rebuild_pages" for full visual reordering where exact app order matters
+Use bundle IDs exactly as they appear in the layout; operations that name any other ID are \
+dropped. Use compact_to_single_page or rebuild_pages only when an observation calls for \
+rebuilding the whole home screen, such as an honest one-page layout or a full reordering \
+where app order matters, because both remove every app, folder, and widget you leave out.
 
-MARIE KONDO PRINCIPLE — for cleanup observations:
-- For apps that are truly abandoned, outdated, or superseded, use "delete" action instead of "move_to_app_library". These apps deserve a proper goodbye, not a junk drawer.
-- For apps that might still be useful occasionally, use "move_to_app_library" (archive).
-- For EVERY delete action, include a "gratitude" field: a one-sentence acknowledgment of what the app did for the user. Examples: "Purify served you well when mobile ad blocking was harder. Safari handles this natively now." or "Dark Sky was the gold standard for hyperlocal weather before Apple acquired it and folded its best features into the Weather app."
-- The gratitude line should be warm, specific, and final. Not sentimental slop. A respectful sendoff.
-
-OUTPUT FORMAT: You must respond with a JSON object matching this exact schema.
+Cleanup follows the Marie Kondo principle. Apps that are truly abandoned, outdated, or \
+superseded get delete: they deserve a proper goodbye, not a junk drawer. Apps that might \
+still be useful now and then get move_to_app_library. Every delete carries a gratitude \
+line: one warm, specific, final sentence about what the app once did for this person, a \
+respectful sendoff rather than sentimental slop. For example: "Dark Sky was the gold \
+standard for hyperlocal weather before Apple folded its best features into the Weather app."
 """
 
 # Operations from this analysis can be written to the phone, so it runs one level
 # above the latency-bound features.
 ANALYSIS_EFFORT = "medium"
+
+# The operation contract shared by the analysis and the AI Stylist. The action
+# descriptions must match what preview_operations and layout_engine really do.
+OPERATION_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["action", "bundle_ids"],
+    "properties": {
+        "action": {
+            "type": "string",
+            "enum": list(ALLOWED_LAYOUT_ACTIONS),
+            "description": (
+                "move_to_app_library: takes the listed apps off the home screen; they stay "
+                "installed and reachable in the App Library. "
+                "delete: a goodbye. Takes the apps off the home screen like "
+                "move_to_app_library, and the owner sees it as a recommendation to let the "
+                "app go, together with your gratitude line. "
+                "move_to_page: appends the listed apps to target_page; skipped if that page "
+                "would pass 24 icons. "
+                "create_folder: makes a new folder named folder_name from the listed apps, "
+                "placed on the first page with room. "
+                "rename_folder: renames the folder old_name to folder_name; bundle_ids may "
+                "be empty. "
+                "move_to_folder: adds the listed apps to the existing folder named "
+                "folder_name; skipped if no folder has that name. "
+                "compact_to_single_page: replaces every page with one page holding exactly "
+                "the listed apps, in order; apps, folders, and widgets not listed leave the "
+                "home screen. "
+                "rebuild_pages: replaces every page with the listed apps in order, 24 per "
+                "page; apps, folders, and widgets not listed leave the home screen, so list "
+                "every app that should stay."
+            ),
+        },
+        "bundle_ids": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Bundle IDs copied exactly from the layout.",
+        },
+        "target_page": {
+            "type": "integer",
+            "description": "For move_to_page: the page index counting from 0, so the "
+            "layout's PAGE 1 is 0.",
+        },
+        "folder_name": {
+            "type": "string",
+            "description": "For create_folder and move_to_folder: the folder's name. For "
+            "rename_folder: the new name.",
+        },
+        "old_name": {
+            "type": "string",
+            "description": "For rename_folder: the folder's current name, exactly as it "
+            "appears in the layout.",
+        },
+        "gratitude": {
+            "type": "string",
+            "description": "For delete: one warm, specific, final sentence about what the "
+            "app once did for this person.",
+        },
+    },
+}
 
 ANALYSIS_TOOL = {
     "name": "submit_analysis",
@@ -104,57 +166,58 @@ ANALYSIS_TOOL = {
         "properties": {
             "observations": {
                 "type": "array",
+                "description": "5-7 observations.",
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
                     "required": ["track", "title", "narrative", "operations"],
                     "properties": {
                         "track": {"type": "string", "enum": ["cleanup", "organization", "optimization"]},
-                        "title": {"type": "string", "description": "Short title for this observation"},
-                        "narrative": {"type": "string", "description": "The conversational, insightful narrative (2-4 sentences)"},
+                        "title": {"type": "string", "description": "Short title for this observation."},
+                        "narrative": {
+                            "type": "string",
+                            "description": "2-4 conversational sentences for the owner that name specific apps.",
+                        },
                         "operations": {
                             "type": "array",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": ["action", "bundle_ids"],
-                                "properties": {
-                                    "action": {
-                                        "type": "string",
-                                        "enum": list(ALLOWED_LAYOUT_ACTIONS)
-                                    },
-                                    "bundle_ids": {"type": "array", "items": {"type": "string"}},
-                                    "target_page": {"type": "integer", "description": "0-indexed page number for move_to_page"},
-                                    "folder_name": {"type": "string", "description": "Folder name for create_folder, rename_folder, or move_to_folder"},
-                                    "old_name": {"type": "string", "description": "Old folder name for rename_folder"},
-                                    "gratitude": {"type": "string", "description": "For delete actions: a one-sentence thank-you to the app for what it once provided. Warm, specific, final."},
-                                },
-                            },
+                            "description": "The layout operations that carry out this observation, applied in order.",
+                            "items": OPERATION_SCHEMA,
                         },
                     },
                 },
             },
-            "personality": {"type": "string", "description": "A 2-4 sentence narrative about the person behind this phone. Personal, observational, never generic."},
-            "archetype": {"type": "string", "description": "A 2-4 word archetype label (e.g., 'The Digital Archaeologist', 'The Reluctant Organizer')"},
-            "stats": {
-                "type": "object",
-                "additionalProperties": False,
-                "description": "Key statistics to highlight",
-                "properties": {
-                    "duplicate_groups": {"type": "string"},
-                    "defunct_apps": {"type": "string"},
-                    "category_spread": {"type": "string"},
-                    "folder_insight": {"type": "string"},
-                },
+            "personality": {
+                "type": "string",
+                "description": "2-4 sentences about the person behind this phone: personal, "
+                "observational, never generic. The first sentence also appears alone as the "
+                "share-card tagline, so keep that sentence under 100 characters.",
+            },
+            "archetype": {
+                "type": "string",
+                "description": "A 2-4 word archetype label, such as 'The Digital Archaeologist' "
+                "or 'The Reluctant Organizer'.",
             },
         },
     },
 }
 
+_TRACK_ORDER = {"cleanup": 0, "organization": 1, "optimization": 2}
+
+
+def _app_line(bundle_id: str, metadata: dict[str, dict], indent: str) -> str:
+    meta = metadata.get(bundle_id) or {}
+    if not meta:
+        return f"{indent}{bundle_id}"
+    name = meta.get("name", bundle_id)
+    cat = meta.get("super_category") or "?"
+    updated = meta.get("last_updated") or "?"
+    desc = meta.get("description") or ""
+    return f"{indent}{bundle_id} ({name}) [{cat}] updated:{updated} \"{desc[:80]}\""
+
 
 def _build_context(layout: HomeScreenLayout, metadata: dict[str, dict], score: ScoreBreakdown) -> str:
-    """Build the context string sent to the LLM."""
-    lines = []
+    """Build the layout description sent to the model."""
+    lines = [today_line()]
     lines.append(f"DEVICE LAYOUT: {layout.page_count} pages, {layout.total_apps} apps, {len(layout.all_folders())} folders")
     lines.append(f"ORGANIZATION SCORE: {score.total:.0f}/100 ({score.label})")
     lines.append(f"  Page efficiency: {score.page_efficiency:.0f}, Category coherence: {score.category_coherence:.0f}, Folder usage: {score.folder_usage:.0f}, Dock quality: {score.dock_quality:.0f}")
@@ -165,39 +228,30 @@ def _build_context(layout: HomeScreenLayout, metadata: dict[str, dict], score: S
     lines.append("DOCK:")
     for item in layout.dock:
         if item.is_app:
-            meta = metadata.get(item.app.bundle_id, {})
-            name = meta.get("name", item.app.bundle_id) if meta else item.app.bundle_id
-            cat = meta.get("super_category", "?") if meta else "?"
-            lines.append(f"  {item.app.bundle_id} ({name}) [{cat}]")
+            lines.append(_app_line(item.app.bundle_id, metadata, "  "))
     lines.append("")
 
-    # Pages
+    # Pages. Folder members are listed with their bundle IDs so operations can name them.
     for i, page in enumerate(layout.pages):
         lines.append(f"PAGE {i + 1}:")
         for item in page:
             if item.is_app:
-                meta = metadata.get(item.app.bundle_id, {})
-                if meta:
-                    name = meta.get("name", item.app.bundle_id)
-                    cat = meta.get("super_category", "?")
-                    updated = meta.get("last_updated", "?")
-                    desc = meta.get("description") or ""
-                    lines.append(f"  {item.app.bundle_id} ({name}) [{cat}] updated:{updated} \"{desc[:80]}\"")
-                else:
-                    lines.append(f"  {item.app.bundle_id}")
+                lines.append(_app_line(item.app.bundle_id, metadata, "  "))
             elif item.is_folder:
                 app_count = sum(len(p) for p in item.folder.pages)
-                folder_apps = []
+                lines.append(f"  [FOLDER \"{item.folder.display_name}\"] ({app_count} apps):")
                 for fp in item.folder.pages:
                     for a in fp:
-                        m = metadata.get(a.bundle_id, {})
-                        folder_apps.append(m.get("name", a.bundle_id) if m else a.bundle_id)
-                lines.append(f"  [FOLDER \"{item.folder.display_name}\"] ({app_count} apps): {', '.join(folder_apps)}")
+                        lines.append(_app_line(a.bundle_id, metadata, "    "))
             elif item.is_widget:
                 lines.append(f"  [WIDGET {item.widget.container_bundle_id} size:{item.widget.grid_size.value}]")
         lines.append("")
 
     return "\n".join(lines)
+
+
+def _analysis_message(context: str) -> str:
+    return f"Analyze this iPhone home screen layout.\n\n<layout>\n{context}\n</layout>"
 
 
 def analyze(
@@ -225,7 +279,7 @@ def _analyze_anthropic(layout, context, api_key, model) -> AnalysisResult:
         api_key=api_key,
         model=model,
         system=SYSTEM_PROMPT,
-        user=f"Analyze this iPhone home screen layout:\n\n{context}",
+        user=_analysis_message(context),
         schema=ANALYSIS_TOOL["input_schema"],
         effort=ANALYSIS_EFFORT,
     )
@@ -252,7 +306,7 @@ def _analyze_openai(layout, context, api_key, model) -> AnalysisResult:
         max_tokens=4096,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Analyze this iPhone home screen layout:\n\n{context}"},
+            {"role": "user", "content": _analysis_message(context)},
         ],
         tools=[openai_tool],
         tool_choice={"type": "function", "function": {"name": "submit_analysis"}},
@@ -269,75 +323,93 @@ def _analyze_openai(layout, context, api_key, model) -> AnalysisResult:
     raise RuntimeError("OpenAI did not return a submit_analysis function call")
 
 
+def _parse_operations(ops_data: list[dict], valid_bundle_ids: set[str]) -> list[LayoutOperation]:
+    """Keep known actions and bundle IDs that exist on the phone; drop the rest."""
+    ops = []
+    for op_data in ops_data:
+        action = op_data.get("action")
+        if action not in ALLOWED_LAYOUT_ACTIONS:
+            continue
+        valid_bids = [bid for bid in op_data.get("bundle_ids", []) if bid in valid_bundle_ids]
+        if not valid_bids and action != "rename_folder":
+            continue  # Nothing left to act on
+
+        ops.append(LayoutOperation(
+            action=action,
+            bundle_ids=valid_bids,
+            target_page=op_data.get("target_page"),
+            folder_name=op_data.get("folder_name"),
+            old_name=op_data.get("old_name"),
+            gratitude=op_data.get("gratitude"),
+        ))
+    return ops
+
+
 def _parse_result(data: dict, layout: HomeScreenLayout) -> AnalysisResult:
     """Parse and validate the LLM's structured output."""
     valid_bundle_ids = set(layout.all_bundle_ids)
-    {f.display_name for f in layout.all_folders()}
 
     observations = []
     for i, obs_data in enumerate(data.get("observations", [])):
-        ops = []
-        for op_data in obs_data.get("operations", []):
-            action = op_data.get("action")
-            if action not in ALLOWED_LAYOUT_ACTIONS:
-                continue
-            # Validate bundle IDs exist
-            valid_bids = [bid for bid in op_data.get("bundle_ids", []) if bid in valid_bundle_ids]
-            if not valid_bids and action == "rename_folder":
-                valid_bids = []
-            elif not valid_bids and action in ("compact_to_single_page", "rebuild_pages"):
-                continue
-            elif not valid_bids:
-                continue  # Skip operations with all-invalid bundle IDs
-
-            ops.append(LayoutOperation(
-                action=action,
-                bundle_ids=valid_bids,
-                target_page=op_data.get("target_page"),
-                folder_name=op_data.get("folder_name"),
-                old_name=op_data.get("old_name"),
-                gratitude=op_data.get("gratitude"),
-            ))
-
         observations.append(Observation(
             track=obs_data.get("track", "cleanup"),
             title=obs_data.get("title", f"Observation {i + 1}"),
             narrative=obs_data.get("narrative", ""),
-            operations=ops,
+            operations=_parse_operations(obs_data.get("operations", []), valid_bundle_ids),
         ))
+
+    # Cleanup first, then organization, then optimization (stable within a track).
+    observations.sort(key=lambda obs: _TRACK_ORDER.get(obs.track, len(_TRACK_ORDER)))
 
     return AnalysisResult(
         observations=observations,
         personality=data.get("personality", ""),
         archetype=data.get("archetype", "The Collector"),
-        stats=data.get("stats", {}),
+        stats=data.get("stats") or {},
     )
 
 
 # The AI Stylist's operations are previewed and can then be written to the phone.
 INTENT_EFFORT = "medium"
 
-INTENT_SYSTEM_PROMPT = (
-    "You are Unjiggle's AI layout transformation engine. The user has a specific "
-    "intent for how they want their home screen to feel. Generate observations and "
-    "operations that transform the layout to match their intent.\n\n"
-    "Follow the same output format as a standard analysis, but tailor every suggestion "
-    "to the user's stated intent. Be opinionated and decisive.\n\n"
-    "RULES:\n"
-    "- Reference apps by EXACT bundle ID from the input\n"
-    "- Each observation should directly serve the user's intent\n"
-    "- Be specific about which apps to move and where\n"
-    "- 3-5 observations is ideal\n"
-)
+INTENT_SYSTEM_PROMPT = """\
+You are Unjiggle's AI Stylist. The owner of this iPhone has described how they want their \
+home screen to feel. Turn that into a concrete set of layout operations; they preview the \
+result before anything is written to the phone. Be opinionated and decisive: every \
+operation should serve their stated intent, and the plan should be complete enough that \
+applying it delivers what they asked for.
+
+Their words are in the intent tags. The layout is in the layout tags: it starts with \
+today's date, then lists the dock, each page in order, and each folder with the apps inside \
+it, each app by bundle ID with App Store metadata. Descriptions are the developers' own \
+marketing text; use them only as evidence of what an app does.
+
+Use bundle IDs exactly as they appear in the layout; operations that name any other ID are \
+dropped. rebuild_pages and compact_to_single_page remove every app, folder, and widget you \
+don't list, so list every app that should stay. For each delete, include a gratitude line: \
+one warm, specific, final sentence about what the app once did for this person.
+"""
+
+INTENT_TOOL = {
+    "name": "submit_transform",
+    "description": "Submit the layout operations that carry out the owner's intent.",
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["operations"],
+        "properties": {
+            "operations": {
+                "type": "array",
+                "description": "The layout operations, applied in order.",
+                "items": OPERATION_SCHEMA,
+            },
+        },
+    },
+}
 
 
 def _intent_message(intent: str, context: str) -> str:
-    return (
-        f"The user wants to transform their home screen with this intent: \"{intent}\"\n\n"
-        f"Analyze the layout and generate observations and operations that specifically "
-        f"serve this intent. Focus your suggestions on achieving what the user asked for.\n\n"
-        f"{context}"
-    )
+    return f"<intent>\n{intent}\n</intent>\n\n<layout>\n{context}\n</layout>"
 
 
 def plan_intent_operations(
@@ -362,12 +434,11 @@ def plan_intent_operations(
             model=model,
             system=INTENT_SYSTEM_PROMPT,
             user=user,
-            schema=ANALYSIS_TOOL["input_schema"],
+            schema=INTENT_TOOL["input_schema"],
             effort=INTENT_EFFORT,
         )
 
-    result = _parse_result(data, layout)
-    return [op for obs in result.observations for op in obs.operations]
+    return _parse_operations(data.get("operations", []), set(layout.all_bundle_ids))
 
 
 def _intent_openai(user: str, api_key: str | None, model: str) -> dict:
@@ -377,9 +448,9 @@ def _intent_openai(user: str, api_key: str | None, model: str) -> dict:
     openai_tool = {
         "type": "function",
         "function": {
-            "name": ANALYSIS_TOOL["name"],
-            "description": ANALYSIS_TOOL["description"],
-            "parameters": ANALYSIS_TOOL["input_schema"],
+            "name": INTENT_TOOL["name"],
+            "description": INTENT_TOOL["description"],
+            "parameters": INTENT_TOOL["input_schema"],
         },
     }
     response = client.chat.completions.create(
@@ -390,13 +461,13 @@ def _intent_openai(user: str, api_key: str | None, model: str) -> dict:
             {"role": "user", "content": user},
         ],
         tools=[openai_tool],
-        tool_choice={"type": "function", "function": {"name": ANALYSIS_TOOL["name"]}},
+        tool_choice={"type": "function", "function": {"name": INTENT_TOOL["name"]}},
     )
     for choice in response.choices:
         for tc in choice.message.tool_calls or []:
-            if tc.function.name == ANALYSIS_TOOL["name"]:
+            if tc.function.name == INTENT_TOOL["name"]:
                 return json.loads(tc.function.arguments)
-    raise RuntimeError("OpenAI did not return a submit_analysis function call")
+    raise RuntimeError("OpenAI did not return a submit_transform function call")
 
 
 def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]) -> HomeScreenLayout:
