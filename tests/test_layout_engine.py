@@ -439,3 +439,53 @@ class TestWritePathMatchesPreview:
         # The iOS 26 state has no ignored list, so the preview records nothing either.
         assert preview.ignored == written.ignored == []
         assert preview.all_bundle_ids == written.all_bundle_ids == ["com.dock", "com.a"]
+
+    def test_folders_get_pages_of_nine_apps_as_on_the_phone(self):
+        from unjiggle.analyzer import preview_operations
+        from unjiggle.cli import _layout_signature
+        from unjiggle.device import parse_layout_state
+
+        apps = [f"com.f.app{i:02d}" for i in range(24)]
+        raw = [
+            [{"bundleIdentifier": "com.dock", "iconType": "app"}],
+            [{"displayName": "Old", "iconType": "folder",
+              "iconLists": [[{"bundleIdentifier": b, "iconType": "app"} for b in apps[:6]],
+                            [{"bundleIdentifier": b, "iconType": "app"} for b in apps[6:10]]]}]
+            + [{"bundleIdentifier": b, "iconType": "app"} for b in apps[10:]],
+        ]
+        layout = parse_layout_state(raw)
+        ops = [
+            LayoutOperation(action="create_folder", bundle_ids=apps[10:21], folder_name="New"),
+            LayoutOperation(action="move_to_folder", bundle_ids=apps[21:], folder_name="Old"),
+        ]
+        result = apply_operations(layout, ops)
+        folders = {item["displayName"]: item for item in result[1] if item.get("iconType") == "folder"}
+
+        # A new folder: pages of 9. An existing folder: the last page fills to 9 first.
+        assert [len(p) for p in folders["New"]["iconLists"]] == [9, 2]
+        assert [len(p) for p in folders["Old"]["iconLists"]] == [6, 7]
+        preview = preview_operations(layout, ops)
+        assert _layout_signature(parse_layout_state(result)) == _layout_signature(preview)
+
+    def test_a_new_folder_goes_to_a_page_with_a_free_slot(self):
+        from unjiggle.analyzer import page_slots, preview_operations
+        from unjiggle.cli import _layout_signature
+        from unjiggle.device import parse_layout_state
+
+        widgets = [{"iconType": "widget", "containerBundleIdentifier": f"com.w{i}", "gridSize": size}
+                   for i, size in enumerate(["medium", "small", "small", "small"])]
+        raw = [
+            [{"bundleIdentifier": "com.dock", "iconType": "app"}],
+            widgets + [{"bundleIdentifier": f"com.p1.a{i}", "iconType": "app"} for i in range(4)],
+            [{"bundleIdentifier": f"com.p2.a{i}", "iconType": "app"} for i in range(3)],
+        ]
+        layout = parse_layout_state(raw)
+        assert len(layout.pages[0]) == 8 and page_slots(layout.pages[0]) == 24
+        ops = [LayoutOperation(action="create_folder", bundle_ids=["com.p2.a0", "com.p2.a1"], folder_name="F")]
+        result = apply_operations(layout, ops)
+
+        # Page 1 has 8 items but no free slot, so the folder goes to page 2.
+        assert result[1] == raw[1]
+        assert result[2][-1]["displayName"] == "F"
+        preview = preview_operations(layout, ops)
+        assert _layout_signature(parse_layout_state(result)) == _layout_signature(preview)

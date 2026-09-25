@@ -11,6 +11,11 @@ class WidgetSize(Enum):
     MEDIUM = "medium"     # 4x2
     EXTRA_LARGE = "extraLarge"  # 4x4
 
+    @property
+    def slots(self) -> int:
+        """The icon slots that the widget takes on a page of 24 (6 rows of 4)."""
+        return {"small": 4, "medium": 8, "extraLarge": 16}[self.value]
+
 
 @dataclass
 class AppItem:

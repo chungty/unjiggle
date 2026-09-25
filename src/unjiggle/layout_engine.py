@@ -10,8 +10,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from unjiggle.analyzer import LayoutOperation
-from unjiggle.models import HomeScreenLayout
+from unjiggle.analyzer import PAGE_SLOTS, LayoutOperation, add_to_folder_pages
+from unjiggle.models import HomeScreenLayout, WidgetSize
 
 
 def _get_pages(raw) -> list[list]:
@@ -89,15 +89,17 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                 snapshot = copy.deepcopy(raw)
                 extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
                 if extracted:
+                    folder_pages: list[list] = []
+                    add_to_folder_pages(folder_pages, extracted)
                     folder_dict = {
                         "displayName": op.folder_name,
-                        "iconLists": [extracted],
+                        "iconLists": folder_pages,
                         "iconType": "folder",
                     }
                     pages = _get_pages(raw)
                     placed = False
                     for page in pages:
-                        if len(page) < 24:
+                        if _raw_page_slots(page) < PAGE_SLOTS:
                             page.append(folder_dict)
                             placed = True
                             break
@@ -202,6 +204,21 @@ def _raw_is_widget(item: Any) -> bool:
     )
 
 
+def _raw_page_slots(page: list) -> int:
+    """The icon slots that a raw page uses, counted as analyzer.page_slots counts the
+    parsed page. An unknown widget size counts as small, as device.py parses it."""
+    slots = 0
+    for item in page:
+        if _raw_is_widget(item):
+            try:
+                slots += WidgetSize(item.get("gridSize", "small")).slots
+            except ValueError:
+                slots += WidgetSize.SMALL.slots
+        else:
+            slots += 1
+    return slots
+
+
 def _raw_app_items(raw) -> dict[str, Any]:
     """Every app item in a raw state by bundle ID, from the dock, pages and folders."""
     items: dict[str, Any] = {}
@@ -297,10 +314,6 @@ def _raw_add_to_folder(raw, folder_name: str, items: list) -> bool:
     for page in all_pages:
         for item in page:
             if _raw_is_folder(item) and item.get("displayName") == folder_name:
-                folder_pages = item.get("iconLists", [[]])
-                if folder_pages:
-                    folder_pages[0].extend(items)
-                else:
-                    item["iconLists"] = [items]
+                add_to_folder_pages(item.setdefault("iconLists", []), items)
                 return True
     return False

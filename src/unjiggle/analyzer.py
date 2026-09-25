@@ -434,12 +434,14 @@ def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperati
                 items = _extract_apps_from_layout(preview, op.bundle_ids)
                 apps = [item.app for item in items if item.is_app]
                 if apps:
+                    folder_pages: list[list] = []
+                    add_to_folder_pages(folder_pages, apps)
                     folder = LayoutItem(folder=FolderItem(
                         display_name=op.folder_name,
-                        pages=[apps],
+                        pages=folder_pages,
                     ))
                     for page in preview.pages:
-                        if len(page) < 24:
+                        if page_slots(page) < PAGE_SLOTS:
                             page.append(folder)
                             break
                     else:
@@ -462,10 +464,7 @@ def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperati
                 added = False
                 for folder in preview.all_folders():
                     if folder.display_name == op.folder_name:
-                        if folder.pages:
-                            folder.pages[0].extend(apps)
-                        else:
-                            folder.pages.append(apps)
+                        add_to_folder_pages(folder.pages, apps)
                         added = True
                         break
                 if not added:
@@ -483,6 +482,37 @@ def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperati
             ]
 
     return preview
+
+
+# A home screen page has 24 icon slots. An app or a folder takes one slot, and a
+# widget takes the slots of its size.
+PAGE_SLOTS = 24
+
+
+def item_slots(item) -> int:
+    return item.widget.grid_size.slots if item.is_widget else 1
+
+
+def page_slots(page) -> int:
+    return sum(item_slots(item) for item in page)
+
+
+# An iPhone folder shows 9 apps on each page (3 by 3), and the phone stores a folder
+# as pages of at most 9 apps. A folder that an operation fills gets the same pages.
+FOLDER_PAGE_SLOTS = 9
+
+
+def add_to_folder_pages(pages: list[list], items: list) -> None:
+    """Add items to a folder's pages, in place: fill the last page to 9 items, then
+    start new pages of 9. layout_engine writes a folder the same way."""
+    items = list(items)
+    if pages and len(pages[-1]) < FOLDER_PAGE_SLOTS:
+        room = FOLDER_PAGE_SLOTS - len(pages[-1])
+        pages[-1].extend(items[:room])
+        items = items[room:]
+    while items:
+        pages.append(items[:FOLDER_PAGE_SLOTS])
+        items = items[FOLDER_PAGE_SLOTS:]
 
 
 def drop_empty_folders_and_pages(layout: HomeScreenLayout) -> None:
