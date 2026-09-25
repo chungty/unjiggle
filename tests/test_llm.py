@@ -647,7 +647,42 @@ def test_json_suggest_intent_keeps_the_transform_preview_contract(fake_claude, p
     ]
     for key in ("summary", "changes", "before_score", "after_score", "before_pages", "after_pages"):
         assert key in payload
+    assert payload["plan_warnings"] == []
     assert fake_claude.last.body["model"] == "claude-opus-5-5"
+
+
+def test_json_suggest_intent_lists_what_the_plan_could_not_do(fake_claude, phone, chaotic_layout):
+    from unjiggle import stylist
+
+    handles = stylist.build_handles(chaotic_layout)
+    # page_one names every app: most of them do not fit on page 1.
+    fake_claude.reply = _json_reply({**INTENT_REPLY, "app_library": {"groups": [], "apps": []},
+                                     "page_one": list(handles.by_handle)})
+
+    result = _json_suggest_intent()
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    kinds = [w["kind"] for w in payload["plan_warnings"]]
+    assert "page_one_overflow" in kinds
+    overflow = payload["plan_warnings"][kinds.index("page_one_overflow")]
+    assert overflow["message"].startswith("No room on page 1 for ")
+    assert set(overflow["bundle_ids"]) <= set(handles.by_bundle_id)
+
+
+def test_json_suggest_intent_says_when_the_plan_is_rejected(fake_claude, phone, monkeypatch):
+    from unjiggle import stylist
+
+    fake_claude.reply = _json_reply(INTENT_REPLY)
+    monkeypatch.setattr(stylist, "expansion_problem", lambda layout, ops: "loses com.example.x")
+
+    result = _json_suggest_intent()
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["operations"] == []
+    assert [w["kind"] for w in payload["plan_warnings"]] == ["plan_rejected"]
+    assert payload["summary"] == payload["plan_warnings"][0]["message"]
 
 
 def test_json_suggest_intent_reports_a_refusal_as_json_error(fake_claude, phone):

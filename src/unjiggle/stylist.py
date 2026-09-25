@@ -393,7 +393,12 @@ def plan_messages(context: str, intent: str) -> tuple[str, str]:
 
 @dataclass
 class PlanReport:
-    """What the expansion could not follow. Apps it could not place keep their place."""
+    """What the expansion could not follow. Apps it could not place keep their place.
+
+    The lists of apps hold short IDs (a1, a2, ...). ``dropped`` holds the operations
+    that ``dropped_operations`` describes, and ``rejected`` is set when the checks
+    rejected the whole plan.
+    """
 
     unknown_ids: list[str] = field(default_factory=list)
     unknown_groups: list[str] = field(default_factory=list)
@@ -401,6 +406,8 @@ class PlanReport:
     page_one_overflow: list[str] = field(default_factory=list)
     not_moved: list[str] = field(default_factory=list)
     dropped_operations: list[str] = field(default_factory=list)
+    dropped: list[LayoutOperation] = field(default_factory=list)
+    rejected: str | None = None
 
 
 _GENERIC_WORDS = frozenset({
@@ -676,6 +683,7 @@ def expand_plan(
     problem = expansion_problem(work, ops)
     if problem:
         report.dropped_operations.append(f"all: {problem}")
+        report.rejected = problem
         return [], report
     return ops, report
 
@@ -919,6 +927,7 @@ class _Sequence:
             page_slots(page) > self.slot_limit for page in together.pages
         ):
             self.report.dropped_operations += [_describe(op) for op in ops]
+            self.report.dropped += ops
             return False
         self.ops += ops
         self._one_at_a_time = state
@@ -981,6 +990,14 @@ def expansion_problem(layout: HomeScreenLayout, ops: list[LayoutOperation]) -> s
 # --- the request -----------------------------------------------------------------------
 
 
+@dataclass
+class IntentPlan:
+    """The operations for an intent, and what the owner should know about the plan."""
+
+    operations: list[LayoutOperation]
+    warnings: list[dict] = field(default_factory=list)
+
+
 def plan_intent_operations(
     intent: str,
     layout: HomeScreenLayout,
@@ -991,6 +1008,19 @@ def plan_intent_operations(
     provider: str = "auto",
 ) -> list[LayoutOperation]:
     """AI Stylist: turn the owner's free-text intent into validated layout operations."""
+    return plan_intent(intent, layout, metadata, score, api_key, model, provider).operations
+
+
+def plan_intent(
+    intent: str,
+    layout: HomeScreenLayout,
+    metadata: dict[str, dict],
+    score: ScoreBreakdown | None = None,
+    api_key: str | None = None,
+    model: str | None = None,
+    provider: str = "auto",
+) -> IntentPlan:
+    """AI Stylist: the operations for the owner's intent, with plan_warnings()."""
     from unjiggle.obituary import identify_dead_apps
 
     handles = build_handles(layout)
@@ -1011,8 +1041,72 @@ def plan_intent_operations(
             effort=INTENT_EFFORT,
         )
 
-    ops, _report = expand_plan(plan, layout, metadata, handles)
-    return _parse_operations([_operation_dict(op) for op in ops], set(layout.all_bundle_ids))
+    ops, report = expand_plan(plan, layout, metadata, handles)
+    operations = _parse_operations([_operation_dict(op) for op in ops], set(layout.all_bundle_ids))
+    return IntentPlan(operations, plan_warnings(report, handles, context_names(layout, metadata, handles)))
+
+
+def _app_list(bundle_ids: list[str], names: dict[str, str], most: int = 4) -> str:
+    shown = [names.get(b, b) for b in bundle_ids[:most]]
+    more = len(bundle_ids) - len(shown)
+    return ", ".join(shown) + (f" and {more} more" if more > 0 else "")
+
+
+def _step_text(op: LayoutOperation, names: dict[str, str]) -> str:
+    apps = _app_list(op.bundle_ids, names)
+    if op.action == "move_to_page":
+        return f"move {apps} to page {(op.target_page or 0) + 1}"
+    if op.action == "create_folder":
+        return f'a new folder "{op.folder_name}" with {apps}'
+    if op.action == "move_to_folder":
+        return f'add {apps} to "{op.folder_name}"'
+    if op.action == "rename_folder":
+        return f'rename "{op.old_name}" to "{op.folder_name}"'
+    if op.action == "delete":
+        return f"delete {apps}"
+    if op.action == "move_to_app_library":
+        return f"move {apps} to the App Library"
+    return "rebuild the home screen"
+
+
+def plan_warnings(report: PlanReport, handles: AppHandles, names: dict[str, str]) -> list[dict]:
+    """What the plan asked for and the preview does not do, for the owner.
+
+    Each warning has a kind, a message and the bundle IDs that it is about. Kinds:
+    plan_rejected, page_one_overflow, not_moved, dropped_delete and dropped_step.
+    """
+    def bundle_ids(short_ids: list[str]) -> list[str]:
+        return list(dict.fromkeys(handles.by_handle[h] for h in short_ids if h in handles.by_handle))
+
+    warnings: list[dict] = []
+
+    def add(kind: str, message: str, apps: list[str]) -> None:
+        warnings.append({"kind": kind, "message": message, "bundle_ids": apps})
+
+    if report.rejected:
+        add("plan_rejected", "The AI Stylist's plan did not pass the safety checks "
+            f"({report.rejected}), so nothing changes.", [])
+        return warnings
+    apps = bundle_ids(report.page_one_overflow)
+    if apps:
+        add("page_one_overflow", f"No room on page 1 for {_app_list(apps, names)}. "
+            "They stay where they are.", apps)
+    apps = bundle_ids(report.not_moved)
+    if apps:
+        add("not_moved", f"No free slot on a later page for {_app_list(apps, names)}. "
+            "They stay on page 1.", apps)
+    apps = bundle_ids(report.dropped_deletes)
+    if apps:
+        add("dropped_delete", f"Not deleted: {_app_list(apps, names)}. The goodbye line "
+            "was about a different app.", apps)
+    seen: set[str] = set()
+    for op in report.dropped:
+        text = _step_text(op, names)
+        if text not in seen:
+            seen.add(text)
+            add("dropped_step", f"Left out: {text}. This step gave a different result in "
+                "the preview and on the phone.", list(op.bundle_ids))
+    return warnings
 
 
 def _operation_dict(op: LayoutOperation) -> dict:

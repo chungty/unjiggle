@@ -460,6 +460,14 @@ def test_delete_is_previewed_applied_and_verified(monkeypatch, sample_metadata, 
         ("delete", "com.darksky.darksky"),
         ("delete", "com.uber.UberClient"),
     ]
+    # Each delete row carries the gratitude line, and a detail line that says the
+    # write only takes the icon off the home screen.
+    for change in payload["changes"]:
+        assert change["gratitude"] == "Thanks for the rides."
+        assert change["detail"] == (
+            "Thanks for the rides. The icon leaves the home screen. "
+            "The app stays installed until you delete it."
+        )
 
     # Applying writes the change, and the layout read back matches the preview.
     state = {"raw": layout.raw}

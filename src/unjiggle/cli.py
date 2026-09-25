@@ -1525,6 +1525,18 @@ def _removed_action_lookup(operations: list) -> dict[str, str]:
     return removed
 
 
+# A delete takes the icon off the home screen. Unjiggle does not uninstall the app.
+DELETE_DETAIL = "The icon leaves the home screen. The app stays installed until you delete it."
+
+
+def _gratitude_lookup(operations: list) -> dict[str, str]:
+    return {
+        bid: op.gratitude
+        for op in operations if op.action == "delete" and op.gratitude
+        for bid in op.bundle_ids
+    }
+
+
 def _build_transform_summary(moved: int, archived: int, new_folders: int) -> str:
     parts = []
     if moved:
@@ -1537,9 +1549,16 @@ def _build_transform_summary(moved: int, archived: int, new_folders: int) -> str
 
 
 def _derive_realized_changes(layout, proposed_layout, metadata: dict, operations: list) -> tuple[list[dict], int, int, int, str]:
+    """The changes that the preview shows, one for each app that moves or leaves.
+
+    from_page and to_page count from 1, as the owner counts pages (to_page is None
+    for an app that leaves the home screen). A delete also has "gratitude" and a
+    "detail" line that says what the write does.
+    """
     before_locations = _layout_app_locations(layout, metadata)
     after_locations = _layout_app_locations(proposed_layout, metadata)
     removed_actions = _removed_action_lookup(operations)
+    gratitude = _gratitude_lookup(operations)
     changes = []
 
     ordered_before = sorted(before_locations.values(), key=lambda item: (
@@ -1554,13 +1573,19 @@ def _derive_realized_changes(layout, proposed_layout, metadata: dict, operations
     for before in ordered_before:
         after = after_locations.get(before["bundle_id"])
         if after is None:
-            changes.append({
+            change = {
                 "action": removed_actions.get(before["bundle_id"], "move_to_app_library"),
                 "bundle_id": before["bundle_id"],
                 "app_name": before["app_name"],
                 "from_page": before["page"],
                 "to_page": None,
-            })
+            }
+            if change["action"] == "delete":
+                line = gratitude.get(before["bundle_id"])
+                change["detail"] = f"{line} {DELETE_DETAIL}" if line else DELETE_DETAIL
+                if line:
+                    change["gratitude"] = line
+            changes.append(change)
             continue
 
         same_page = before["page"] == after["page"]
@@ -1847,13 +1872,20 @@ def _generate_all_preset_transforms(layout, metadata: dict, score) -> dict[str, 
 def _generate_intent_transform(
     intent: str, layout, metadata: dict, score, api_key: str, model: str | None,
 ) -> dict:
-    """Generate a TransformPreview from the AI Stylist's operations for the user's intent."""
-    from unjiggle.analyzer import plan_intent_operations
+    """Generate a TransformPreview from the AI Stylist's operations for the user's intent.
 
-    operations = plan_intent_operations(
-        intent, layout, metadata, score, api_key=api_key, model=model,
-    )
-    return _resolve_transform_preview(intent, layout, metadata, score, operations)
+    ``plan_warnings`` lists what the plan asked for and the preview does not do, such
+    as page 1 apps that did not fit (see unjiggle.stylist.plan_warnings).
+    """
+    from unjiggle.stylist import plan_intent
+
+    plan = plan_intent(intent, layout, metadata, score, api_key=api_key, model=model)
+    result = _resolve_transform_preview(intent, layout, metadata, score, plan.operations)
+    result["plan_warnings"] = plan.warnings
+    rejected = next((w for w in plan.warnings if w["kind"] == "plan_rejected"), None)
+    if rejected and not plan.operations:
+        result["summary"] = rejected["message"]
+    return result
 
 
 @json.command(name="suggest")

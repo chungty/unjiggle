@@ -64,6 +64,8 @@ Useful preset endpoints:
 - `unjiggle json suggest --preset focus|relax|minimal|beautiful` for one preset preview
 - `unjiggle json presets` for a batch of all built-in preset previews from one shared scan
 
+In a transform preview, each entry of `changes` has `from_page` and `to_page` counted from 1, as the owner counts pages. A `delete` change also has `gratitude` and a `detail` line: a delete takes the icon off the home screen, and the app stays installed. The preview of `unjiggle json suggest --intent` also has `plan_warnings`: what the AI Stylist's plan asked for that the preview does not do, such as apps that did not fit on page 1. Each warning has a `kind`, a `message` and the `bundle_ids` that it is about.
+
 ## Requirements
 
 - macOS

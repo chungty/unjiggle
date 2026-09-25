@@ -735,6 +735,51 @@ def test_many_small_new_folders_are_all_kept():
     assert len(ops) == len(ids) // 2
 
 
+def test_plan_warnings_name_the_apps_that_the_preview_leaves_out():
+    layout, metadata = widget_phone()
+    handles = stylist.build_handles(layout)
+    h = handles.by_bundle_id.__getitem__
+    wanted = [f"com.example.wd{i}" for i in range(50, 56)]
+    plan = _stay_plan(
+        page_one=[h(b) for b in wanted],
+        delete=[{"app": h("com.example.wd40"), "gratitude": "Thanks for everything."}],
+    )
+    _ops, report = check_expansion(layout, metadata, plan)
+    names = stylist.context_names(layout, metadata, handles)
+    warnings = stylist.plan_warnings(report, handles, names)
+
+    assert [w["kind"] for w in warnings] == ["page_one_overflow", "dropped_delete"]
+    overflow, delete = warnings
+    assert overflow["bundle_ids"] == wanted[4:]
+    assert overflow["message"] == (
+        f"No room on page 1 for {names[wanted[4]]}, {names[wanted[5]]}. They stay where they are."
+    )
+    assert delete["bundle_ids"] == ["com.example.wd40"]
+    assert names["com.example.wd40"] in delete["message"]
+
+
+def test_plan_warnings_report_a_rejected_plan_and_a_dropped_step():
+    layout, metadata = widget_phone()
+    handles = stylist.build_handles(layout)
+    names = stylist.context_names(layout, metadata, handles)
+    rejected = stylist.PlanReport(rejected="loses com.example.wd20")
+    assert stylist.plan_warnings(rejected, handles, names) == [{
+        "kind": "plan_rejected",
+        "message": "The AI Stylist's plan did not pass the safety checks (loses com.example.wd20), "
+                   "so nothing changes.",
+        "bundle_ids": [],
+    }]
+    step = stylist.LayoutOperation("create_folder", ["com.example.wd20"], folder_name="Trips")
+    dropped = stylist.PlanReport(dropped=[step, step])
+    warnings = stylist.plan_warnings(dropped, handles, names)
+    assert warnings == [{
+        "kind": "dropped_step",
+        "message": f'Left out: a new folder "Trips" with {names["com.example.wd20"]}. This step gave '
+                   "a different result in the preview and on the phone.",
+        "bundle_ids": ["com.example.wd20"],
+    }]
+
+
 def test_unknown_ids_and_names_are_reported_and_ignored():
     layout, metadata = _small_phone()
     plan = {
