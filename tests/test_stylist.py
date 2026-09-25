@@ -686,6 +686,25 @@ def test_stay_mode_new_folder_waits_behind_page_one_apps_that_did_not_fit():
     assert report.page_one_overflow == [h(wanted[6])]
 
 
+@pytest.mark.parametrize(("page_one", "where"), [(2, 0), (4, 1)])
+def test_stay_mode_folder_that_takes_a_whole_folder_uses_page_one_room_or_its_place(page_one, where):
+    layout, metadata = widget_phone()
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    wanted = [f"com.example.wd{i}" for i in range(50, 50 + page_one)]
+    # All apps of "Games" (page 2, second item) go to the new name "Play".
+    plan = _stay_plan(page_one=[h(b) for b in wanted],
+                      folders=[{"name": "Play", "groups": ["Games"], "apps": [h("com.example.wd20")]}])
+    ops, report = check_expansion(layout, metadata, plan)
+    after = preview_operations(layout, ops)
+    assert _page_one_apps(after) == wanted
+    # With 2 apps, page 1 has a free slot, and Play takes it. With 4, page 1 is full,
+    # and Play takes the place of Games.
+    assert _folder_pages(after)["Play"] == where and "Games" not in _folder_pages(after)
+    if where == 1:
+        assert after.pages[1][1].folder.display_name == "Play"
+    assert report.dropped_operations == [] and report.page_one_overflow == []
+
+
 @pytest.mark.parametrize("fmt", ["ios26", "legacy"])
 def test_stay_mode_rebuilds_a_folder_with_a_dock_twin_in_its_own_place(fmt):
     layout, metadata = widget_phone(fmt)

@@ -724,12 +724,16 @@ def _stay_operations(
     """A targeted change, in this order:
 
     1. Apps added to current folders.
-    2. Renamed folders, and folders rebuilt in the place of a current folder.
+    2. Folders rebuilt in the place of a current folder with the same name. When
+       page_one is empty, also renamed folders: all apps of a current folder go
+       to a new name.
     3. Deletes and App Library moves of loose page 1 apps, when page_one has apps
        and the removal empties no folder and no page. They free slots for page_one.
     4. page_one: its apps come to page 1, and page 1's other loose apps move on.
     5. New folders. While page_one still has apps that did not fit, a new folder
-       goes after page 1. Otherwise it takes the first free slot.
+       goes after page 1. Otherwise it takes the first free slot. A folder that
+       gets all apps of one current folder takes a free slot on page 1, or else
+       the place of that folder.
     6. The page_one moves again, into the slots that step 5 freed.
     7. The other deletes and App Library moves.
 
@@ -763,8 +767,8 @@ def _stay_operations(
             if other != key and name_count[other] == 1 and other not in members
             and current[other] and all(dest.get(b) == ("folder", key) for b in current[other])
         ), None) if name_count[key] == 0 else None
-        if source is None:
-            new_folders.append(key)
+        if source is None or page_one:
+            new_folders.append((key, source))
             continue
         # All of one folder's apps go to a new name: rename it, then add the rest.
         candidates = [LayoutOperation(
@@ -789,12 +793,16 @@ def _stay_operations(
     if moves:
         moves.run()
 
-    for key in new_folders:
+    for key, source in new_folders:
         pages = sequence.pages()
-        after_page_one = bool(moves and moves.arriving and pages and live_page(pages[0]))
+        first_live = bool(pages and live_page(pages[0]))
+        after_page_one = bool(moves and moves.arriving and first_live)
+        room_on_page_one = first_live and not after_page_one and page_slots(pages[0]) < PAGE_SLOTS
+        in_place = source is not None and not room_on_page_one
         sequence.add(LayoutOperation(
             "create_folder", members[key], folder_name=folder_title[key],
-            target_page=1 if after_page_one else None,
+            target_page=1 if after_page_one and not in_place else None,
+            old_name=current_title[source] if in_place else None,
         ))
 
     if moves:
