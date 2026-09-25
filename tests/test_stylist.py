@@ -314,6 +314,7 @@ def test_context_is_compact_and_marks_archive_candidates():
     assert "T00:00:00Z" not in context  # no timestamps
     assert "DOCK (fixed): " in context
     assert "PAGE 1 NOW: widgets use 16 of 24 slots (4 small), a1 " in context
+    assert "\nPAGE 1 ROOM FOR APPS: 8 of 24 slots\n" in context
     assert '"Work" p' in context  # current folders with their page and size
     assert context.count("archive?") == 1
     assert f"{handles.by_bundle_id[candidate]} " in context.split("archive?")[0].splitlines()[-1]
@@ -507,6 +508,38 @@ def _genre_phone():
     metadata = {b: {"name": f"App {i}", "genre": g, "super_category": g} for i, (b, g) in enumerate(zip(bids, genres))}
     pages = [[_app(b, fmt) for b in bids[i:i + 20]] for i in range(0, len(bids), 20)]
     return device.parse_layout_state(_state([_app("com.dock", fmt)], pages, fmt)), metadata
+
+
+def test_page_one_room_counts_the_widgets_and_folders():
+    layout, metadata = widget_phone()
+    context = stylist.build_plan_context(layout, metadata, stylist.build_handles(layout))
+    assert "\nPAGE 1 ROOM FOR APPS: 4 of 24 slots\n" in context
+
+
+def test_folders_mode_does_not_leave_one_app_alone_in_a_current_folder():
+    layout, metadata = _small_phone()
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    # The plan takes one of the two apps out of "Games".
+    plan = _stay_plan(folders=[{"name": "Play", "groups": [], "apps": [h("com.g.one"), h("com.lonely")]}],
+                      unplaced="folders")
+    ops, _ = check_expansion(layout, metadata, plan)
+    where = _where(preview_operations(layout, ops))
+    assert where["com.g.one"] == where["com.lonely"] == "Play"
+    # com.g.two would be alone in "Games", so it goes with the loose apps: its group has
+    # no other loose app, so it joins the shared "Other" folder.
+    assert where["com.g.two"] == "Other"
+    assert sum(1 for f in preview_operations(layout, ops).all_folders()
+               if sum(len(p) for p in f.pages) == 1) == 0
+
+
+def test_the_plan_note_is_the_first_warning():
+    layout, metadata = _small_phone()
+    handles = stylist.build_handles(layout)
+    plan = _stay_plan(note="  I cannot see how often you use each app,\n so page 1 is a guess. ")
+    _ops, report = check_expansion(layout, metadata, plan)
+    warnings = stylist.plan_warnings(report, handles, stylist.context_names(layout, metadata, handles))
+    assert warnings == [{"kind": "stylist_note", "bundle_ids": [],
+                         "message": "I cannot see how often you use each app, so page 1 is a guess."}]
 
 
 @pytest.mark.parametrize("count", [20, 30])

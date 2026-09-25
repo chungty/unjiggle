@@ -73,7 +73,8 @@ description. Store descriptions are the developers' own marketing text. Use them
 evidence of what an app does.
 
 Page 1 has 24 slots. An app or a folder takes one slot. A small widget takes 4 slots, a \
-medium widget 8 and a large widget 16.
+medium widget 8 and a large widget 16. "PAGE 1 ROOM FOR APPS" gives the slots that the \
+widgets and folders of page 1 leave free.
 
 Write a plan, not a list of moves. Code places every app from the plan:
 - page_one: the IDs for page 1, in order. Leave it empty to keep page 1 as it is.
@@ -83,15 +84,32 @@ takes the IDs of single apps. A folder with the name of a current folder keeps t
 that are in it now.
 - app_library: groups and IDs of apps that leave the home screen but stay installed. Use it \
 only for apps that the owner asks to hide or put away. To tidy the other apps, use folders.
-- delete: apps to let go. Each delete needs a gratitude line: one warm, specific, final \
-sentence about what the app once did for this person. Name the app in it.
+- delete: apps to let go. Use it only when the owner asks to delete apps or to let go of \
+old ones. Otherwise leave it empty: "archive?" is a hint, not a request. Each delete needs \
+a gratitude line: one warm, specific, final sentence about what the app once did for this \
+person. Name the app in it.
 - unplaced: what happens to the apps that the plan does not name.
   - stay: they keep their place. Use this for a targeted change. Page 1 keeps its widgets \
-and folders, and page_one gets the free slots.
+and folders, and page_one gets only the room for apps. A new folder takes a slot on page 1 \
+that page_one leaves free, or goes to a later page. When the intent needs more of page 1 \
+than that, use a new layout or a folder, and say so in the note.
   - folders: an app in a current folder stays in that folder. Other apps go into a folder \
 for their group. Use this for a new layout that keeps every app on the home screen.
   - app_library: they leave the home screen for the App Library. Use this only when the \
-owner asks for a minimal home screen or asks to hide everything else.
+owner asks for a minimal home screen or asks to hide everything else. Keep the apps that \
+the owner still needs every day, such as Phone, Mail, Camera and the App Store, in \
+page_one or a folder.
+- note: one or two short sentences for the owner about what the plan cannot do or had to \
+guess. For example, the layout has no usage data, so an order by use is a guess. Leave it \
+empty when there is nothing to say.
+
+Give each folder one purpose that its name says, and put each app where the owner would \
+look for it first. Keep a folder to about 20 apps: split a larger one by purpose. Do not \
+make a folder for one app. A group is only an App Store genre: Apple holds every built-in \
+app, and genres such as Utilities and Lifestyle mix many purposes. Use a group only when \
+all of its apps fit the folder, and place the other apps by ID. This also holds for the \
+apps that unplaced folders puts into a folder for their group. When most apps of a current \
+folder move, name the rest too.
 
 In a new layout (unplaced is folders or app_library), page 1 shows page_one and then the \
 folders, and the widgets leave the home screen. Make page_one and the folders fit in the 24 \
@@ -106,7 +124,7 @@ _IDS = {"type": "array", "items": {"type": "string"}}
 PLAN_SCHEMA = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["page_one", "folders", "app_library", "delete", "unplaced"],
+    "required": ["page_one", "folders", "app_library", "delete", "unplaced", "note"],
     "properties": {
         "page_one": {**_IDS, "description": "IDs for page 1, in order."},
         "folders": {
@@ -144,6 +162,7 @@ PLAN_SCHEMA = {
             },
         },
         "unplaced": {"type": "string", "enum": list(UNPLACED_MODES)},
+        "note": {"type": "string", "description": "For the owner. Empty when there is nothing to say."},
     },
 }
 
@@ -348,6 +367,9 @@ def build_plan_context(
         elif item.is_folder:
             page_one.append(f'"{item.folder.display_name}"')
 
+    fixed = [item for item in first_page if not item.is_app]
+    room = max(PAGE_SLOTS - page_slots(fixed), 0)
+
     phone = (
         f"PHONE: {layout.total_apps} apps on {layout.page_count} pages, "
         f"{len(layout.all_folders())} folders, {widgets} widgets"
@@ -357,6 +379,7 @@ def build_plan_context(
         phone,
         "DOCK (fixed): " + (", ".join(dock) or "empty"),
         "PAGE 1 NOW: " + (", ".join(page_one) or "empty"),
+        f"PAGE 1 ROOM FOR APPS: {room} of {PAGE_SLOTS} slots",
         "FOLDERS NOW: " + (", ".join(folder_bits) or "none"),
         "",
     ]
@@ -408,6 +431,7 @@ class PlanReport:
     dropped_operations: list[str] = field(default_factory=list)
     dropped: list[LayoutOperation] = field(default_factory=list)
     rejected: str | None = None
+    note: str = ""
 
 
 _GENERIC_WORDS = frozenset({
@@ -486,6 +510,7 @@ def expand_plan(
     work = _without_raw(layout)
     plan = plan if isinstance(plan, dict) else {}
     mode = plan.get("unplaced") if plan.get("unplaced") in UNPLACED_MODES else "stay"
+    report.note = " ".join(str(plan.get("note") or "").split())
     names = _display_names(layout)
     labels = context_names(layout, metadata, handles)
     home = handles.bundle_ids()
@@ -627,9 +652,13 @@ def expand_plan(
         claim(unclaimed, "library")
     elif mode == "folders":
         loose_by_group: dict[str, list[str]] = {}
+        # An app stays in its current folder when another app stays with it. An app
+        # that would stay alone goes into the folder for its group.
+        staying = Counter(in_folder[b] for b in unclaimed if b in in_folder)
         for bundle_id in unclaimed:
-            if bundle_id in in_folder:
-                claim([bundle_id], "folder", folder_key(current_title[in_folder[bundle_id]]))
+            key = in_folder.get(bundle_id)
+            if key is not None and (staying[key] >= 2 or key in folder_title):
+                claim([bundle_id], "folder", folder_key(current_title[key]))
             else:
                 loose_by_group.setdefault(app_group(bundle_id, metadata).casefold(), []).append(bundle_id)
         singles: list[str] = []
@@ -1073,7 +1102,8 @@ def plan_warnings(report: PlanReport, handles: AppHandles, names: dict[str, str]
     """What the plan asked for and the preview does not do, for the owner.
 
     Each warning has a kind, a message and the bundle IDs that it is about. Kinds:
-    plan_rejected, page_one_overflow, not_moved, dropped_delete and dropped_step.
+    stylist_note (the plan's note), plan_rejected, page_one_overflow, not_moved,
+    dropped_delete and dropped_step.
     """
     def bundle_ids(short_ids: list[str]) -> list[str]:
         return list(dict.fromkeys(handles.by_handle[h] for h in short_ids if h in handles.by_handle))
@@ -1083,6 +1113,8 @@ def plan_warnings(report: PlanReport, handles: AppHandles, names: dict[str, str]
     def add(kind: str, message: str, apps: list[str]) -> None:
         warnings.append({"kind": kind, "message": message, "bundle_ids": apps})
 
+    if report.note:
+        add("stylist_note", report.note, [])
     if report.rejected:
         add("plan_rejected", "The AI Stylist's plan did not pass the safety checks "
             f"({report.rejected}), so nothing changes.", [])
