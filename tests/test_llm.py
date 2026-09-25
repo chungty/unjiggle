@@ -357,6 +357,44 @@ def test_reply_after_a_fallback_is_read_by_block_type(fake_claude, chaotic_layou
     assert result.roast == "You have apps."
 
 
+def test_cached_prefix_puts_breakpoints_on_the_system_prompt_and_the_prefix(fake_claude):
+    fake_claude.reply = _json_reply({"ok": True})
+    llm.claude_json(
+        api_key=ANTHROPIC_KEY, model="claude-opus-5-5", system="S", user="U",
+        schema={"type": "object"}, effort="low", cached_prefix="P",
+    )
+    body = fake_claude.last.body
+    breakpoint_ = {"type": "ephemeral"}
+    assert body["system"] == [{"type": "text", "text": "S", "cache_control": breakpoint_}]
+    assert body["messages"] == [{"role": "user", "content": [
+        {"type": "text", "text": "P", "cache_control": breakpoint_},
+        {"type": "text", "text": "U"},
+    ]}]
+
+
+def test_request_without_a_cached_prefix_sends_plain_strings(fake_claude):
+    fake_claude.reply = _json_reply({"ok": True})
+    llm.claude_json(
+        api_key=ANTHROPIC_KEY, model="claude-opus-5-5", system="S", user="U",
+        schema={"type": "object"}, effort="low",
+    )
+    body = fake_claude.last.body
+    assert body["system"] == "S"
+    assert body["messages"] == [{"role": "user", "content": "U"}]
+
+
+def test_stale_year_needs_18_months_without_an_update():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+    assert llm.stale_year({"last_updated": "2025-03-01T00:00:00Z"}, now) == 2025
+    assert llm.stale_year({"last_updated": "2025-06-01T00:00:00Z"}, now) is None
+    assert llm.stale_year({"last_updated": "2019-01-01"}, now) == 2019
+    assert llm.stale_year({"last_updated": None}, now) is None
+    assert llm.stale_year({"last_updated": "soon"}, now) is None
+    assert llm.stale_year(None, now) is None
+
+
 def test_missing_sdk_raises_import_error_with_install_hint(monkeypatch):
     monkeypatch.setitem(sys.modules, "anthropic", None)
     with pytest.raises(ImportError, match=r"unjiggle\[ai\]"):

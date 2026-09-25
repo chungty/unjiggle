@@ -18,7 +18,7 @@ import importlib
 import json
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
@@ -165,6 +165,26 @@ def today_line() -> str:
     return f"TODAY: {datetime.now().astimezone().date().isoformat()}"
 
 
+# Layout contexts show an app's update year only when the app has had no App Store
+# update for about 18 months. A full timestamp for every app uses many tokens and
+# adds nothing to a staleness judgment.
+STALE_DAYS = 548
+
+
+def stale_year(meta: dict | None, now: datetime) -> int | None:
+    """Year of the app's last App Store update, if it is STALE_DAYS old or more."""
+    raw = (meta or {}).get("last_updated")
+    if not raw:
+        return None
+    try:
+        when = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return when.year if (now - when).days >= STALE_DAYS else None
+
+
 def provider_api_errors() -> tuple[type[Exception], ...]:
     """Base API error classes of the installed provider SDKs.
 
@@ -206,6 +226,7 @@ def claude_json(
     user: str,
     schema: dict[str, Any],
     effort: str,
+    cached_prefix: str | None = None,
 ) -> dict[str, Any]:
     """Ask Claude for one JSON object matching ``schema`` and return it.
 
@@ -214,6 +235,11 @@ def claude_json(
     any request for a model without structured outputs, and LLMRefusalError,
     LLMTruncatedError or LLMOutputError when the reply is not usable; SDK errors
     (authentication, rate limits, overload) propagate unchanged.
+
+    ``cached_prefix`` is text that goes before ``user`` in the same message and is
+    the same for the next few requests, such as a phone's layout. The system prompt
+    and the prefix then get cache breakpoints, so a request that repeats them within
+    a few minutes reads them from the prompt cache.
     """
     if not supports_structured_outputs(model):
         raise LLMUnsupportedModelError(model)
@@ -221,11 +247,20 @@ def claude_json(
     output_config: dict[str, Any] = {"format": {"type": "json_schema", "schema": schema}}
     if supports_effort(model):
         output_config["effort"] = effort
+    system_param: Any = system
+    content: Any = user
+    if cached_prefix is not None:
+        breakpoint_ = {"type": "ephemeral"}
+        system_param = [{"type": "text", "text": system, "cache_control": breakpoint_}]
+        content = [
+            {"type": "text", "text": cached_prefix, "cache_control": breakpoint_},
+            {"type": "text", "text": user},
+        ]
     params: dict[str, Any] = {
         "model": model,
         "max_tokens": CLAUDE_MAX_TOKENS,
-        "system": system,
-        "messages": [{"role": "user", "content": user}],
+        "system": system_param,
+        "messages": [{"role": "user", "content": content}],
         "output_config": output_config,
     }
     if supports_fallbacks(model):
