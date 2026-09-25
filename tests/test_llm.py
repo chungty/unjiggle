@@ -15,7 +15,6 @@ import pytest
 from unjiggle import llm
 from unjiggle.analyzer import (
     ANALYSIS_TOOL,
-    INTENT_TOOL,
     _build_context,
     _parse_result,
     analyze,
@@ -24,6 +23,7 @@ from unjiggle.analyzer import (
 from unjiggle.mirror import MIRROR_TOOL, _parse_mirror, generate_mirror
 from unjiggle.obituary import OBITUARY_TOOL, _parse_obituaries, generate_obituaries
 from unjiggle.scoring import compute_score
+from unjiggle.stylist import INTENT_TOOL
 
 anthropic = pytest.importorskip("anthropic")
 httpx2 = pytest.importorskip("httpx2")
@@ -41,8 +41,14 @@ ANALYSIS_REPLY = {
     "personality": "Organized chaos.",
     "archetype": "The Collector",
 }
+# The AI Stylist replies with a plan. In chaotic_layout, a3 is com.apple.weather:
+# IDs follow the page order and skip the dock apps.
 INTENT_REPLY = {
-    "operations": [{"action": "move_to_app_library", "bundle_ids": ["com.apple.weather"]}],
+    "page_one": [],
+    "folders": [],
+    "app_library": {"groups": [], "apps": ["a3"]},
+    "delete": [],
+    "unplaced": "stay",
 }
 MIRROR_REPLY = {
     "roast": "You have apps.",
@@ -188,10 +194,14 @@ def test_intent_request_targets_opus_5_5_with_structured_output(
 
     request = fake_claude.last
     _assert_opus_request(request, INTENT_TOOL["input_schema"], "low")
-    user = request.body["messages"][0]["content"]
-    assert user.startswith("<intent>\ncalm and minimal\n</intent>")
-    assert "<layout>\nTODAY: " in user
+    # The layout comes first and is cached with the system prompt. The intent comes last.
+    layout_block, intent_block = request.body["messages"][0]["content"]
+    assert layout_block["text"].startswith("<layout>\nTODAY: ")
+    assert layout_block["cache_control"] == {"type": "ephemeral"}
+    assert intent_block == {"type": "text", "text": "<intent>\ncalm and minimal\n</intent>"}
+    assert request.body["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert [op.action for op in ops] == ["move_to_app_library"]
+    assert ops[0].bundle_ids == ["com.apple.weather"]
 
 
 def test_mirror_request_targets_opus_5_5_at_low_effort(

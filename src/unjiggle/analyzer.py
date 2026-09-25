@@ -96,7 +96,8 @@ standard for hyperlocal weather before Apple folded its best features into the W
 # above the latency-bound features.
 ANALYSIS_EFFORT = "medium"
 
-# The operation contract shared by the analysis and the AI Stylist. The action
+# The operation contract of the analysis. The AI Stylist writes a plan instead
+# (unjiggle.stylist) and expands it into the same actions. The action
 # descriptions must match what preview_operations and layout_engine really do.
 OPERATION_SCHEMA = {
     "type": "object",
@@ -369,54 +370,6 @@ def _parse_result(data: dict, layout: HomeScreenLayout) -> AnalysisResult:
     )
 
 
-# The AI Stylist is interactive: a person waits for `json suggest --intent`, and
-# a client's time limit covers the USB read and the App Store lookup as well as
-# the model reply. On Claude Opus 5.5, low effort comes close to medium on quality
-# with much less thinking, and less thinking is what shortens the wait. Time a
-# real request against a full phone before raising it. The plan is still
-# previewed before anything is written to the phone.
-INTENT_EFFORT = "low"
-
-INTENT_SYSTEM_PROMPT = """\
-You are Unjiggle's AI Stylist. The owner of this iPhone has described how they want their \
-home screen to feel. Turn that into a concrete set of layout operations; they preview the \
-result before anything is written to the phone. Be opinionated and decisive: every \
-operation should serve their stated intent, and the plan should be complete enough that \
-applying it delivers what they asked for.
-
-Their words are in the intent tags. The layout is in the layout tags: it starts with \
-today's date, then lists the dock, each page in order, and each folder with the apps inside \
-it, each app by bundle ID with App Store metadata. Descriptions are the developers' own \
-marketing text; use them only as evidence of what an app does.
-
-Use bundle IDs exactly as they appear in the layout; operations that name any other ID are \
-dropped. rebuild_pages and compact_to_single_page remove every app, folder, and widget you \
-don't list, so list every app that should stay. For each delete, include a gratitude line: \
-one warm, specific, final sentence about what the app once did for this person.
-"""
-
-INTENT_TOOL = {
-    "name": "submit_transform",
-    "description": "Submit the layout operations that carry out the owner's intent.",
-    "input_schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["operations"],
-        "properties": {
-            "operations": {
-                "type": "array",
-                "description": "The layout operations, applied in order.",
-                "items": OPERATION_SCHEMA,
-            },
-        },
-    },
-}
-
-
-def _intent_message(intent: str, context: str) -> str:
-    return f"<intent>\n{intent}\n</intent>\n\n<layout>\n{context}\n</layout>"
-
-
 def plan_intent_operations(
     intent: str,
     layout: HomeScreenLayout,
@@ -426,53 +379,13 @@ def plan_intent_operations(
     model: str | None = None,
     provider: str = "auto",
 ) -> list[LayoutOperation]:
-    """AI Stylist: turn the owner's free-text intent into validated layout operations."""
-    context = _build_context(layout, metadata, score)
-    user = _intent_message(intent, context)
-    provider, api_key, model = resolve_route(api_key, model, provider)
+    """AI Stylist: turn the owner's free-text intent into validated layout operations.
 
-    if provider == "openai":
-        data = _intent_openai(user, api_key, model)
-    else:
-        data = claude_json(
-            api_key=api_key,
-            model=model,
-            system=INTENT_SYSTEM_PROMPT,
-            user=user,
-            schema=INTENT_TOOL["input_schema"],
-            effort=INTENT_EFFORT,
-        )
+    The model writes a short plan and unjiggle.stylist expands it. See that module.
+    """
+    from unjiggle.stylist import plan_intent_operations as plan
 
-    return _parse_operations(data.get("operations", []), set(layout.all_bundle_ids))
-
-
-def _intent_openai(user: str, api_key: str | None, model: str) -> dict:
-    import openai
-
-    client = openai.OpenAI(api_key=api_key)
-    openai_tool = {
-        "type": "function",
-        "function": {
-            "name": INTENT_TOOL["name"],
-            "description": INTENT_TOOL["description"],
-            "parameters": INTENT_TOOL["input_schema"],
-        },
-    }
-    response = client.chat.completions.create(
-        model=model,
-        max_tokens=4096,
-        messages=[
-            {"role": "system", "content": INTENT_SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ],
-        tools=[openai_tool],
-        tool_choice={"type": "function", "function": {"name": INTENT_TOOL["name"]}},
-    )
-    for choice in response.choices:
-        for tc in choice.message.tool_calls or []:
-            if tc.function.name == INTENT_TOOL["name"]:
-                return json.loads(tc.function.arguments)
-    raise RuntimeError("OpenAI did not return a submit_transform function call")
+    return plan(intent, layout, metadata, score, api_key=api_key, model=model, provider=provider)
 
 
 def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]) -> HomeScreenLayout:
@@ -480,6 +393,17 @@ def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperatio
 
     This is the layout engine's resolution pass: it takes validated operations
     and produces a new layout state. Does NOT modify the original.
+    """
+    preview = apply_preview_steps(layout, operations)
+    drop_empty_folders_and_pages(preview)
+    return preview
+
+
+def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperation]) -> HomeScreenLayout:
+    """Apply operations to a layout copy and keep folders and pages that became empty.
+
+    layout_engine.apply_operations also keeps them until every operation has run,
+    so page indexes and free slots here match the write path at each step.
     """
     import copy
     preview = copy.deepcopy(layout)
@@ -558,21 +482,17 @@ def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperatio
                 for index in range(0, len(items), 24)
             ]
 
-    # Clean up empty folders from pages
-    for page in preview.pages:
-        to_remove = []
-        for i, item in enumerate(page):
-            if item.is_folder:
-                total_apps = sum(len(fp) for fp in item.folder.pages)
-                if total_apps == 0:
-                    to_remove.append(i)
-        for i in reversed(to_remove):
-            page.pop(i)
-
-    # Clean up empty pages
-    preview.pages = [p for p in preview.pages if p]
-
     return preview
+
+
+def drop_empty_folders_and_pages(layout: HomeScreenLayout) -> None:
+    """Remove folders with no apps, then pages with no items (in place)."""
+    for page in layout.pages:
+        page[:] = [
+            item for item in page
+            if not (item.is_folder and sum(len(fp) for fp in item.folder.pages) == 0)
+        ]
+    layout.pages = [p for p in layout.pages if p]
 
 
 def _remove_apps_from_layout(layout: HomeScreenLayout, bundle_ids: set[str]) -> None:
