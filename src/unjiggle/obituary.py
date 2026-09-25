@@ -192,7 +192,7 @@ OBITUARY_TOOL = {
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["app", "born", "eulogy", "cause_of_death"],
+                    "required": ["app", "born", "died", "eulogy", "cause_of_death"],
                     "properties": {
                         "app": {
                             "type": "integer",
@@ -483,7 +483,7 @@ def _parse_obituaries(data: dict, dead_apps: list[dict]) -> ObituaryResult:
             app_name=app_info.get("name", bid.split(".")[-1]),
             bundle_id=bid,
             born=obit.get("born"),
-            died=obit.get("died", "recently"),
+            died=_died(obit.get("died")),
             cause_of_death=obit.get("cause_of_death", ""),
             eulogy=obit.get("eulogy", ""),
             survived_by=obit.get("survived_by"),
@@ -494,6 +494,18 @@ def _parse_obituaries(data: dict, dead_apps: list[dict]) -> ObituaryResult:
         obituaries=obituaries,
         graveyard_summary=data.get("graveyard_summary", f"{len(dead_apps)} apps that time forgot."),
     )
+
+
+def _died(value) -> str:
+    """The death year in an obituary, as text. Claude's structured output always
+    gives a string. The OpenAI function call is not strict: it can leave the year
+    out, give null or give 2019 as a number. A year that is missing or blank shows
+    as "recently"."""
+    if isinstance(value, str):
+        return value.strip() or "recently"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return "recently"
 
 
 def _app_number(value) -> int | None:

@@ -233,6 +233,7 @@ def test_obituary_request_targets_sonnet_5_at_low_effort(fake_claude, no_screen_
         "obituaries": [{
             "app": 1,
             "born": "2016",
+            "died": "2019",
             "cause_of_death": "Google Translate.",
             "eulogy": "It tried.",
         }],
@@ -243,6 +244,7 @@ def test_obituary_request_targets_sonnet_5_at_low_effort(fake_claude, no_screen_
     _assert_opus_request(fake_claude.last, OBITUARY_TOOL["input_schema"], "low", model="claude-sonnet-5")
     assert [o.bundle_id for o in result.obituaries] == ["com.example.dead0"]
     assert result.obituaries[0].app_name == "Dead0"
+    assert result.obituaries[0].died == "2019"
 
 
 def test_model_override_passes_through(fake_claude, chaotic_layout, sample_metadata):
@@ -685,6 +687,63 @@ def test_obituary_schema_always_asks_for_an_approximate_birth_year():
     item = OBITUARY_TOOL["input_schema"]["properties"]["obituaries"]["items"]
     assert "born" in item["required"]
     assert "approximate" in item["properties"]["born"]["description"].lower()
+
+
+def test_obituary_schema_requires_a_death_year():
+    # Claude's structured output then always sends it. Without it, one eval run
+    # left out the year in all 15 obituaries, and every client showed "recently".
+    item = OBITUARY_TOOL["input_schema"]["properties"]["obituaries"]["items"]
+    assert "died" in item["required"]
+    assert item["properties"]["died"]["type"] == "string"
+
+
+@pytest.mark.parametrize(("reply", "died"), [
+    ({}, "recently"),
+    ({"died": None}, "recently"),
+    ({"died": "  "}, "recently"),
+    ({"died": True}, "recently"),
+    ({"died": 2019}, "2019"),
+    ({"died": " circa 2019 "}, "circa 2019"),
+])
+def test_an_obituary_from_a_loose_function_call_always_has_a_death_year(reply, died):
+    # The OpenAI function call is not strict, so it can break the required field.
+    # The parser repairs the year and keeps the obituary.
+    dead_apps = [{"bundle_id": "com.example.a", "name": "A"}]
+    result = _parse_obituaries({
+        "obituaries": [{"app": 1, "born": "2015", "eulogy": "e", "cause_of_death": "x", **reply}],
+        "graveyard_summary": "One.",
+    }, dead_apps)
+    assert [(o.bundle_id, o.died) for o in result.obituaries] == [("com.example.a", died)]
+
+
+def test_openai_obituary_without_a_death_year_keeps_the_client_json_shape(
+    monkeypatch, fake_claude, no_screen_time,
+):
+    from unjiggle.cli import _obituary_to_json
+
+    layout, metadata = _dead_app_layout()
+    fake = FakeOpenAI({
+        "obituaries": [{"app": 1, "born": "2016", "cause_of_death": "Google Translate.", "eulogy": "It tried."}],
+        "graveyard_summary": "Three languages, zero fluency.",
+    })
+    monkeypatch.setitem(sys.modules, "openai", fake)
+
+    result = generate_obituaries(layout, metadata, api_key=OPENAI_KEY)
+
+    assert fake_claude.requests == []
+    # The OpenAI function uses the same schema, so it also asks for the year.
+    assert fake.calls[-1]["tools"][0]["function"]["parameters"] == OBITUARY_TOOL["input_schema"]
+    # JSON clients decode these keys, and "died" is still a string.
+    [obituary] = _obituary_to_json(result)["obituaries"]
+    assert obituary == {
+        "app_name": "Dead0",
+        "bundle_id": "com.example.dead0",
+        "born": "2016",
+        "died": "recently",
+        "cause_of_death": "Google Translate.",
+        "eulogy": "It tried.",
+        "survived_by": None,
+    }
 
 
 @pytest.fixture
