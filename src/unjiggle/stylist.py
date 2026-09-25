@@ -22,15 +22,16 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from unjiggle.analyzer import (
+    PAGE_SLOTS,
     LayoutOperation,
     _parse_operations,
     apply_preview_steps,
+    page_slots,
     preview_operations,
 )
 from unjiggle.llm import claude_json, resolve_route, stale_year, today_line
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
-PAGE_SLOTS = 24
 APPLE_GROUP = "Apple"
 OTHER_GROUP = "Other"
 UNPLACED_MODES = ("stay", "folders", "app_library")
@@ -174,6 +175,11 @@ def dock_bundle_ids(layout: HomeScreenLayout) -> set[str]:
         elif item.is_folder:
             ids.update(app.bundle_id for page in item.folder.pages for app in page)
     return ids
+
+
+def slot_limit(layout: HomeScreenLayout) -> int:
+    """24 slots per page, or more when a page of the phone already uses more."""
+    return max([PAGE_SLOTS] + [page_slots(page) for page in layout.pages])
 
 
 def _page_apps(item) -> list[str]:
@@ -388,7 +394,11 @@ def expand_plan(
 
     current: dict[str, list[str]] = {}  # folder name (casefold) -> movable members
     current_title: dict[str, str] = {}
-    name_count: Counter = Counter()
+    # Folders by name, the dock included. The preview finds a folder by its name and
+    # looks in the dock first, so an operation names only a folder whose name is unique.
+    name_count: Counter = Counter(
+        item.folder.display_name.casefold() for item in layout.dock if item.is_folder
+    )
     in_folder: dict[str, str] = {}  # bundle ID -> first folder that holds it
     for page in layout.pages:
         for item in page:
@@ -477,16 +487,14 @@ def expand_plan(
         spec["apps"].extend(entry.get("apps") or [])
     plan_folders = list(specs)
 
-    # 3. Page 1. A new layout keeps room on page 1 for the plan's folders.
-    room = min(PAGE_SLOTS, max(1, PAGE_SLOTS - len(plan_folders)))
+    # 3. Page 1. An app that the plan names for page 1 is never cut for a folder: in a
+    # new layout, page 1 shows page_one and then the folders, and the folders that do
+    # not fit go to page 2. Apps after the first 24 go to page 2.
     page_one = [b for b in ids(plan.get("page_one")) if b not in dest]
-    if mode != "stay":
-        if not page_one:
-            first_page = layout.pages[0] if layout.pages else []
-            loose = [item.app.bundle_id for item in first_page if item.is_app]
-            page_one = [b for b in dict.fromkeys(loose) if b in home_set and b not in dest]
-        report.page_one_overflow += [handles.by_bundle_id[b] for b in page_one[room:]]
-        page_one = page_one[:room]
+    if mode != "stay" and not page_one:
+        first_page = layout.pages[0] if layout.pages else []
+        loose = [item.app.bundle_id for item in first_page if item.is_app]
+        page_one = [b for b in dict.fromkeys(loose) if b in home_set and b not in dest]
     claim(page_one, "page1")
 
     # 4. Single apps, then folders kept by name, then whole groups and folders.
@@ -545,7 +553,12 @@ def expand_plan(
                     break
         candidates = deletes + archive
         if page1:
-            candidates.append(LayoutOperation("compact_to_single_page", page1))
+            if len(page1) <= PAGE_SLOTS:
+                candidates.append(LayoutOperation("compact_to_single_page", page1))
+            else:
+                # 24 apps per page. The folders follow on the first page with room.
+                report.page_one_overflow += [handles.by_bundle_id[b] for b in page1[PAGE_SLOTS:]]
+                candidates.append(LayoutOperation("rebuild_pages", page1))
             candidates += [
                 LayoutOperation("create_folder", members[key], folder_name=folder_title[key])
                 for key in folder_order if members[key]
@@ -580,11 +593,12 @@ def _stay_operations(
             if new:
                 candidates.append(LayoutOperation("move_to_folder", new, folder_name=current_title[key]))
         else:
+            # A rename is safe only when no folder has the new name yet.
             source = next((
                 other for other in current
                 if other != key and name_count[other] == 1 and other not in members
                 and current[other] and all(dest.get(b) == ("folder", key) for b in current[other])
-            ), None)
+            ), None) if name_count[key] == 0 else None
             if source is not None:
                 # All of one folder's apps go to a new name: rename it, then add the rest.
                 candidates.append(LayoutOperation(
@@ -606,8 +620,9 @@ def _stay_operations(
 
 def _page_one_moves(sequence, handles, page_one, dest, home_set) -> None:
     """Bring page_one's apps to page 1 and move page 1's other apps to later pages
-    with free slots. Nothing moves to a page after one that is empty at that step,
-    and page 1 is never emptied while apps still have to arrive."""
+    with free slots. A widget uses the slots of its size. Nothing moves to a page
+    after one that is empty at that step, and page 1 is never emptied while apps
+    still have to arrive."""
     pages = sequence.pages()
     if not pages:
         return
@@ -618,7 +633,7 @@ def _page_one_moves(sequence, handles, page_one, dest, home_set) -> None:
     def move_in():
         nonlocal arriving
         pages = sequence.pages()
-        room = PAGE_SLOTS - len(pages[0]) if pages and pages[0] else 0
+        room = PAGE_SLOTS - page_slots(pages[0]) if pages and pages[0] else 0
         if room > 0 and arriving:
             batch, arriving = arriving[:room], arriving[room:]
             sequence.add(LayoutOperation("move_to_page", batch, target_page=0))
@@ -630,7 +645,7 @@ def _page_one_moves(sequence, handles, page_one, dest, home_set) -> None:
             pages = sequence.pages()
             if index >= len(pages) or any(not page for page in pages[: index + 1]):
                 break
-            free = PAGE_SLOTS - len(pages[index])
+            free = PAGE_SLOTS - page_slots(pages[index])
             limit = len(pages[0]) - 1 if keep_one else len(leaving)
             count = min(free, len(leaving), limit)
             if count > 0:
@@ -707,14 +722,19 @@ class _Sequence:
         self.report = report
         self.ops: list[LayoutOperation] = []
         self._one_at_a_time = layout
+        self.slot_limit = slot_limit(layout)
 
     def add(self, *ops: LayoutOperation) -> bool:
-        """Append the operations together, or none of them."""
+        """Append the operations together, or none of them. Operations that fill a
+        page past its 24 slots are left out too: the preview of move_to_page counts
+        a widget as one item, and the stylist counts the slots of its size."""
         state = self._one_at_a_time
         for op in ops:
             state = preview_operations(state, [op])
         together = preview_operations(self.layout, self.ops + list(ops))
-        if _layout_key(together) != _layout_key(state):
+        if _layout_key(together) != _layout_key(state) or any(
+            page_slots(page) > self.slot_limit for page in together.pages
+        ):
             self.report.dropped_operations += [_describe(op) for op in ops]
             return False
         self.ops += ops
@@ -742,7 +762,7 @@ def expansion_problem(layout: HomeScreenLayout, ops: list[LayoutOperation]) -> s
       more than once before), or an operation deletes it or sends it to the App
       Library.
     - The dock does not change.
-    - No page holds more than 24 items, unless one did before.
+    - No page uses more than 24 slots, unless one did before.
     - The preview matches the prediction of `json apply`.
     """
     dock = dock_bundle_ids(layout)
@@ -768,8 +788,7 @@ def expansion_problem(layout: HomeScreenLayout, ops: list[LayoutOperation]) -> s
             return f"loses {bundle_id}"
     if _dock_key(after) != _dock_key(layout):
         return "changes the dock"
-    widest = max((len(page) for page in layout.pages), default=0)
-    if any(len(page) > max(PAGE_SLOTS, widest) for page in after.pages):
+    if any(page_slots(page) > slot_limit(layout) for page in after.pages):
         return "overfills a page"
     if _layout_key(after) != _layout_key(_one_at_a_time(layout, ops)):
         return "differs from the one-at-a-time preview"

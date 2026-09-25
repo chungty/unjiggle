@@ -55,8 +55,8 @@ def _folder(name, bids, fmt):
     return {"displayName": name, "iconLists": [apps], "iconType": "folder"}
 
 
-def _widget(index):
-    return {"iconType": "widget", "containerBundleIdentifier": f"com.widget.w{index}", "gridSize": "small"}
+def _widget(index, size="small"):
+    return {"iconType": "widget", "containerBundleIdentifier": f"com.widget.w{index}", "gridSize": size}
 
 
 def _state(dock, pages, fmt, ignored=()):
@@ -140,6 +140,23 @@ def sparse_phone(fmt: str = "legacy"):
     return device.parse_layout_state(_state(dock, pages, fmt, ignored=["com.example.hidden"])), metadata
 
 
+def widget_phone(fmt: str = "ios26"):
+    """Page 1: a medium and three small widgets (20 of 24 slots) and two apps. The dock
+    holds a folder named "Work", and page 2 holds another folder named "Work"."""
+    bids = [f"com.example.wd{i:02d}" for i in range(70)]
+    metadata = _metadata(bids, random.Random(11))
+    page_one = [_widget(0, "medium"), _widget(1), _widget(2), _widget(3),
+                _app(bids[2], fmt), _app(bids[3], fmt)]
+    pages = [
+        page_one,
+        [_folder("Work", bids[4:8], fmt), _folder("Games", bids[8:12], fmt)] + [_app(b, fmt) for b in bids[12:34]],
+        [_widget(4, "extraLarge")] + [_app(b, fmt) for b in bids[34:42]],
+        [_app(b, fmt) for b in bids[42:70]][:24],
+    ]
+    dock = [_app(bids[0], fmt), _folder("Work", [bids[1]], fmt)]
+    return device.parse_layout_state(_state(dock, pages, fmt)), metadata
+
+
 PHONES = {
     "big-ios26": lambda: big_phone(1, "ios26"),
     "big-legacy": lambda: big_phone(2, "legacy"),
@@ -147,6 +164,8 @@ PHONES = {
     "full-one-page": lambda: full_one_page_phone("ios26"),
     "sparse-legacy": lambda: sparse_phone("legacy"),
     "sparse-ios26": lambda: sparse_phone("ios26"),
+    "widgets-ios26": lambda: widget_phone("ios26"),
+    "widgets-legacy": lambda: widget_phone("legacy"),
 }
 
 
@@ -214,8 +233,13 @@ def check_expansion(layout, metadata, plan):
     assert all(after_count[b] == 1 for b in moved), "a moved app is not on the home screen once"
     assert [i.app.bundle_id if i.is_app else i.folder.display_name for i in after.dock] == \
         [i.app.bundle_id if i.is_app else i.folder.display_name for i in layout.dock]
-    if all(len(page) <= stylist.PAGE_SLOTS for page in layout.pages):
-        assert all(len(page) <= stylist.PAGE_SLOTS for page in after.pages)
+    # No page uses more grid slots than the phone can show. A widget uses 4, 8 or 16.
+    if all(stylist.page_slots(page) <= stylist.PAGE_SLOTS for page in layout.pages):
+        assert all(stylist.page_slots(page) <= stylist.PAGE_SLOTS for page in after.pages)
+    # A folder page that gets apps holds at most 9 of them, as on the phone.
+    foldered = {b for op in ops if op.action in ("create_folder", "move_to_folder") for b in op.bundle_ids}
+    assert all(len(folder_page) <= 9 for folder in after.all_folders() for folder_page in folder.pages
+               if foldered & {app.bundle_id for app in folder_page})
 
     # `json apply` predicts the same layout, one operation at a time.
     predicted, effective = _preview_effective_operations(layout, ops)
@@ -328,8 +352,9 @@ def _where(layout):
             if item.is_app:
                 out[item.app.bundle_id] = f"p{number}"
             elif item.is_folder:
-                for app in item.folder.pages[0]:
-                    out[app.bundle_id] = item.folder.display_name
+                for folder_page in item.folder.pages:
+                    for app in folder_page:
+                        out[app.bundle_id] = item.folder.display_name
     return out
 
 
@@ -437,10 +462,11 @@ def test_stay_mode_page_one_makes_room_on_later_pages():
     after = preview_operations(layout, ops)
     first = [i.app.bundle_id for i in after.pages[0] if i.is_app]
     placed = [b for b in wanted if b in first]
-    # Page 1 fills up to 24 items (4 widgets + 20 apps). What does not fit is reported.
-    assert len(after.pages[0]) == 24
-    assert len(placed) == 20
-    assert len(report.page_one_overflow) == 2
+    # Page 1 fills up to 24 slots: 4 small widgets use 16, and 8 apps fit. What does
+    # not fit is reported.
+    assert stylist.page_slots(after.pages[0]) == 24
+    assert len(placed) == 8
+    assert len(report.page_one_overflow) == 14
     assert not set(page_one_now) & set(first)  # the apps that were there moved on
 
 
@@ -457,6 +483,111 @@ def test_stay_mode_page_one_on_a_full_single_page_phone_changes_nothing_it_canno
     assert ops == []
     assert report.page_one_overflow == [handles.by_bundle_id[folder_app]]
     assert len(report.not_moved) == 20
+
+
+def _genre_phone():
+    """Loose apps only: 30 apps in the genre Daily, then 8 genres of 5 apps."""
+    fmt = "ios26"
+    genres = ["Daily"] * 30 + [g for g in GENRES[:8] for _ in range(5)]
+    bids = [f"com.genre.app{i:02d}" for i in range(len(genres))]
+    metadata = {b: {"name": f"App {i}", "genre": g, "super_category": g} for i, (b, g) in enumerate(zip(bids, genres))}
+    pages = [[_app(b, fmt) for b in bids[i:i + 20]] for i in range(0, len(bids), 20)]
+    return device.parse_layout_state(_state([_app("com.dock", fmt)], pages, fmt)), metadata
+
+
+@pytest.mark.parametrize("count", [20, 30])
+def test_a_new_layout_never_hides_an_app_that_the_plan_names_for_page_one(count):
+    layout, metadata = _genre_phone()
+    handles = stylist.build_handles(layout)
+    daily = [b for b in handles.bundle_ids() if metadata[b]["genre"] == "Daily"][:count]
+    plan = {
+        "page_one": [handles.by_bundle_id[b] for b in daily],
+        "folders": [{"name": f"{g} folder", "groups": [g], "apps": []} for g in GENRES[:8]],
+        "app_library": {"groups": [], "apps": []},
+        "delete": [],
+        "unplaced": "app_library",
+    }
+    ops, report = check_expansion(layout, metadata, plan)
+    after = preview_operations(layout, ops)
+    archived = {b for op in ops if op.action == "move_to_app_library" for b in op.bundle_ids}
+    pages = [[i.app.bundle_id if i.is_app else i.folder.display_name for i in page] for page in after.pages]
+
+    # Every app that the plan names for page 1 stays on the home screen, in order.
+    assert not archived & set(daily)
+    assert [x for page in pages for x in page if x in daily] == daily
+    assert pages[0][:min(count, 24)] == daily[:24]
+    # The folders follow. The ones that do not fit on page 1 go to page 2.
+    assert [x for page in pages for x in page if x.endswith(" folder")] == [f"{g} folder" for g in GENRES[:8]]
+    assert len(pages[0]) == 24
+    assert report.page_one_overflow == [handles.by_bundle_id[b] for b in daily[24:]]
+    # Daily apps that the plan does not name follow the unplaced rule.
+    assert archived == {b for b in handles.bundle_ids() if metadata[b]["genre"] == "Daily"} - set(daily)
+
+
+def test_stay_mode_page_one_counts_widget_slots():
+    for fmt in ("ios26", "legacy"):
+        layout, metadata = widget_phone(fmt)
+        handles = stylist.build_handles(layout)
+        assert stylist.page_slots(layout.pages[0]) == 22  # medium 8 + 3 small 12 + 2 apps
+        wanted = [b for b in handles.bundle_ids() if b.endswith(tuple(f"wd{i}" for i in range(50, 62)))]
+        plan = {
+            "page_one": [handles.by_bundle_id[b] for b in wanted],
+            "folders": [], "app_library": {"groups": [], "apps": []}, "delete": [], "unplaced": "stay",
+        }
+        ops, report = check_expansion(layout, metadata, plan)
+        after = preview_operations(layout, ops)
+        first = [i.app.bundle_id for i in after.pages[0] if i.is_app]
+        # 4 app slots: the 2 apps that were there move on, and 4 of the 12 arrive.
+        assert stylist.page_slots(after.pages[0]) == 24
+        assert first == wanted[:4]
+        assert len(report.page_one_overflow) == 8
+
+
+def test_stay_mode_new_folders_skip_a_page_that_its_widgets_fill():
+    layout, metadata = widget_phone()
+    handles = stylist.build_handles(layout)
+    last = [b for b in handles.bundle_ids() if b >= "com.example.wd42"]
+    plan = {
+        "page_one": [],
+        "folders": [{"name": f"New {i}", "groups": [], "apps": [handles.by_bundle_id[b] for b in last[2 * i:2 * i + 2]]}
+                    for i in range(4)],
+        "app_library": {"groups": [], "apps": []}, "delete": [], "unplaced": "stay",
+    }
+    ops, report = check_expansion(layout, metadata, plan)
+    after = preview_operations(layout, ops)
+    assert [op.action for op in ops] == ["create_folder"] * 4
+    assert report.dropped_operations == []
+    assert all(stylist.page_slots(page) <= 24 for page in after.pages)
+    where = {i.folder.display_name: n for n, page in enumerate(after.pages) for i in page if i.is_folder}
+    assert where["New 0"] == where["New 1"] == 0  # page 1 had 2 free slots
+    assert where["New 2"] == where["New 3"] == 3  # pages 2 and 3 are full
+
+
+def test_a_dock_folder_with_a_page_folder_name_does_not_stop_the_plan():
+    for fmt in ("ios26", "legacy"):
+        layout, metadata = widget_phone(fmt)
+        handles = stylist.build_handles(layout)
+        h = handles.by_bundle_id.__getitem__
+        names = stylist._display_names(layout)
+        gone = "com.example.wd40"
+        plan = {
+            "page_one": [],
+            "folders": [{"name": "Work", "groups": [], "apps": [h("com.example.wd20"), h("com.example.wd21")]}],
+            "app_library": {"groups": [], "apps": [h("com.example.wd41")]},
+            "delete": [{"app": h(gone), "gratitude": f"{stylist.short_name(gone, metadata, names)} was great."}],
+            "unplaced": "stay",
+        }
+        ops, report = check_expansion(layout, metadata, plan)
+        # Two folders are named Work (one in the dock), so the plan makes a new folder
+        # with the page folder's apps and the two new ones. The dock does not change.
+        assert [op.action for op in ops] == ["create_folder", "delete", "move_to_app_library"]
+        assert sorted(ops[0].bundle_ids) == [f"com.example.wd{i:02d}" for i in (4, 5, 6, 7, 20, 21)]
+        assert report.dropped_operations == []
+
+        rename = {**plan, "folders": [{"name": "Tools", "groups": ["Work"], "apps": []}], "delete": []}
+        ops, report = check_expansion(layout, metadata, rename)
+        assert [(op.action, op.folder_name) for op in ops] == [("create_folder", "Tools"), ("move_to_app_library", None)]
+        assert report.dropped_operations == []
 
 
 def test_unknown_ids_and_names_are_reported_and_ignored():
