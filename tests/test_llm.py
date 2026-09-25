@@ -545,3 +545,33 @@ def test_json_suggest_intent_reports_a_refusal_as_json_error(fake_claude, phone)
 
     assert result.exit_code == 1
     assert "declined" in json.loads(result.output)["error"]
+
+
+def test_go_falls_back_to_the_offline_archetype_when_claude_declines(
+    monkeypatch, tmp_path, fake_claude, chaotic_layout, sample_metadata,
+):
+    import webbrowser
+
+    from click.testing import CliRunner
+
+    from unjiggle import archetypes, cli, device, itunes, telemetry
+
+    monkeypatch.setattr(device, "connect", lambda: (
+        "LOCKDOWN", SimpleNamespace(name="iPhone", model="iPhone16,1", ios_version="26.0"),
+    ))
+    monkeypatch.setattr(device, "read_layout", lambda lockdown: chaotic_layout)
+    monkeypatch.setattr(itunes, "enrich_layout", lambda layout, progress=None: sample_metadata)
+    monkeypatch.setattr(archetypes, "assign_archetype", lambda layout, metadata: ("The Offline One", "Tagline."))
+    monkeypatch.setattr(cli, "UNJIGGLE_DIR", tmp_path)
+    monkeypatch.setattr(webbrowser, "open", lambda url: True)
+    monkeypatch.setattr(telemetry, "prompt_analytics_opt_in", lambda console: None)
+    monkeypatch.setattr(telemetry, "send_event", lambda *args, **kwargs: None)
+    fake_claude.reply = _message([], stop_reason="refusal")
+
+    result = CliRunner().invoke(cli.main, ["go", "--api-key", ANTHROPIC_KEY])
+
+    assert result.exit_code == 0, result.output
+    assert len(fake_claude.requests) == 1
+    assert "AI analysis unavailable: Claude declined this request." in result.output
+    assert "The Offline One" in result.output
+    assert list((tmp_path / "reports").glob("report-*.html"))

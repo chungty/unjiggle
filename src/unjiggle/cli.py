@@ -13,6 +13,7 @@ from rich.progress import Progress
 from rich.table import Table
 
 from unjiggle import __version__
+from unjiggle.llm import LLMError
 
 console = Console()
 UNJIGGLE_DIR = Path.home() / ".unjiggle"
@@ -123,6 +124,9 @@ def go(api_key: str | None, model: str | None):
                 console.print(f"  [italic dim]{result.personality}[/italic dim]\n")
         except ImportError:
             console.print("[dim]Install AI extras for deeper analysis: pip install unjiggle[ai][/dim]\n")
+        except LLMError as e:
+            # The offline archetype above stands in when the model gives no usable answer.
+            console.print(f"[dim]AI analysis unavailable: {e}[/dim]\n")
     else:
         console.print("[dim]Tip: Set ANTHROPIC_API_KEY or OPENAI_API_KEY for AI-powered observations.[/dim]\n")
 
@@ -395,7 +399,7 @@ def analyze(api_key: str | None, model: str):
     score = compute_score(layout, metadata)
 
     console.print(f"  Score: [bold]{score.total:.0f}/100[/bold] ({score.label})\n")
-    console.print("[dim]Running AI analysis (Claude Sonnet)...[/dim]\n")
+    console.print("[dim]Running AI analysis...[/dim]\n")
 
     result = run_analysis(layout, metadata, score, api_key=api_key, model=model)
 
@@ -451,7 +455,7 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
     from unjiggle.scoring import compute_score
 
     if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY not set.[/red]")
+        console.print("[red]No API key found.[/red] Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or pass --api-key.")
         sys.exit(1)
 
     console.print("\n[bold]Unjiggle[/bold] — Smart Suggestions...\n")
