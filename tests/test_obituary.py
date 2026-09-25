@@ -1,11 +1,17 @@
 """Tests for App Obituary dead-app identification (no LLM needed)."""
 
+from datetime import datetime, timedelta, timezone
+
 from unjiggle.models import AppItem, FolderItem, HomeScreenLayout, LayoutItem
 from unjiggle.obituary import identify_dead_apps
 
 
 def _app(bid):
     return LayoutItem(app=AppItem(bundle_id=bid))
+
+
+def _days_ago(days):
+    return (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _meta(name, cat="Other", last_updated=None, desc=""):
@@ -110,7 +116,7 @@ def test_active_social_app_on_late_page_not_flagged():
     metadata = {
         "com.burbn.instagram": _meta(
             "Instagram", cat="Social",
-            last_updated="2025-12-01T00:00:00Z",  # recent
+            last_updated=_days_ago(30),  # recent, relative to today
         ),
     }
     dead = identify_dead_apps(layout, metadata)
