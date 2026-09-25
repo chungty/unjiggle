@@ -488,9 +488,10 @@ def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperatio
         if op.action in ("move_to_app_library", "delete"):
             # Same as layout_engine.apply_operations: both take the icons off the
             # home screen, and only move_to_app_library records them as ignored.
+            # The iOS 26 state (a list) has no ignored list, so nothing is recorded.
             _remove_apps_from_layout(preview, op.bundle_ids)
-            if op.action == "move_to_app_library":
-                preview.ignored.extend(op.bundle_ids)
+            if op.action == "move_to_app_library" and not isinstance(preview.raw, list):
+                preview.ignored.extend(b for b in op.bundle_ids if b not in preview.ignored)
 
         elif op.action == "move_to_page":
             if op.target_page is not None and 0 <= op.target_page < len(preview.pages):

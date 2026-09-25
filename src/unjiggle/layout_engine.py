@@ -51,6 +51,10 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
     and legacy (dict format).
     """
     raw = copy.deepcopy(layout.raw)
+    # An app that an earlier operation took off the home screen (compact_to_single_page
+    # or rebuild_pages) can come back in a later one (create_folder). It comes back as
+    # the item it was in the original state, with all of its fields.
+    originals = _raw_app_items(layout.raw)
 
     for op in operations:
         if op.action in ("move_to_app_library", "delete"):
@@ -69,7 +73,7 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
         elif op.action == "move_to_page":
             if op.target_page is not None:
                 snapshot = copy.deepcopy(raw)
-                extracted = _raw_extract_apps(raw, op.bundle_ids)
+                extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
                 pages = _get_pages(raw)
                 if 0 <= op.target_page < len(pages):
                     page = pages[op.target_page]
@@ -83,7 +87,7 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
         elif op.action == "create_folder":
             if op.folder_name and op.bundle_ids:
                 snapshot = copy.deepcopy(raw)
-                extracted = _raw_extract_apps(raw, op.bundle_ids)
+                extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
                 if extracted:
                     folder_dict = {
                         "displayName": op.folder_name,
@@ -110,7 +114,7 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
         elif op.action == "move_to_folder":
             if op.folder_name and op.bundle_ids:
                 snapshot = copy.deepcopy(raw)
-                extracted = _raw_extract_apps(raw, op.bundle_ids)
+                extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
                 if extracted:
                     added = _raw_add_to_folder(raw, op.folder_name, extracted)
                     if not added:
@@ -119,19 +123,22 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                     raw = snapshot
 
         elif op.action == "compact_to_single_page":
-            extracted = _raw_extract_apps(raw, op.bundle_ids)
+            extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
             _set_pages(raw, [extracted] if extracted else [])
 
         elif op.action == "rebuild_pages":
-            extracted = _raw_extract_apps(raw, op.bundle_ids)
+            extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
             rebuilt_pages = [
                 extracted[index:index + 24]
                 for index in range(0, len(extracted), 24)
             ]
             _set_pages(raw, rebuilt_pages)
 
-    # Clean up empty pages
-    pages = _get_pages(raw)
+    # Clean up folders the operations emptied, then empty pages, as the preview does.
+    pages = [
+        [item for item in page if not _raw_is_empty_folder(item)]
+        for page in _get_pages(raw)
+    ]
     cleaned = [page for page in pages if page]
     _set_pages(raw, cleaned)
 
@@ -181,6 +188,41 @@ def _raw_is_folder(item: Any) -> bool:
     return isinstance(item, dict) and ("iconLists" in item or item.get("listType") == "folder")
 
 
+def _raw_is_empty_folder(item: Any) -> bool:
+    if not _raw_is_folder(item):
+        return False
+    return not any(_raw_find_app(fi) for page in item.get("iconLists", []) for fi in page)
+
+
+def _raw_is_widget(item: Any) -> bool:
+    return isinstance(item, dict) and (
+        item.get("iconType") == "widget"
+        or item.get("elementType") == "widget"
+        or bool(item.get("elements"))
+    )
+
+
+def _raw_app_items(raw) -> dict[str, Any]:
+    """Every app item in a raw state by bundle ID, from the dock, pages and folders."""
+    items: dict[str, Any] = {}
+    all_pages = raw if isinstance(raw, list) else ([raw.get("buttonBar", [])] + raw.get("iconLists", []))
+    for page in all_pages:
+        for item in page:
+            if _raw_is_widget(item):
+                continue
+            if _raw_is_folder(item):
+                for folder_page in item.get("iconLists", []):
+                    for fi in folder_page:
+                        fi_bid = _raw_find_app(fi)
+                        if fi_bid and not _raw_is_widget(fi):
+                            items.setdefault(fi_bid, fi)
+                continue
+            bid = _raw_find_app(item)
+            if bid:
+                items.setdefault(bid, item)
+    return items
+
+
 def _raw_remove_apps(raw, bundle_ids: list[str]) -> None:
     """Remove apps by bundle ID from all pages, folders, and dock."""
     bid_set = set(bundle_ids)
@@ -204,8 +246,12 @@ def _raw_remove_apps(raw, bundle_ids: list[str]) -> None:
             page.pop(i)
 
 
-def _raw_extract_apps(raw, bundle_ids: list[str]) -> list:
-    """Remove apps from the raw state and return the raw items."""
+def _raw_extract_apps(raw, bundle_ids: list[str], originals: dict[str, Any] | None = None) -> list:
+    """Remove apps from the raw state and return the raw items.
+
+    An app that is no longer in the state comes back as its item in ``originals``
+    when it has one, and otherwise as a minimal app item.
+    """
     bid_set = set(bundle_ids)
     extracted_by_bid: dict[str, Any] = {}
 
@@ -227,7 +273,10 @@ def _raw_extract_apps(raw, bundle_ids: list[str]) -> list:
 
     extracted = []
     for bid in bundle_ids:
-        extracted.append(extracted_by_bid.get(bid, {"bundleIdentifier": bid, "iconType": "app"}))
+        item = extracted_by_bid.get(bid)
+        if item is None and originals and bid in originals:
+            item = copy.deepcopy(originals[bid])
+        extracted.append(item if item is not None else {"bundleIdentifier": bid, "iconType": "app"})
 
     return extracted
 

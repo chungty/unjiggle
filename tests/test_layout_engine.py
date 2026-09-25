@@ -383,3 +383,59 @@ class TestApplyOperations:
 
         assert len(result["iconLists"]) == 2
         assert result["iconLists"][1][0]["displayName"] == "Overflow"
+
+
+class TestWritePathMatchesPreview:
+    def test_apps_brought_back_after_a_compact_keep_their_original_items(self):
+        from unjiggle.device import parse_layout_state
+
+        raw = [
+            [{"bundleIdentifier": "com.dock", "iconType": "app"}],
+            [
+                {"bundleIdentifier": "com.a", "iconType": "app", "displayName": "A"},
+                {"bundleIdentifier": "com.b", "iconType": "app", "displayName": "B", "extra": 1},
+            ],
+            [{"bundleIdentifier": "com.c", "iconType": "app", "displayName": "C"}],
+        ]
+        layout = parse_layout_state(raw)
+        ops = [
+            LayoutOperation(action="compact_to_single_page", bundle_ids=["com.a"]),
+            LayoutOperation(action="create_folder", bundle_ids=["com.b", "com.c"], folder_name="F"),
+        ]
+        result = apply_operations(layout, ops)
+
+        assert result[0] == raw[0]
+        folder = result[1][1]
+        assert folder["displayName"] == "F"
+        assert folder["iconLists"] == [[raw[1][1], raw[2][0]]]
+        assert raw[1][1] == {"bundleIdentifier": "com.b", "iconType": "app", "displayName": "B", "extra": 1}
+
+    def test_folders_that_the_operations_empty_are_removed(self):
+        from unjiggle.analyzer import preview_operations
+
+        raw = _make_raw_layout()
+        layout = _make_layout_with_raw(raw)
+        social = ["com.facebook.Facebook", "com.twitter.twitter", "com.instagram.Instagram"]
+        ops = [LayoutOperation(action="move_to_app_library", bundle_ids=social)]
+        result = apply_operations(layout, ops)
+
+        assert not any(isinstance(item, dict) for item in result["iconLists"][0])
+        preview = preview_operations(layout, ops)
+        assert [len(page) for page in preview.pages] == [len(page) for page in result["iconLists"]]
+
+    def test_app_library_moves_on_an_ios26_state_match_the_preview(self):
+        from unjiggle.analyzer import preview_operations
+        from unjiggle.device import parse_layout_state
+
+        raw = [
+            [{"bundleIdentifier": "com.dock", "iconType": "app"}],
+            [{"bundleIdentifier": "com.a", "iconType": "app"}, {"bundleIdentifier": "com.b", "iconType": "app"}],
+        ]
+        layout = parse_layout_state(raw)
+        ops = [LayoutOperation(action="move_to_app_library", bundle_ids=["com.b"])]
+        written = parse_layout_state(apply_operations(layout, ops))
+        preview = preview_operations(layout, ops)
+
+        # The iOS 26 state has no ignored list, so the preview records nothing either.
+        assert preview.ignored == written.ignored == []
+        assert preview.all_bundle_ids == written.all_bundle_ids == ["com.dock", "com.a"]
