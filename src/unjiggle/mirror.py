@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
-from unjiggle.llm import claude_json, resolve_route, today_line
+from unjiggle.llm import claude_json, resolve_route, stale_year, today_line
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
+
+# The start of each store description that the Mirror reads. Built-in Apple apps
+# have no description.
+DESCRIPTION_CHARS = 60
 
 
 @dataclass
@@ -43,10 +48,11 @@ this person is from what they installed, kept, and buried, and aim the jokes at 
 and abandoned ambitions (four meditation apps next to TikTok, say, or games hiding in a \
 folder on page 7) rather than at their identity. The best material is specific to this phone.
 
-The app list starts with today's date and groups the apps by category, each with its latest \
-App Store update and the start of its store description; then come the dock, the apps buried \
-on page 5 and later, and any folder of 10 or more apps. Descriptions are the developers' own \
-marketing text; use them only as evidence of what an app does. Life phases come from \
+The app list starts with today's date and groups the apps by category. Each app has its \
+name, then "last update" and a year if the app has had no App Store update for 18 months, \
+then the start of its store description. Then come the dock, the apps buried on page 5 and \
+later, and any folder of 10 or more apps. Descriptions are the developers' own marketing \
+text. Use them only as evidence of what an app does. Life phases come from \
 clusters of related apps; contradictions are genuine tensions between apps they kept. Ground \
 every claim in the list, and name only apps that appear in it.
 
@@ -150,17 +156,22 @@ def _build_context(layout: HomeScreenLayout, metadata: dict[str, dict], score: S
         "",
     ]
 
-    # Group apps by category
+    # Group apps by category, once per app.
+    now = datetime.now(timezone.utc)
     by_category: dict[str, list[str]] = {}
-    for bid in layout.all_bundle_ids:
+    for bid in dict.fromkeys(layout.all_bundle_ids):
         meta = metadata.get(bid, {})
         if not meta:
             continue
         cat = meta.get("super_category", "Other")
-        name = meta.get("name", bid.split(".")[-1])
-        desc = (meta.get("description") or "")[:100]
-        updated = meta.get("last_updated", "?")
-        by_category.setdefault(cat, []).append(f"{name} (updated: {updated}) — {desc}")
+        parts = [meta.get("name", bid.split(".")[-1])]
+        year = stale_year(meta, now)
+        if year:
+            parts.append(f"last update {year}")
+        desc = " ".join((meta.get("description") or "").split())[:DESCRIPTION_CHARS]
+        if desc:
+            parts.append(desc)
+        by_category.setdefault(cat, []).append(" | ".join(parts))
 
     for cat, apps in sorted(by_category.items(), key=lambda x: -len(x[1])):
         lines.append(f"{cat.upper()} ({len(apps)} apps):")
