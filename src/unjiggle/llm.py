@@ -21,7 +21,12 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+# Layout analysis and the AI Stylist plan changes to the phone, so they use the
+# strongest model by default.
 DEFAULT_ANTHROPIC_MODEL = "claude-opus-5-5"
+# The Personality Mirror and the App Obituary only write short text about the phone.
+# Claude Sonnet 5 writes it well and answers sooner.
+DEFAULT_ANTHROPIC_WRITING_MODEL = "claude-sonnet-5"
 DEFAULT_OPENAI_MODEL = "gpt-4.1"
 
 # Claude Opus 5.5 always thinks, and thinking counts toward max_tokens, so the
@@ -92,7 +97,7 @@ class LLMUnsupportedModelError(LLMError):
         super().__init__(
             f"{model} does not support structured outputs, which Unjiggle's AI features "
             f"need. Use the default ({DEFAULT_ANTHROPIC_MODEL}), or Claude Haiku 4.5, "
-            "Sonnet 4.5, Opus 4.1 or a newer model."
+            "Sonnet 4.5, Opus 4.5 or a newer model."
         )
 
 
@@ -138,13 +143,19 @@ def resolve_api_key(provider: str, api_key: str | None) -> str | None:
 
 
 def resolve_route(
-    api_key: str | None, model: str | None = None, provider: str = "auto",
+    api_key: str | None,
+    model: str | None = None,
+    provider: str = "auto",
+    anthropic_default: str = DEFAULT_ANTHROPIC_MODEL,
 ) -> tuple[str, str | None, str]:
-    """Return ``(provider, api_key, model)`` for one AI request, filling in defaults."""
+    """Return ``(provider, api_key, model)`` for one AI request, filling in defaults.
+
+    ``anthropic_default`` is the feature's Claude model when no model is given.
+    """
     provider = resolve_provider(api_key, model, provider)
     api_key = resolve_api_key(provider, api_key)
     if not model:
-        model = DEFAULT_ANTHROPIC_MODEL if provider == "anthropic" else DEFAULT_OPENAI_MODEL
+        model = anthropic_default if provider == "anthropic" else DEFAULT_OPENAI_MODEL
     return provider, api_key, model
 
 

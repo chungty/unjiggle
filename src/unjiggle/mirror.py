@@ -6,7 +6,13 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from unjiggle.llm import claude_json, resolve_route, stale_year, today_line
+from unjiggle.llm import (
+    DEFAULT_ANTHROPIC_WRITING_MODEL,
+    claude_json,
+    resolve_route,
+    stale_year,
+    today_line,
+)
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
 # The start of each store description that the Mirror reads. Built-in Apple apps
@@ -225,7 +231,7 @@ def generate_mirror(
         return _mirror_rule_based(layout, metadata, score)
 
     context = _build_context(layout, metadata, score)
-    provider, api_key, model = resolve_route(api_key, model, provider)
+    provider, api_key, model = resolve_route(api_key, model, provider, DEFAULT_ANTHROPIC_WRITING_MODEL)
 
     if provider == "openai":
         return _mirror_openai(context, api_key, model)

@@ -149,21 +149,25 @@ def _dead_app_layout():
     return layout, metadata
 
 
-def _assert_opus_request(request, schema, effort):
+def _assert_opus_request(request, schema, effort, model="claude-opus-5-5"):
     body = request.body
-    assert body["model"] == "claude-opus-5-5"
+    assert body["model"] == model
     assert body["max_tokens"] >= 16000
     # Opus 5.5 rejects forced tool use; the JSON comes from structured outputs.
     assert "tools" not in body
     assert "tool_choice" not in body
-    # Thinking is always on and cannot be disabled; effort is the control.
+    # Thinking is left at its adaptive default; effort is the control.
     assert "thinking" not in body
     assert body["output_config"] == {
         "effort": effort,
         "format": {"type": "json_schema", "schema": schema},
     }
-    assert body["fallbacks"] == "default"
-    assert llm.FALLBACK_BETA in request.headers["anthropic-beta"]
+    if model.startswith("claude-opus-5"):
+        assert body["fallbacks"] == "default"
+        assert llm.FALLBACK_BETA in request.headers["anthropic-beta"]
+    else:
+        assert "fallbacks" not in body
+        assert "anthropic-beta" not in request.headers
     assert len(body["messages"]) == 1
     assert body["messages"][0]["role"] == "user"
 
@@ -204,18 +208,26 @@ def test_intent_request_targets_opus_5_5_with_structured_output(
     assert ops[0].bundle_ids == ["com.apple.weather"]
 
 
-def test_mirror_request_targets_opus_5_5_at_low_effort(
+def test_mirror_request_targets_sonnet_5_at_low_effort(
     fake_claude, chaotic_layout, sample_metadata,
 ):
     fake_claude.reply = _json_reply(MIRROR_REPLY)
     score = compute_score(chaotic_layout, sample_metadata)
     result = generate_mirror(chaotic_layout, sample_metadata, score, api_key=ANTHROPIC_KEY)
 
-    _assert_opus_request(fake_claude.last, MIRROR_TOOL["input_schema"], "low")
+    _assert_opus_request(fake_claude.last, MIRROR_TOOL["input_schema"], "low", model="claude-sonnet-5")
     assert result.one_line == "A phone."
 
 
-def test_obituary_request_targets_opus_5_5_at_low_effort(fake_claude, no_screen_time):
+def test_mirror_model_override_passes_through(fake_claude, chaotic_layout, sample_metadata):
+    fake_claude.reply = _json_reply(MIRROR_REPLY)
+    score = compute_score(chaotic_layout, sample_metadata)
+    generate_mirror(chaotic_layout, sample_metadata, score, api_key=ANTHROPIC_KEY, model="claude-opus-5-5")
+
+    _assert_opus_request(fake_claude.last, MIRROR_TOOL["input_schema"], "low")
+
+
+def test_obituary_request_targets_sonnet_5_at_low_effort(fake_claude, no_screen_time):
     layout, metadata = _dead_app_layout()
     fake_claude.reply = _json_reply({
         "obituaries": [{
@@ -228,7 +240,7 @@ def test_obituary_request_targets_opus_5_5_at_low_effort(fake_claude, no_screen_
     })
     result = generate_obituaries(layout, metadata, api_key=ANTHROPIC_KEY)
 
-    _assert_opus_request(fake_claude.last, OBITUARY_TOOL["input_schema"], "low")
+    _assert_opus_request(fake_claude.last, OBITUARY_TOOL["input_schema"], "low", model="claude-sonnet-5")
     assert [o.bundle_id for o in result.obituaries] == ["com.example.dead0"]
     assert result.obituaries[0].app_name == "Dead0"
 
@@ -438,6 +450,16 @@ def test_explicit_provider_wins():
 def test_default_models():
     assert llm.resolve_route(ANTHROPIC_KEY) == ("anthropic", ANTHROPIC_KEY, "claude-opus-5-5")
     assert llm.resolve_route(OPENAI_KEY) == ("openai", OPENAI_KEY, "gpt-4.1")
+    # The Mirror and the Obituary pass their own Claude default. OpenAI keeps its one model.
+    writing = llm.DEFAULT_ANTHROPIC_WRITING_MODEL
+    assert writing == "claude-sonnet-5"
+    assert llm.resolve_route(ANTHROPIC_KEY, None, "auto", writing) == ("anthropic", ANTHROPIC_KEY, writing)
+    assert llm.resolve_route(OPENAI_KEY, None, "auto", writing) == ("openai", OPENAI_KEY, "gpt-4.1")
+
+
+def test_unsupported_model_advice_names_models_that_are_still_served():
+    message = str(llm.LLMUnsupportedModelError("claude-opus-4-0"))
+    assert "Opus 4.5" in message and "Opus 4.1" not in message
 
 
 def test_openai_model_with_both_keys_set_uses_the_openai_key(monkeypatch):

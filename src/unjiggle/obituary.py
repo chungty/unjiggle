@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from unjiggle.llm import claude_json, resolve_route, today_line
+from unjiggle.llm import DEFAULT_ANTHROPIC_WRITING_MODEL, claude_json, resolve_route, today_line
 from unjiggle.models import HomeScreenLayout
 
 
@@ -251,7 +251,7 @@ def generate_obituaries(
         return _obituary_rule_based(dead_apps)
 
     context = _build_context(dead_apps, layout, metadata)
-    provider, api_key, model = resolve_route(api_key, model, provider)
+    provider, api_key, model = resolve_route(api_key, model, provider, DEFAULT_ANTHROPIC_WRITING_MODEL)
 
     if provider == "openai":
         return _obituary_openai(context, dead_apps, api_key, model)
