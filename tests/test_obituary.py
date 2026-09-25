@@ -142,3 +142,43 @@ def test_stale_social_app_on_late_page_still_flagged():
     dead = identify_dead_apps(layout, metadata)
     bids = [d["bundle_id"] for d in dead]
     assert "com.old.social" in bids
+
+
+def test_context_numbers_the_dead_apps_without_bundle_ids():
+    from unjiggle.obituary import _build_context
+
+    dead = [
+        {"bundle_id": "com.example.a", "name": "Alpha", "category": "Games",
+         "description": "Fun.\n\nMore fun.", "last_updated": "2019-01-01T00:00:00Z",
+         "page": 6, "in_folder": True, "folder_name": "Old", "reasons": ["buried on page 6"]},
+        {"bundle_id": "com.example.b", "name": "Beta", "category": "Travel", "description": "",
+         "last_updated": None, "page": 4, "in_folder": False, "reasons": []},
+    ]
+    layout = HomeScreenLayout(dock=[_app("com.example.live")], pages=[[_app("com.example.a")]])
+    metadata = {"com.example.live": _meta("Live", "Social")}
+    context = _build_context(dead, layout, metadata)
+
+    assert '\n1. Alpha | Games | last update 2019 | page 6, folder "Old" | buried on page 6\n   Fun. More fun.' in context
+    assert "\n2. Beta | Travel | last update unknown | page 4 | none\n" in context
+    assert "com.example" not in context
+    assert context.endswith("ACTIVE APPS (dock + page 1) for 'survived by' references: Live [Social]")
+
+
+def test_obituaries_are_matched_by_their_number():
+    from unjiggle.obituary import _parse_obituaries
+
+    dead = [{"bundle_id": "com.example.a", "name": "A"}, {"bundle_id": "com.example.b", "name": "B"}]
+    result = _parse_obituaries({
+        "obituaries": [
+            {"app": 2, "born": "2015", "eulogy": "second", "cause_of_death": "x"},
+            {"app": 3, "born": "2015", "eulogy": "out of range", "cause_of_death": "x"},
+            {"app": 0, "born": "2015", "eulogy": "zero", "cause_of_death": "x"},
+            {"app": True, "born": "2015", "eulogy": "not a number", "cause_of_death": "x"},
+            {"app": 2, "born": "2015", "eulogy": "again", "cause_of_death": "x"},
+            {"app": 1, "born": "2014", "eulogy": "first", "cause_of_death": "x"},
+        ],
+        "graveyard_summary": "Two.",
+    }, dead)
+    assert [(o.bundle_id, o.app_name, o.eulogy, o.born) for o in result.obituaries] == [
+        ("com.example.b", "B", "second", "2015"), ("com.example.a", "A", "first", "2014"),
+    ]

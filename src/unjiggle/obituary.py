@@ -152,13 +152,13 @@ The owner reads them and often shares a card showing the first three. The style 
 newspaper obituary, and the humor comes from the universal experience of downloading an app \
 with big ambitions and never opening it again.
 
-The list starts with today's date. Each dead app comes with its bundle ID, category, the \
-start of its App Store description, when it was last updated, where it is buried, and the \
-signals that it is dead. Descriptions are the developers' own marketing text; use them only \
-as evidence of what the app did. At the end are the owner's active apps, from the dock and \
-page 1.
+The list starts with today's date. Each dead app has a number, then its name, category, \
+the year of its last App Store update, where it is buried, and the signals that it is dead. \
+The next line gives the start of its App Store description. Descriptions are the \
+developers' own marketing text. Use them only as evidence of what the app did. At the end \
+are the owner's active apps, from the dock and page 1.
 
-Write one obituary per listed app, in the order given. Make each one specific to what the \
+Write one obituary per listed app, in the order given, and identify each app by its number. Make each one specific to what the \
 app was for and why this person probably downloaded it, and draw the joke from that app's \
 own details rather than from a stock line. Name a survivor when one of their active apps or \
 a built-in iPhone feature obviously took over the job. A cause of death should be funny and \
@@ -187,11 +187,11 @@ OBITUARY_TOOL = {
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["bundle_id", "born", "eulogy", "cause_of_death"],
+                    "required": ["app", "born", "eulogy", "cause_of_death"],
                     "properties": {
-                        "bundle_id": {
-                            "type": "string",
-                            "description": "Copied exactly from the app's APP line.",
+                        "app": {
+                            "type": "integer",
+                            "description": "The app's number in the list.",
                         },
                         "born": {
                             "type": "string",
@@ -391,31 +391,28 @@ def _build_context(dead_apps: list[dict], layout: HomeScreenLayout, metadata: di
         "",
     ]
 
-    for app in dead_apps:
-        lines.append(f"APP: {app['name']} ({app['bundle_id']})")
-        lines.append(f"  Category: {app['category']}")
-        lines.append(f"  Description: {app['description']}")
-        lines.append(f"  Last updated: {app.get('last_updated') or 'unknown'}")
-        loc = f"Page {app['page']}"
+    for number, app in enumerate(dead_apps, start=1):
+        updated = str(app.get("last_updated") or "")[:4] or "unknown"
+        loc = f"page {app['page']}"
         if app.get("in_folder"):
-            loc += f", in folder \"{app.get('folder_name', '?')}\""
-        lines.append(f"  Location: {loc}")
-        lines.append(f"  Death signals: {', '.join(app['reasons'])}")
-        lines.append("")
+            loc += f", folder \"{app.get('folder_name', '?')}\""
+        signals = ", ".join(app["reasons"]) or "none"
+        lines.append(
+            f"{number}. {app['name']} | {app['category']} | last update {updated} | {loc} | {signals}"
+        )
+        description = " ".join((app.get("description") or "").split())
+        if description:
+            lines.append(f"   {description}")
 
     # Active apps for "survived by" context
-    lines.append("ACTIVE APPS (dock + page 1) for 'survived by' references:")
-    for item in layout.dock:
+    active = []
+    for item in [*layout.dock, *(layout.pages[0] if layout.pages else [])]:
         if item.is_app:
             meta = metadata.get(item.app.bundle_id, {})
             if meta:
-                lines.append(f"  {meta.get('name', item.app.bundle_id)} [{meta.get('super_category', '?')}]")
-    if layout.pages:
-        for item in layout.pages[0]:
-            if item.is_app:
-                meta = metadata.get(item.app.bundle_id, {})
-                if meta:
-                    lines.append(f"  {meta.get('name', item.app.bundle_id)} [{meta.get('super_category', '?')}]")
+                active.append(f"{meta.get('name', item.app.bundle_id)} [{meta.get('super_category', '?')}]")
+    lines.append("")
+    lines.append("ACTIVE APPS (dock + page 1) for 'survived by' references: " + ", ".join(active))
 
     return "\n".join(lines)
 
@@ -468,14 +465,15 @@ def _obituary_openai(context: str, dead_apps: list[dict], api_key: str | None, m
 
 def _parse_obituaries(data: dict, dead_apps: list[dict]) -> ObituaryResult:
     dead_by_bid = {a["bundle_id"]: a for a in dead_apps}
-    # Bundle IDs are matched ignoring surrounding whitespace and letter case, and
-    # each obituary carries the candidate's own ID.
+    # The model names each app by its number in the list. A reply that names the
+    # app by bundle ID also works: the ID is matched ignoring surrounding
+    # whitespace and letter case. Each obituary carries the candidate's own ID.
     canonical_bid = {bid.casefold(): bid for bid in dead_by_bid}
 
     obituaries = []
     seen: set[str] = set()
     for obit in data.get("obituaries", []):
-        bid = canonical_bid.get(str(obit.get("bundle_id") or "").strip().casefold())
+        bid = _candidate_bundle_id(obit, dead_apps, canonical_bid)
         # Only the candidates we sent, once each: clients key obituaries by bundle ID.
         if bid is None or bid in seen:
             continue
@@ -496,3 +494,10 @@ def _parse_obituaries(data: dict, dead_apps: list[dict]) -> ObituaryResult:
         obituaries=obituaries,
         graveyard_summary=data.get("graveyard_summary", f"{len(dead_apps)} apps that time forgot."),
     )
+
+
+def _candidate_bundle_id(obit: dict, dead_apps: list[dict], canonical_bid: dict[str, str]) -> str | None:
+    number = obit.get("app")
+    if isinstance(number, int) and not isinstance(number, bool):
+        return dead_apps[number - 1]["bundle_id"] if 1 <= number <= len(dead_apps) else None
+    return canonical_bid.get(str(obit.get("bundle_id") or "").strip().casefold())

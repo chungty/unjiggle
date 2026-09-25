@@ -219,7 +219,8 @@ def test_obituary_request_targets_opus_5_5_at_low_effort(fake_claude, no_screen_
     layout, metadata = _dead_app_layout()
     fake_claude.reply = _json_reply({
         "obituaries": [{
-            "bundle_id": "com.example.dead0",
+            "app": 1,
+            "born": "2016",
             "cause_of_death": "Google Translate.",
             "eulogy": "It tried.",
         }],
@@ -530,7 +531,8 @@ def test_mirror_and_obituary_contexts_start_with_today(
     generate_obituaries(layout, metadata, api_key=ANTHROPIC_KEY)
     user = fake_claude.last.body["messages"][0]["content"]
     assert "<graveyard>\nTODAY: " in user
-    assert "APP: Dead0 (com.example.dead0)" in user
+    assert "\n1. Dead0 | Education | last update 2019 | page 6 | " in user
+    assert "com.example.dead0" not in user
 
 
 def test_observations_are_ordered_by_track(chaotic_layout):
