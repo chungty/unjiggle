@@ -75,27 +75,17 @@ def _parse_item(raw_item) -> LayoutItem | None:
 
     # Widget (standalone or in smart stack)
     if icon_type == "widget" or raw_item.get("elementType") == "widget":
-        size_str = raw_item.get("gridSize", "small")
-        try:
-            size = WidgetSize(size_str)
-        except ValueError:
-            size = WidgetSize.SMALL
         return LayoutItem(widget=WidgetItem(
             container_bundle_id=raw_item.get("containerBundleIdentifier", bundle_id),
-            grid_size=size,
+            grid_size=WidgetSize.parse(raw_item.get("gridSize")),
             raw=raw_item,
         ))
 
     # Smart Stack (has elements array with multiple widgets)
     if raw_item.get("elements") and raw_item.get("iconType") == "custom":
-        size_str = raw_item.get("gridSize", "small")
-        try:
-            size = WidgetSize(size_str)
-        except ValueError:
-            size = WidgetSize.SMALL
         return LayoutItem(widget=WidgetItem(
             container_bundle_id="smartstack",
-            grid_size=size,
+            grid_size=WidgetSize.parse(raw_item.get("gridSize")),
             raw=raw_item,
         ))
 

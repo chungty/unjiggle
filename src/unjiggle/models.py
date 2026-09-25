@@ -7,14 +7,26 @@ from enum import Enum
 
 
 class WidgetSize(Enum):
-    SMALL = "small"       # 2x2
-    MEDIUM = "medium"     # 4x2
-    EXTRA_LARGE = "extraLarge"  # 4x4
+    SMALL = "small"       # 2x2 icons
+    MEDIUM = "medium"     # 4x2 icons
+    LARGE = "large"       # 4x4 icons: the largest widget on iPhone
+    EXTRA_LARGE = "extraLarge"  # the iPad family; counted as the largest iPhone size
 
     @property
     def slots(self) -> int:
         """The icon slots that the widget takes on a page of 24 (6 rows of 4)."""
-        return {"small": 4, "medium": 8, "extraLarge": 16}[self.value]
+        return {"small": 4, "medium": 8, "large": 16, "extraLarge": 16}[self.value]
+
+    @classmethod
+    def parse(cls, value) -> WidgetSize:
+        """The size for an icon state gridSize. A size that is not known counts as the
+        largest, so that a page never gets more items than it can show."""
+        if value is None:
+            return cls.SMALL
+        try:
+            return cls(value)
+        except ValueError:
+            return cls.LARGE
 
 
 @dataclass
