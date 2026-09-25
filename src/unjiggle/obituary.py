@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from unjiggle.llm import DEFAULT_ANTHROPIC_WRITING_MODEL, claude_json, resolve_route, today_line
+from unjiggle.llm import (
+    DEFAULT_ANTHROPIC_WRITING_MODEL,
+    claude_json,
+    openai_function_json,
+    resolve_route,
+    today_line,
+)
 from unjiggle.models import HomeScreenLayout
 
 
@@ -455,12 +460,7 @@ def _obituary_openai(context: str, dead_apps: list[dict], api_key: str | None, m
         tools=[openai_tool],
         tool_choice={"type": "function", "function": {"name": "submit_obituaries"}},
     )
-    for choice in response.choices:
-        if choice.message.tool_calls:
-            for tc in choice.message.tool_calls:
-                if tc.function.name == "submit_obituaries":
-                    return _parse_obituaries(json.loads(tc.function.arguments), dead_apps)
-    raise RuntimeError("OpenAI did not return obituaries")
+    return _parse_obituaries(openai_function_json(response, "submit_obituaries"), dead_apps)
 
 
 def _parse_obituaries(data: dict, dead_apps: list[dict]) -> ObituaryResult:
@@ -496,8 +496,22 @@ def _parse_obituaries(data: dict, dead_apps: list[dict]) -> ObituaryResult:
     )
 
 
+def _app_number(value) -> int | None:
+    """The candidate number in an obituary. Claude's structured output gives an
+    integer. The OpenAI function call is not strict and can give "3" or 3.0."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        number = float(str(value).strip())
+    except ValueError:
+        return None
+    return int(number) if number.is_integer() else None
+
+
 def _candidate_bundle_id(obit: dict, dead_apps: list[dict], canonical_bid: dict[str, str]) -> str | None:
-    number = obit.get("app")
-    if isinstance(number, int) and not isinstance(number, bool):
+    number = _app_number(obit.get("app"))
+    if number is not None:
         return dead_apps[number - 1]["bundle_id"] if 1 <= number <= len(dead_apps) else None
     return canonical_bid.get(str(obit.get("bundle_id") or "").strip().casefold())

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from unjiggle.llm import (
     DEFAULT_ANTHROPIC_WRITING_MODEL,
     claude_json,
+    openai_function_json,
     resolve_route,
     stale_year,
     today_line,
@@ -380,12 +380,7 @@ def _mirror_openai(context: str, api_key: str | None, model: str) -> MirrorResul
         tools=[openai_tool],
         tool_choice={"type": "function", "function": {"name": "submit_mirror"}},
     )
-    for choice in response.choices:
-        if choice.message.tool_calls:
-            for tc in choice.message.tool_calls:
-                if tc.function.name == "submit_mirror":
-                    return _parse_mirror(json.loads(tc.function.arguments))
-    raise RuntimeError("OpenAI did not return a submit_mirror function call")
+    return _parse_mirror(openai_function_json(response, "submit_mirror"))
 
 
 def _unique_by(items: list[dict], key: str) -> list[dict]:

@@ -172,14 +172,17 @@ def test_json_render_transform_requires_backup(monkeypatch, clean_layout, sample
     result = CliRunner().invoke(json_group, ["render", "--card", "transform"])
 
     assert result.exit_code == 1
-    assert json.loads(result.output)["error"] == "--backup is required for transform cards."
+    assert json.loads(result.stdout)["error"] == "--backup is required for transform cards."
+    # The message also goes to stderr, for a client that reads only stderr on failure.
+    assert result.stderr.strip() == "--backup is required for transform cards."
 
 
 def test_json_apply_rejects_missing_operations():
     result = CliRunner().invoke(json_group, ["apply"], input=json.dumps({"operations": []}))
 
     assert result.exit_code == 1
-    assert json.loads(result.output)["error"] == 'No operations provided. Expected {"operations": [...]}'
+    assert json.loads(result.stdout)["error"] == 'No operations provided. Expected {"operations": [...]}'
+    assert result.stderr.strip() == 'No operations provided. Expected {"operations": [...]}'
 
 
 def test_json_apply_applies_operations_and_reports_backup(monkeypatch, clean_layout):

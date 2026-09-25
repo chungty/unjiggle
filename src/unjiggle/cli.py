@@ -1051,8 +1051,12 @@ def _json_out(data: dict) -> None:
 
 
 def _json_err(message: str) -> None:
-    """Print a JSON error to stdout and exit with code 1."""
+    """Print a JSON error to stdout, and the message to stderr, then exit with code 1.
+
+    A client that reads only stderr after a non-zero exit still gets the message.
+    """
     click.echo(_json.dumps({"error": message}, ensure_ascii=False))
+    click.echo(message, err=True)
     sys.exit(1)
 
 

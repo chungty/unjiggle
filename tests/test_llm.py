@@ -491,9 +491,8 @@ class FakeOpenAI:
         def create(**kwargs):
             self.calls.append(kwargs)
             name = kwargs["tool_choice"]["function"]["name"]
-            call = SimpleNamespace(function=SimpleNamespace(
-                name=name, arguments=json.dumps(self.arguments),
-            ))
+            arguments = self.arguments if isinstance(self.arguments, str) else json.dumps(self.arguments)
+            call = SimpleNamespace(function=SimpleNamespace(name=name, arguments=arguments))
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[call]))])
 
         return SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
@@ -526,6 +525,42 @@ def test_openai_intent_path_returns_operations(monkeypatch, chaotic_layout, samp
     assert call["model"] == "gpt-4.1"
     assert call["tools"][0]["function"]["parameters"] == INTENT_TOOL["input_schema"]
     assert [op.bundle_ids for op in ops] == [["com.apple.weather"]]
+
+
+@pytest.mark.parametrize(("arguments", "message"), [
+    ("{not json", "malformed JSON"),
+    ("[1, 2]", "not an object"),
+])
+def test_openai_replies_that_are_not_a_json_object_raise_llm_output_error(
+    monkeypatch, chaotic_layout, sample_metadata, arguments, message,
+):
+    monkeypatch.setitem(sys.modules, "openai", FakeOpenAI(arguments))
+    score = compute_score(chaotic_layout, sample_metadata)
+    for call in (
+        lambda: analyze(chaotic_layout, sample_metadata, score, api_key=OPENAI_KEY),
+        lambda: plan_intent_operations("calm", chaotic_layout, sample_metadata, score, api_key=OPENAI_KEY),
+        lambda: generate_mirror(chaotic_layout, sample_metadata, score, api_key=OPENAI_KEY),
+    ):
+        with pytest.raises(llm.LLMOutputError, match=message):
+            call()
+
+
+def test_an_openai_reply_without_the_function_call_raises_llm_output_error():
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=None))])
+    with pytest.raises(llm.LLMOutputError, match="did not return a submit_mirror function call"):
+        llm.openai_function_json(response, "submit_mirror")
+
+
+def test_go_falls_back_to_the_offline_archetype_on_a_malformed_openai_reply(
+    monkeypatch, tmp_path, chaotic_layout, sample_metadata,
+):
+    monkeypatch.setitem(sys.modules, "openai", FakeOpenAI("{not json"))
+    result = _run_go(monkeypatch, tmp_path, chaotic_layout, sample_metadata, key=OPENAI_KEY)
+
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())
+    assert "AI analysis unavailable: OpenAI returned malformed JSON for submit_analysis." in output
+    assert list((tmp_path / "reports").glob("report-*.html"))
 
 
 # --- prompt inputs and output contracts ------------------------------------------------
@@ -608,6 +643,22 @@ def test_obituaries_keep_only_candidates_once_each():
         ("com.example.a", "first"), ("com.example.b", "second"),
     ]
     assert result.total_dead == 2
+
+
+@pytest.mark.parametrize("number", [2, "2", " 2 ", 2.0, "2.0"])
+def test_obituary_numbers_from_a_loose_function_call_still_match(number):
+    dead_apps = [{"bundle_id": "com.example.a", "name": "A"}, {"bundle_id": "com.example.b", "name": "B"}]
+    result = _parse_obituaries({"obituaries": [{"app": number, "eulogy": "e", "cause_of_death": "x"}],
+                                "graveyard_summary": "One."}, dead_apps)
+    assert [o.bundle_id for o in result.obituaries] == ["com.example.b"]
+
+
+@pytest.mark.parametrize("number", [0, 3, "two", 1.5, True, None])
+def test_obituary_numbers_that_name_no_candidate_are_dropped(number):
+    dead_apps = [{"bundle_id": "com.example.a", "name": "A"}, {"bundle_id": "com.example.b", "name": "B"}]
+    result = _parse_obituaries({"obituaries": [{"app": number, "eulogy": "e", "cause_of_death": "x"}],
+                                "graveyard_summary": "None."}, dead_apps)
+    assert result.obituaries == []
 
 
 def test_obituary_bundle_ids_match_despite_whitespace_or_case():
@@ -713,10 +764,11 @@ def test_json_suggest_intent_reports_a_refusal_as_json_error(fake_claude, phone)
     result = _json_suggest_intent()
 
     assert result.exit_code == 1
-    assert "declined" in json.loads(result.output)["error"]
+    assert "declined" in json.loads(result.stdout)["error"]
+    assert result.stderr.startswith("Intent transformation failed: Claude declined this request")
 
 
-def _run_go(monkeypatch, tmp_path, chaotic_layout, sample_metadata, *args):
+def _run_go(monkeypatch, tmp_path, chaotic_layout, sample_metadata, *args, key=ANTHROPIC_KEY):
     import webbrowser
 
     from click.testing import CliRunner
@@ -733,7 +785,7 @@ def _run_go(monkeypatch, tmp_path, chaotic_layout, sample_metadata, *args):
     monkeypatch.setattr(webbrowser, "open", lambda url: True)
     monkeypatch.setattr(telemetry, "prompt_analytics_opt_in", lambda console: None)
     monkeypatch.setattr(telemetry, "send_event", lambda *args, **kwargs: None)
-    return CliRunner().invoke(cli.main, ["go", "--api-key", ANTHROPIC_KEY, *args])
+    return CliRunner().invoke(cli.main, ["go", "--api-key", key, *args])
 
 
 def test_go_falls_back_to_the_offline_archetype_when_claude_declines(

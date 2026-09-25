@@ -7,10 +7,9 @@ Two-pass architecture:
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 
-from unjiggle.llm import claude_json, resolve_route, today_line
+from unjiggle.llm import claude_json, openai_function_json, resolve_route, today_line
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
 
@@ -315,15 +314,7 @@ def _analyze_openai(layout, context, api_key, model) -> AnalysisResult:
         tool_choice={"type": "function", "function": {"name": "submit_analysis"}},
     )
 
-    # Extract function call result
-    for choice in response.choices:
-        if choice.message.tool_calls:
-            for tc in choice.message.tool_calls:
-                if tc.function.name == "submit_analysis":
-                    data = json.loads(tc.function.arguments)
-                    return _parse_result(data, layout)
-
-    raise RuntimeError("OpenAI did not return a submit_analysis function call")
+    return _parse_result(openai_function_json(response, "submit_analysis"), layout)
 
 
 def _parse_operations(ops_data: list[dict], valid_bundle_ids: set[str]) -> list[LayoutOperation]:

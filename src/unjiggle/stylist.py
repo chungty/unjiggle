@@ -33,7 +33,7 @@ from unjiggle.analyzer import (
     preview_operations,
 )
 from unjiggle.itunes import SYSTEM_APP_NAMES
-from unjiggle.llm import claude_json, resolve_route, stale_year, today_line
+from unjiggle.llm import claude_json, openai_function_json, resolve_route, stale_year, today_line
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
 # The size of a widget in the layout that the model reads, by its slots.
@@ -1142,8 +1142,4 @@ def _plan_openai(user: str, api_key: str | None, model: str) -> dict:
         tools=[openai_tool],
         tool_choice={"type": "function", "function": {"name": INTENT_TOOL["name"]}},
     )
-    for choice in response.choices:
-        for tc in choice.message.tool_calls or []:
-            if tc.function.name == INTENT_TOOL["name"]:
-                return json.loads(tc.function.arguments)
-    raise RuntimeError("OpenAI did not return a submit_plan function call")
+    return openai_function_json(response, INTENT_TOOL["name"])

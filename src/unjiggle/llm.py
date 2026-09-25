@@ -283,6 +283,26 @@ def claude_json(
     return parse_json_reply(response)
 
 
+def openai_function_json(response, name: str) -> dict[str, Any]:
+    """Read the arguments of the forced OpenAI function call ``name`` as a JSON object.
+
+    The call is not strict, so the arguments can be malformed. Raises LLMOutputError
+    when the reply has no such call, or when its arguments are not a JSON object.
+    """
+    for choice in response.choices:
+        for call in choice.message.tool_calls or []:
+            if call.function.name != name:
+                continue
+            try:
+                data = json.loads(call.function.arguments)
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise LLMOutputError(f"OpenAI returned malformed JSON for {name}.") from exc
+            if not isinstance(data, dict):
+                raise LLMOutputError(f"OpenAI returned JSON for {name} that is not an object.")
+            return data
+    raise LLMOutputError(f"OpenAI did not return a {name} function call.")
+
+
 def parse_json_reply(response) -> dict[str, Any]:
     """Check why Claude stopped, then read the JSON from the first text block.
 
