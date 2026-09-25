@@ -81,6 +81,7 @@ class FakeClaude:
 
     def __init__(self, reply):
         self.reply = reply
+        self.status = 200
         self.requests = []
         self.api_keys = []
 
@@ -90,7 +91,7 @@ class FakeClaude:
             headers=request.headers,
             body=json.loads(request.content),
         ))
-        return httpx2.Response(200, json=self.reply)
+        return httpx2.Response(self.status, json=self.reply)
 
     def client(self, api_key):
         self.api_keys.append(api_key)
@@ -186,7 +187,7 @@ def test_intent_request_targets_opus_5_5_with_structured_output(
     )
 
     request = fake_claude.last
-    _assert_opus_request(request, INTENT_TOOL["input_schema"], "medium")
+    _assert_opus_request(request, INTENT_TOOL["input_schema"], "low")
     user = request.body["messages"][0]["content"]
     assert user.startswith("<intent>\ncalm and minimal\n</intent>")
     assert "<layout>\nTODAY: " in user
@@ -241,6 +242,41 @@ def test_model_without_effort_or_fallbacks_gets_a_plain_request(
     assert "fallbacks" not in request.body
     assert "anthropic-beta" not in request.headers
     assert "tool_choice" not in request.body
+
+
+@pytest.mark.parametrize("model", [
+    "claude-sonnet-4-20250514",
+    "claude-sonnet-4-0",
+    "claude-opus-4-20250514",
+    "claude-opus-4-0",
+    "claude-3-haiku-20240307",
+])
+def test_models_without_structured_outputs_are_refused_before_any_request(
+    fake_claude, chaotic_layout, sample_metadata, model,
+):
+    score = compute_score(chaotic_layout, sample_metadata)
+    with pytest.raises(llm.LLMUnsupportedModelError, match="does not support structured outputs"):
+        analyze(chaotic_layout, sample_metadata, score, api_key=ANTHROPIC_KEY, model=model)
+    assert fake_claude.requests == []
+
+
+@pytest.mark.parametrize(("model", "has_effort"), [
+    ("claude-haiku-4-5", False),
+    ("claude-sonnet-4-5", False),
+    ("claude-opus-4-1", False),
+    ("claude-opus-4-5", True),
+    ("claude-sonnet-4-6", True),
+    ("claude-opus-5", True),
+])
+def test_older_models_with_structured_outputs_are_still_served(
+    fake_claude, chaotic_layout, sample_metadata, model, has_effort,
+):
+    score = compute_score(chaotic_layout, sample_metadata)
+    analyze(chaotic_layout, sample_metadata, score, api_key=ANTHROPIC_KEY, model=model)
+
+    output_config = fake_claude.last.body["output_config"]
+    assert output_config["format"]["type"] == "json_schema"
+    assert ("effort" in output_config) is has_effort
 
 
 def test_schemas_are_valid_for_structured_outputs():
@@ -502,6 +538,32 @@ def test_obituaries_keep_only_candidates_once_each():
     assert result.total_dead == 2
 
 
+def test_obituary_bundle_ids_match_despite_whitespace_or_case():
+    dead_apps = [
+        {"bundle_id": "com.example.a", "name": "A"},
+        {"bundle_id": "com.Example.B", "name": "B"},
+    ]
+    result = _parse_obituaries({
+        "obituaries": [
+            {"bundle_id": "com.example.a ", "eulogy": "first", "cause_of_death": "x"},
+            {"bundle_id": "COM.EXAMPLE.B", "eulogy": "second", "cause_of_death": "x"},
+            {"bundle_id": "com.example.A", "eulogy": "again", "cause_of_death": "x"},
+        ],
+        "graveyard_summary": "Two.",
+    }, dead_apps)
+    # Each obituary carries the candidate's own ID, once.
+    assert [(o.bundle_id, o.app_name, o.eulogy) for o in result.obituaries] == [
+        ("com.example.a", "A", "first"), ("com.Example.B", "B", "second"),
+    ]
+
+
+def test_obituary_schema_always_asks_for_an_approximate_birth_year():
+    # Every client shows the "born - died" line only when born is present.
+    item = OBITUARY_TOOL["input_schema"]["properties"]["obituaries"]["items"]
+    assert "born" in item["required"]
+    assert "approximate" in item["properties"]["born"]["description"].lower()
+
+
 @pytest.fixture
 def phone(monkeypatch, chaotic_layout, sample_metadata):
     """A connected phone with the chaotic layout, for CLI tests."""
@@ -547,9 +609,7 @@ def test_json_suggest_intent_reports_a_refusal_as_json_error(fake_claude, phone)
     assert "declined" in json.loads(result.output)["error"]
 
 
-def test_go_falls_back_to_the_offline_archetype_when_claude_declines(
-    monkeypatch, tmp_path, fake_claude, chaotic_layout, sample_metadata,
-):
+def _run_go(monkeypatch, tmp_path, chaotic_layout, sample_metadata, *args):
     import webbrowser
 
     from click.testing import CliRunner
@@ -566,12 +626,56 @@ def test_go_falls_back_to_the_offline_archetype_when_claude_declines(
     monkeypatch.setattr(webbrowser, "open", lambda url: True)
     monkeypatch.setattr(telemetry, "prompt_analytics_opt_in", lambda console: None)
     monkeypatch.setattr(telemetry, "send_event", lambda *args, **kwargs: None)
+    return CliRunner().invoke(cli.main, ["go", "--api-key", ANTHROPIC_KEY, *args])
+
+
+def test_go_falls_back_to_the_offline_archetype_when_claude_declines(
+    monkeypatch, tmp_path, fake_claude, chaotic_layout, sample_metadata,
+):
     fake_claude.reply = _message([], stop_reason="refusal")
 
-    result = CliRunner().invoke(cli.main, ["go", "--api-key", ANTHROPIC_KEY])
+    result = _run_go(monkeypatch, tmp_path, chaotic_layout, sample_metadata)
 
     assert result.exit_code == 0, result.output
     assert len(fake_claude.requests) == 1
     assert "AI analysis unavailable: Claude declined this request." in result.output
     assert "The Offline One" in result.output
+    assert list((tmp_path / "reports").glob("report-*.html"))
+
+
+@pytest.mark.parametrize(("status", "error_type"), [
+    (404, "not_found_error"),
+    (429, "rate_limit_error"),
+    (529, "overloaded_error"),
+])
+def test_go_falls_back_to_the_offline_archetype_when_the_api_call_fails(
+    monkeypatch, tmp_path, fake_claude, chaotic_layout, sample_metadata, status, error_type,
+):
+    fake_claude.status = status
+    fake_claude.reply = {"type": "error", "error": {"type": error_type, "message": "nope"}}
+
+    result = _run_go(monkeypatch, tmp_path, chaotic_layout, sample_metadata)
+
+    assert result.exit_code == 0, result.output
+    assert len(fake_claude.requests) == 1  # the test client does not retry
+    output = " ".join(result.output.split())  # the console wraps long lines
+    assert "AI analysis unavailable:" in output
+    assert error_type in output
+    assert "The Offline One" in result.output
+    assert list((tmp_path / "reports").glob("share-*.html"))
+    assert list((tmp_path / "reports").glob("report-*.html"))
+
+
+def test_go_falls_back_when_the_model_lacks_structured_outputs(
+    monkeypatch, tmp_path, fake_claude, chaotic_layout, sample_metadata,
+):
+    result = _run_go(
+        monkeypatch, tmp_path, chaotic_layout, sample_metadata,
+        "--model", "claude-opus-4-20250514",
+    )
+
+    assert result.exit_code == 0, result.output
+    assert fake_claude.requests == []
+    output = " ".join(result.output.split())  # the console wraps long lines
+    assert "AI analysis unavailable: claude-opus-4-20250514 does not support structured outputs" in output
     assert list((tmp_path / "reports").glob("report-*.html"))

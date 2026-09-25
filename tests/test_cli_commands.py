@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from unjiggle.cli import (
@@ -417,3 +418,75 @@ def test_preset_preload_lifecycle_invalidates_after_apply_and_restore(monkeypatc
     assert refreshed_payload["layout_signature"] == apply_payload["layout_signature"]
     assert restore_payload["layout_signature"] == initial_payload["layout_signature"]
     assert restored_payload["layout_signature"] == initial_payload["layout_signature"]
+
+
+def _delete_test_state(raw_format: str):
+    """A phone with Maps and Dark Sky on page 1 and a two-app folder on page 2."""
+    dock = [{"bundleIdentifier": "com.apple.mobilephone", "iconType": "app"}]
+    page_1 = [
+        {"bundleIdentifier": "com.apple.Maps", "iconType": "app"},
+        {"bundleIdentifier": "com.darksky.darksky", "iconType": "app"},
+    ]
+    page_2 = [{
+        "displayName": "Travel",
+        "iconType": "folder",
+        "iconLists": [["com.airbnb.app", "com.uber.UberClient", "com.tripit.TripIt"]],
+    }]
+    if raw_format == "ios26":
+        return [dock, page_1, page_2]
+    return {"buttonBar": dock, "iconLists": [page_1, page_2], "ignored": ["com.old.app"]}
+
+
+@pytest.mark.parametrize("raw_format", ["legacy", "ios26"])
+def test_delete_is_previewed_applied_and_verified(monkeypatch, sample_metadata, raw_format):
+    from unjiggle import device, safety
+    from unjiggle.analyzer import LayoutOperation
+    from unjiggle.cli import _resolve_transform_preview
+    from unjiggle.scoring import compute_score
+
+    layout = device.parse_layout_state(_delete_test_state(raw_format))
+    delete = LayoutOperation(
+        action="delete",
+        bundle_ids=["com.darksky.darksky", "com.uber.UberClient"],
+        gratitude="Thanks for the rides.",
+    )
+
+    # The preview shows both apps leaving the home screen.
+    payload = _resolve_transform_preview(
+        "let go of old apps", layout, sample_metadata, compute_score(layout, sample_metadata), [delete],
+    )
+    assert payload["archived"] == 2
+    assert sorted((c["action"], c["bundle_id"]) for c in payload["changes"]) == [
+        ("delete", "com.darksky.darksky"),
+        ("delete", "com.uber.UberClient"),
+    ]
+
+    # Applying writes the change, and the layout read back matches the preview.
+    state = {"raw": layout.raw}
+    writes = []
+
+    def write_layout(lockdown, raw):
+        writes.append(raw)
+        state["raw"] = raw
+
+    monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
+    monkeypatch.setattr(device, "read_layout", lambda lockdown: device.parse_layout_state(state["raw"]))
+    monkeypatch.setattr(device, "write_layout", write_layout)
+    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, Path("/tmp/backup.json")))
+
+    result = CliRunner().invoke(
+        json_group,
+        ["apply"],
+        input=json.dumps({"operations": payload["operations"]}),
+    )
+
+    assert result.exit_code == 0, result.output
+    applied = json.loads(result.output)
+    assert applied["applied"] == 1
+    assert applied["changed"] is True
+    assert len(writes) == 1
+    remaining = device.parse_layout_state(writes[0])
+    assert "com.darksky.darksky" not in remaining.all_bundle_ids
+    assert "com.uber.UberClient" not in remaining.all_bundle_ids
+    assert "com.airbnb.app" in remaining.all_bundle_ids
+    assert remaining.ignored == layout.ignored

@@ -18,6 +18,22 @@ class TestPreviewOperations:
         assert "com.darksky.darksky" in preview.ignored
         assert preview.page_count <= chaotic_layout.page_count
 
+    def test_delete_takes_apps_off_the_home_screen_without_marking_them_ignored(
+        self, chaotic_layout,
+    ):
+        # Matches layout_engine.apply_operations, which removes deleted icons from
+        # pages and folders but records only move_to_app_library as ignored.
+        ops = [LayoutOperation(
+            action="delete",
+            bundle_ids=["com.darksky.darksky", "com.linkedin.LinkedIn"],
+            gratitude="Thanks for the forecasts.",
+        )]
+        preview = preview_operations(chaotic_layout, ops)
+        assert "com.darksky.darksky" not in preview.all_bundle_ids
+        assert "com.linkedin.LinkedIn" not in preview.all_bundle_ids  # was in a folder
+        assert preview.ignored == chaotic_layout.ignored
+        assert "com.darksky.darksky" in chaotic_layout.all_bundle_ids  # original untouched
+
     def test_move_to_page(self, chaotic_layout):
         ops = [LayoutOperation(
             action="move_to_page",

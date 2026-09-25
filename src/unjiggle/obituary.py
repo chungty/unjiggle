@@ -187,7 +187,7 @@ OBITUARY_TOOL = {
                 "items": {
                     "type": "object",
                     "additionalProperties": False,
-                    "required": ["bundle_id", "eulogy", "cause_of_death"],
+                    "required": ["bundle_id", "born", "eulogy", "cause_of_death"],
                     "properties": {
                         "bundle_id": {
                             "type": "string",
@@ -195,7 +195,8 @@ OBITUARY_TOOL = {
                         },
                         "born": {
                             "type": "string",
-                            "description": "Year the app was first released, if you know it.",
+                            "description": "Approximate year or era the app was first "
+                            "released, such as '2014' or 'circa 2014'. An estimate is fine.",
                         },
                         "died": {
                             "type": "string",
@@ -467,13 +468,16 @@ def _obituary_openai(context: str, dead_apps: list[dict], api_key: str | None, m
 
 def _parse_obituaries(data: dict, dead_apps: list[dict]) -> ObituaryResult:
     dead_by_bid = {a["bundle_id"]: a for a in dead_apps}
+    # Bundle IDs are matched ignoring surrounding whitespace and letter case, and
+    # each obituary carries the candidate's own ID.
+    canonical_bid = {bid.casefold(): bid for bid in dead_by_bid}
 
     obituaries = []
     seen: set[str] = set()
     for obit in data.get("obituaries", []):
-        bid = obit.get("bundle_id", "")
+        bid = canonical_bid.get(str(obit.get("bundle_id") or "").strip().casefold())
         # Only the candidates we sent, once each: clients key obituaries by bundle ID.
-        if bid not in dead_by_bid or bid in seen:
+        if bid is None or bid in seen:
             continue
         seen.add(bid)
         app_info = dead_by_bid[bid]

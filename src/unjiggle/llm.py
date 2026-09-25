@@ -14,6 +14,7 @@ the features stay consistent with each other.
 
 from __future__ import annotations
 
+import importlib
 import json
 import os
 import re
@@ -33,16 +34,23 @@ CLAUDE_MAX_TOKENS = 16000
 # API re-runs it on the model Anthropic recommends for that refusal category.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-# Models that reject output_config.effort. Newer models all accept it.
-_NO_EFFORT_PREFIXES = (
+# Models without structured outputs, which every AI feature relies on: the Claude 3
+# family and the first Claude 4 models (Sonnet 4 and Opus 4, dated 2025-05-14).
+# They are refused before any request is sent.
+_NO_STRUCTURED_OUTPUT_PREFIXES = (
     "claude-3",
-    "claude-haiku-4",
+    "claude-4-",
     "claude-sonnet-4-0",
     "claude-sonnet-4-2",
-    "claude-sonnet-4-5",
     "claude-opus-4-0",
-    "claude-opus-4-1",
     "claude-opus-4-2",
+)
+
+# Supported models that reject output_config.effort. Newer models all accept it.
+_NO_EFFORT_PREFIXES = (
+    "claude-haiku-4",
+    "claude-sonnet-4-5",
+    "claude-opus-4-1",
 )
 
 # Models whose safety classifiers can decline a request and that accept
@@ -74,6 +82,18 @@ class LLMTruncatedError(LLMError):
 
 class LLMOutputError(LLMError):
     """The reply had no JSON object where one was expected."""
+
+
+class LLMUnsupportedModelError(LLMError):
+    """The requested model can't return structured output, so no request is sent."""
+
+    def __init__(self, model: str) -> None:
+        self.model = model
+        super().__init__(
+            f"{model} does not support structured outputs, which Unjiggle's AI features "
+            f"need. Use the default ({DEFAULT_ANTHROPIC_MODEL}), or Claude Haiku 4.5, "
+            "Sonnet 4.5, Opus 4.1 or a newer model."
+        )
 
 
 def resolve_provider(
@@ -128,6 +148,10 @@ def resolve_route(
     return provider, api_key, model
 
 
+def supports_structured_outputs(model: str) -> bool:
+    return not model.startswith(_NO_STRUCTURED_OUTPUT_PREFIXES)
+
+
 def supports_effort(model: str) -> bool:
     return not model.startswith(_NO_EFFORT_PREFIXES)
 
@@ -139,6 +163,25 @@ def supports_fallbacks(model: str) -> bool:
 def today_line() -> str:
     """First line of every layout context. Staleness judgments need a 'now'."""
     return f"TODAY: {datetime.now().astimezone().date().isoformat()}"
+
+
+def provider_api_errors() -> tuple[type[Exception], ...]:
+    """Base API error classes of the installed provider SDKs.
+
+    These cover failures before any answer arrives: authentication, no access to
+    the model, rate limits, overload and network errors. Callers that treat AI as
+    optional catch them next to LLMError.
+    """
+    errors: list[type[Exception]] = []
+    for name in ("anthropic", "openai"):
+        try:
+            module = importlib.import_module(name)
+        except ImportError:
+            continue
+        error = getattr(module, "APIError", None)
+        if isinstance(error, type) and issubclass(error, Exception):
+            errors.append(error)
+    return tuple(errors)
 
 
 def _require_anthropic():
@@ -167,10 +210,13 @@ def claude_json(
     """Ask Claude for one JSON object matching ``schema`` and return it.
 
     Thinking is left at its default (adaptive; always on for Claude Opus 5.5) and
-    ``effort`` sets how much of it happens. Raises LLMRefusalError,
+    ``effort`` sets how much of it happens. Raises LLMUnsupportedModelError before
+    any request for a model without structured outputs, and LLMRefusalError,
     LLMTruncatedError or LLMOutputError when the reply is not usable; SDK errors
     (authentication, rate limits, overload) propagate unchanged.
     """
+    if not supports_structured_outputs(model):
+        raise LLMUnsupportedModelError(model)
     client = _anthropic_client(api_key)
     output_config: dict[str, Any] = {"format": {"type": "json_schema", "schema": schema}}
     if supports_effort(model):

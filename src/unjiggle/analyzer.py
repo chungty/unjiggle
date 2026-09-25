@@ -369,8 +369,13 @@ def _parse_result(data: dict, layout: HomeScreenLayout) -> AnalysisResult:
     )
 
 
-# The AI Stylist's operations are previewed and can then be written to the phone.
-INTENT_EFFORT = "medium"
+# The AI Stylist is interactive: clients wait on `json suggest --intent` under a
+# timeout of about a minute that also covers the USB read and the App Store
+# lookup. On Claude Opus 5.5, low effort comes close to medium on quality with
+# much less thinking, and less thinking is what shortens the wait. Time a real
+# request against a full phone before raising it. The plan is still previewed
+# before anything is written to the phone.
+INTENT_EFFORT = "low"
 
 INTENT_SYSTEM_PROMPT = """\
 You are Unjiggle's AI Stylist. The owner of this iPhone has described how they want their \
@@ -480,9 +485,12 @@ def preview_operations(layout: HomeScreenLayout, operations: list[LayoutOperatio
     preview = copy.deepcopy(layout)
 
     for op in operations:
-        if op.action == "move_to_app_library":
+        if op.action in ("move_to_app_library", "delete"):
+            # Same as layout_engine.apply_operations: both take the icons off the
+            # home screen, and only move_to_app_library records them as ignored.
             _remove_apps_from_layout(preview, op.bundle_ids)
-            preview.ignored.extend(op.bundle_ids)
+            if op.action == "move_to_app_library":
+                preview.ignored.extend(op.bundle_ids)
 
         elif op.action == "move_to_page":
             if op.target_page is not None and 0 <= op.target_page < len(preview.pages):

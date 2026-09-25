@@ -13,7 +13,7 @@ from rich.progress import Progress
 from rich.table import Table
 
 from unjiggle import __version__
-from unjiggle.llm import LLMError
+from unjiggle.llm import LLMError, provider_api_errors
 
 console = Console()
 UNJIGGLE_DIR = Path.home() / ".unjiggle"
@@ -124,8 +124,10 @@ def go(api_key: str | None, model: str | None):
                 console.print(f"  [italic dim]{result.personality}[/italic dim]\n")
         except ImportError:
             console.print("[dim]Install AI extras for deeper analysis: pip install unjiggle[ai][/dim]\n")
-        except LLMError as e:
-            # The offline archetype above stands in when the model gives no usable answer.
+        except (LLMError, *provider_api_errors()) as e:
+            # The offline archetype above stands in when the model gives no usable
+            # answer or the API call fails (no access to the model, rate limits,
+            # overload, network), so the share card and report still get made.
             console.print(f"[dim]AI analysis unavailable: {e}[/dim]\n")
     else:
         console.print("[dim]Tip: Set ANTHROPIC_API_KEY or OPENAI_API_KEY for AI-powered observations.[/dim]\n")
