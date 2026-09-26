@@ -12,6 +12,16 @@ from unjiggle.models import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _nothing_goes_to_the_home_folder(monkeypatch, tmp_path):
+    """No test writes a backup or a report to ~/.unjiggle."""
+    from unjiggle import cli, safety
+
+    monkeypatch.setattr(safety, "BACKUP_DIR", tmp_path / ".unjiggle" / "backups")
+    monkeypatch.setattr(cli, "UNJIGGLE_DIR", tmp_path / ".unjiggle")
+    monkeypatch.setattr(cli, "BACKUP_DIR", tmp_path / ".unjiggle" / "backups")
+
+
 def make_app(bundle_id: str) -> LayoutItem:
     return LayoutItem(app=AppItem(bundle_id=bundle_id))
 

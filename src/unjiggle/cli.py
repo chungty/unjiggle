@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json as _json
 import sys
 from datetime import datetime
@@ -13,6 +14,7 @@ from rich.progress import Progress
 from rich.table import Table
 
 from unjiggle import __version__
+from unjiggle.llm import LLMError, provider_api_errors
 
 console = Console()
 UNJIGGLE_DIR = Path.home() / ".unjiggle"
@@ -123,6 +125,11 @@ def go(api_key: str | None, model: str | None):
                 console.print(f"  [italic dim]{result.personality}[/italic dim]\n")
         except ImportError:
             console.print("[dim]Install AI extras for deeper analysis: pip install unjiggle[ai][/dim]\n")
+        except (LLMError, *provider_api_errors()) as e:
+            # The offline archetype above stands in when the model gives no usable
+            # answer or the API call fails (no access to the model, rate limits,
+            # overload, network), so the share card and report still get made.
+            console.print(f"[dim]AI analysis unavailable: {e}[/dim]\n")
     else:
         console.print("[dim]Tip: Set ANTHROPIC_API_KEY or OPENAI_API_KEY for AI-powered observations.[/dim]\n")
 
@@ -395,7 +402,7 @@ def analyze(api_key: str | None, model: str):
     score = compute_score(layout, metadata)
 
     console.print(f"  Score: [bold]{score.total:.0f}/100[/bold] ({score.label})\n")
-    console.print("[dim]Running AI analysis (Claude Sonnet)...[/dim]\n")
+    console.print("[dim]Running AI analysis...[/dim]\n")
 
     result = run_analysis(layout, metadata, score, api_key=api_key, model=model)
 
@@ -451,7 +458,7 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
     from unjiggle.scoring import compute_score
 
     if not api_key:
-        console.print("[red]ANTHROPIC_API_KEY not set.[/red]")
+        console.print("[red]No API key found.[/red] Set ANTHROPIC_API_KEY or OPENAI_API_KEY, or pass --api-key.")
         sys.exit(1)
 
     console.print("\n[bold]Unjiggle[/bold] — Smart Suggestions...\n")
@@ -566,8 +573,9 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         console.print("  No changes to apply.\n")
         return
 
-    # Show final summary
-    final_preview = current_preview
+    # The write applies all accepted operations together, then cleans up. The summary
+    # shows that result, which can differ from the step-by-step previews above.
+    modified_raw, final_preview, write_problem = _prepare_write(layout, accepted_ops)
     final_score = compute_score(final_preview, metadata)
     _changes, _moved, _archived, _new_folders, summary = _derive_realized_changes(
         layout, final_preview, metadata, accepted_ops,
@@ -583,30 +591,27 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         console.print(f"\n  [italic dim]{result.personality}[/italic dim]")
 
     console.print()
+    if write_problem:
+        console.print(f"  [red]Not written:[/red] {write_problem}. No changes made.\n")
+        return
+    if _layout_signature(final_preview) == _layout_signature(layout):
+        console.print("  [yellow]Nothing left to apply.[/yellow]\n")
+        return
     if click.confirm("  Apply these changes to your iPhone?", default=True):
-        from unjiggle.layout_engine import apply_operations
         from unjiggle.safety import pre_write_safety_check
-
-        predicted_layout, effective_ops = _preview_effective_operations(layout, accepted_ops)
-        if not effective_ops:
-            console.print("  [yellow]Nothing left to apply.[/yellow]\n")
-            return
 
         safe, backup_path = pre_write_safety_check(lockdown, layout)
         if not safe:
             console.print("  [red]Safety check failed. No changes made.[/red]\n")
             return
 
-        # Build the modified raw plist using the layout engine
-        modified_raw = apply_operations(layout, effective_ops)
-
-        # Write the modified layout to device
+        # Write the checked raw state to the device
         write_layout(lockdown, modified_raw)
 
         # Verify the write took effect
         from unjiggle.device import read_layout as re_read
         verify = re_read(lockdown)
-        if _layout_signature(verify) != _layout_signature(predicted_layout):
+        if _layout_signature(verify) != _layout_signature(final_preview):
             console.print("  [red]Write verification failed.[/red] The device layout did not match the preview.\n")
             return
         console.print(f"  [dim]Verifying write... {verify.page_count} pages, {verify.total_apps} apps read back.[/dim]")
@@ -1036,17 +1041,99 @@ def demo():
 
 # ---------------------------------------------------------------------------
 # JSON API command group — structured output for external clients (no Rich, no TTY)
+#
+# A client starts `unjiggle json <command>`, writes the payload (or nothing) to stdin
+# and closes it, then decodes stdout. So a json command asks no question, and stdout
+# gets exactly one JSON document: _json_out() or _json_err(). All other text (the Rich
+# consoles, click.echo, print, a library) goes to stderr (see _stdout_to_stderr and
+# _JsonCommand, the class of each command of the json group).
 # ---------------------------------------------------------------------------
+
+# The version of the `unjiggle json` contract. A client that bundles the engine can
+# require a minimum version before it ships (the package version does not change with
+# each contract change).
+# 2: every json command asks no question and writes one JSON document to stdout (also
+#    for an error that it does not catch). json apply has no round trip, takes the
+#    snapshot_id of the preview, and names the backup in an error after the write.
+#    json restore refuses a backup with no apps and returns undo_backup.
+JSON_CONTRACT = 2
+
+# The real stdout while a json command runs. None outside a json command.
+_json_stdout = None
+
+# Progress text of a json command, for example from safety.verified_backup().
+_err_console = Console(stderr=True)
+
+
+@contextlib.contextmanager
+def _stdout_to_stderr():
+    """Send everything that writes to sys.stdout to stderr until the json command ends.
+
+    Only _json_out() and _json_err() write to the real stdout. The Rich consoles and
+    click.echo find sys.stdout when they write, so they also follow the swap.
+    """
+    global _json_stdout
+    real_stdout, outer = sys.stdout, _json_stdout
+    _json_stdout = real_stdout
+    sys.stdout = sys.stderr
+    try:
+        yield
+    finally:
+        sys.stdout = real_stdout
+        _json_stdout = outer
+
+
+class _JsonCommand(click.Command):
+    """A json command: its body runs in _stdout_to_stderr(). Its --help still goes to
+    stdout, because click parses the arguments before it calls invoke().
+
+    An exception that the body does not catch becomes {"error": ...} on stdout (exit
+    code 1), with the traceback on stderr, so a client always gets a JSON document."""
+
+    def invoke(self, ctx):
+        with _stdout_to_stderr():
+            try:
+                return super().invoke(ctx)
+            except click.exceptions.Exit:
+                raise
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc(file=sys.stderr)
+                detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                _json_err(f"Unexpected error: {detail}")
+
+
+class _JsonGroup(click.Group):
+    command_class = _JsonCommand
+
+
+def _write_json_document(data: dict) -> None:
+    text = _json.dumps(data, ensure_ascii=False)
+    if _json_stdout is None:
+        click.echo(text)
+        return
+    swapped = sys.stdout
+    sys.stdout = _json_stdout
+    try:
+        click.echo(text)
+    finally:
+        sys.stdout = swapped
 
 
 def _json_out(data: dict) -> None:
-    """Print JSON to stdout and exit cleanly."""
-    click.echo(_json.dumps(data, ensure_ascii=False))
+    """Write the JSON document of the command to stdout."""
+    _write_json_document(data)
 
 
-def _json_err(message: str) -> None:
-    """Print a JSON error to stdout and exit with code 1."""
-    click.echo(_json.dumps({"error": message}, ensure_ascii=False))
+def _json_err(message: str, **extra) -> None:
+    """Write {"error": message, **extra} to stdout, and the message to stderr, then exit
+    with code 1.
+
+    A client that reads only stderr after a non-zero exit still gets the message.
+    """
+    _write_json_document({"error": message, **extra})
+    click.echo(message, err=True)
     sys.exit(1)
 
 
@@ -1217,10 +1304,13 @@ def _analysis_to_json(result) -> dict:
     }
 
 
-@main.group()
+@main.group(cls=_JsonGroup)
 def json():
-    """Machine-readable JSON output for external clients. No Rich formatting."""
-    pass
+    """Machine-readable JSON output for external clients. No Rich formatting.
+
+    Each command asks no question and writes exactly one JSON document to stdout. Other
+    text goes to stderr. On failure the document is {"error": ...} and the exit code is 1.
+    """
 
 
 @json.command(name="status")
@@ -1230,9 +1320,17 @@ def json_status():
 
     try:
         _lockdown, device = connect()
-        _json_out({"connected": True, "device": _device_dict(device)})
     except Exception:
         _json_out({"connected": False})
+        return
+    _json_out({
+        "connected": True,
+        "device": _device_dict(device),
+        # The same fields at the top level, for a client that reads them there.
+        "device_name": device.name,
+        "model": device.model,
+        "ios_version": device.ios_version,
+    })
 
 
 @json.command(name="scan")
@@ -1390,12 +1488,27 @@ def _get_app_name(bundle_id: str, metadata: dict) -> str:
 
 
 def _collect_all_apps_with_positions(layout, metadata: dict) -> list[dict]:
-    """Build a list of all non-dock apps with their current page, category, name."""
+    """Build a list of the apps on the pages that a preset can move, with their
+    current page, category and name. Each app is in the list once.
+
+    Left out: the fixed icons (HomeScreenLayout.fixed_ids(): the pinned icons, and
+    the apps with more than one icon), which no operation moves or removes and a
+    rebuild keeps (see analyzer.rebuilt_pages), and the dock apps, also the ones in
+    a dock folder (stylist.dock_bundle_ids): an operation that names an app takes it
+    out of the dock.
+    """
+    from unjiggle.stylist import dock_bundle_ids
+
+    skip = layout.fixed_ids() | dock_bundle_ids(layout)
+    seen: set[str] = set()
     apps = []
     for page_idx, page in enumerate(layout.pages):
         for item in page:
+            if item.is_app and (item.app.bundle_id in skip or item.app.bundle_id in seen):
+                continue
             if item.is_app:
                 bid = item.app.bundle_id
+                seen.add(bid)
                 apps.append({
                     "bundle_id": bid,
                     "name": _get_app_name(bid, metadata),
@@ -1405,7 +1518,10 @@ def _collect_all_apps_with_positions(layout, metadata: dict) -> list[dict]:
             elif item.is_folder:
                 for fpage in item.folder.pages:
                     for app in fpage:
+                        if app.bundle_id in skip or app.bundle_id in seen:
+                            continue
                         bid = app.bundle_id
+                        seen.add(bid)
                         apps.append({
                             "bundle_id": bid,
                             "name": _get_app_name(bid, metadata),
@@ -1448,7 +1564,12 @@ def _layout_app_locations(layout, metadata: dict) -> dict[str, dict]:
 
 
 def _layout_signature(layout) -> str:
-    """Stable signature for comparing predicted and realized layouts."""
+    """Stable signature for comparing predicted and realized layouts. A folder page
+    with no app is left out (analyzer.folder_page_ids): the cleanup removes empty
+    folder pages from the preview, and a folder page with only entries that the
+    parser drops stays in the written state."""
+    from unjiggle.analyzer import folder_page_ids
+
     dock = []
     for item in layout.dock:
         if item.is_app:
@@ -1456,7 +1577,7 @@ def _layout_signature(layout) -> str:
         elif item.is_folder:
             dock.append({
                 "folder": item.folder.display_name,
-                "apps": [[app.bundle_id for app in page] for page in item.folder.pages],
+                "apps": folder_page_ids(item.folder),
             })
         elif item.is_widget:
             dock.append({
@@ -1473,7 +1594,7 @@ def _layout_signature(layout) -> str:
             elif item.is_folder:
                 page_items.append({
                     "folder": item.folder.display_name,
-                    "apps": [[app.bundle_id for app in folder_page] for folder_page in item.folder.pages],
+                    "apps": folder_page_ids(item.folder),
                 })
             elif item.is_widget:
                 page_items.append({
@@ -1519,6 +1640,18 @@ def _removed_action_lookup(operations: list) -> dict[str, str]:
     return removed
 
 
+# A delete takes the icon off the home screen. Unjiggle does not uninstall the app.
+DELETE_DETAIL = "The icon leaves the home screen. The app stays installed until you delete it."
+
+
+def _gratitude_lookup(operations: list) -> dict[str, str]:
+    return {
+        bid: op.gratitude
+        for op in operations if op.action == "delete" and op.gratitude
+        for bid in op.bundle_ids
+    }
+
+
 def _build_transform_summary(moved: int, archived: int, new_folders: int) -> str:
     parts = []
     if moved:
@@ -1531,9 +1664,16 @@ def _build_transform_summary(moved: int, archived: int, new_folders: int) -> str
 
 
 def _derive_realized_changes(layout, proposed_layout, metadata: dict, operations: list) -> tuple[list[dict], int, int, int, str]:
+    """The changes that the preview shows, one for each app that moves or leaves.
+
+    from_page and to_page count from 1, as the owner counts pages (to_page is None
+    for an app that leaves the home screen). A delete also has "gratitude" and a
+    "detail" line that says what the write does.
+    """
     before_locations = _layout_app_locations(layout, metadata)
     after_locations = _layout_app_locations(proposed_layout, metadata)
     removed_actions = _removed_action_lookup(operations)
+    gratitude = _gratitude_lookup(operations)
     changes = []
 
     ordered_before = sorted(before_locations.values(), key=lambda item: (
@@ -1548,13 +1688,19 @@ def _derive_realized_changes(layout, proposed_layout, metadata: dict, operations
     for before in ordered_before:
         after = after_locations.get(before["bundle_id"])
         if after is None:
-            changes.append({
+            change = {
                 "action": removed_actions.get(before["bundle_id"], "move_to_app_library"),
                 "bundle_id": before["bundle_id"],
                 "app_name": before["app_name"],
                 "from_page": before["page"],
                 "to_page": None,
-            })
+            }
+            if change["action"] == "delete":
+                line = gratitude.get(before["bundle_id"])
+                change["detail"] = f"{line} {DELETE_DETAIL}" if line else DELETE_DETAIL
+                if line:
+                    change["gratitude"] = line
+            changes.append(change)
             continue
 
         same_page = before["page"] == after["page"]
@@ -1699,55 +1845,50 @@ def _preview_effective_operations(layout, operations: list) -> tuple[object, lis
     return current_layout, effective_ops
 
 
+def _prepare_write(layout, operations: list) -> tuple[object, object, str | None]:
+    """The raw state to write for these operations, the layout that it must read back
+    as, and a problem that stops the write (None when it is safe to write).
+
+    All operations are applied together and then cleaned up, which is what the
+    preview of `json suggest` shows. The raw state is checked before the write (see
+    layout_engine.check_write), so nothing is written when it would differ from that
+    preview or lose an icon that no operation names.
+    """
+    from unjiggle import layout_engine
+
+    return layout_engine.check_write(layout, operations)
+
+
 def _build_minimal_one_page_plan(layout, metadata: dict) -> tuple[list[str], list[str]]:
     """Return (keep_visible_bundle_ids, archive_bundle_ids) for the minimal preset.
 
-    Keeps the most important apps visible on a single physical page.
-    Everything else gets archived so previews and writes stay truthful.
+    Keeps the most important apps visible on a single physical page, in the slots
+    that page 1's widgets and fixed icons leave free: a rebuild keeps those on page
+    1 (analyzer.rebuilt_pages). Everything else gets archived so previews and writes
+    stay truthful. The fixed icons (pinned icons, and apps with more than one icon)
+    and the dock apps are in neither list (see _collect_all_apps_with_positions), so
+    they stay.
     """
-    all_apps = _collect_all_apps_with_positions(layout, metadata)
-    max_visible = 24
+    from unjiggle.analyzer import first_live_index, item_slots, rebuild_room, stays_in_rebuild
 
-    dock_bids = set()
-    for item in layout.dock:
-        if item.is_app:
-            dock_bids.add(item.app.bundle_id)
+    all_apps = _collect_all_apps_with_positions(layout, metadata)
+    fixed = layout.fixed_ids()
+    index = first_live_index(layout.pages, item_slots)
+    first = [(item, item_slots(item) > 0) for item in layout.pages[index]] if index is not None else []
+    max_visible = max(rebuild_room(first, lambda item: stays_in_rebuild(item, fixed), item_slots), 0)
 
     priority_apps = [a for a in all_apps if a["category"] in _MINIMAL_KEEP_CATS]
-    keep_visible = []
-    seen = set()
-    for app in priority_apps:
-        bid = app["bundle_id"]
-        if bid in seen or bid in dock_bids:
-            continue
-        keep_visible.append(bid)
-        seen.add(bid)
-        if len(keep_visible) >= max_visible:
-            break
-
-    if len(keep_visible) < max_visible:
-        for app in all_apps:
-            bid = app["bundle_id"]
-            if bid in seen or bid in dock_bids:
-                continue
-            keep_visible.append(bid)
-            seen.add(bid)
-            if len(keep_visible) >= max_visible:
-                break
-
-    archive_bids = []
-    archived_seen = set()
-    for app in all_apps:
-        bid = app["bundle_id"]
-        if bid in dock_bids or bid in keep_visible or bid in archived_seen:
-            continue
-        archive_bids.append(bid)
-        archived_seen.add(bid)
+    keep_visible = list(dict.fromkeys(app["bundle_id"] for app in priority_apps + all_apps))[:max_visible]
+    kept = set(keep_visible)
+    archive_bids = [app["bundle_id"] for app in all_apps if app["bundle_id"] not in kept]
 
     return keep_visible, archive_bids
 
 
 def _build_weighted_page_operations(layout, metadata: dict, front_cats: set[str], later_cats: set[str]) -> list:
+    """move_to_page steps by category. An app that is on the home screen more than
+    once does not move (it is a fixed icon, see _collect_all_apps_with_positions):
+    a move takes every copy of an app and places one."""
     from unjiggle.analyzer import LayoutOperation
 
     all_apps = _collect_all_apps_with_positions(layout, metadata)
@@ -1807,7 +1948,7 @@ def _build_beautiful_preset_operations(layout, metadata: dict) -> list:
     ))
     return [LayoutOperation(
         action="rebuild_pages",
-        bundle_ids=[app["bundle_id"] for app in sorted_apps],
+        bundle_ids=list(dict.fromkeys(app["bundle_id"] for app in sorted_apps)),
     )]
 
 
@@ -1841,104 +1982,20 @@ def _generate_all_preset_transforms(layout, metadata: dict, score) -> dict[str, 
 def _generate_intent_transform(
     intent: str, layout, metadata: dict, score, api_key: str, model: str | None,
 ) -> dict:
-    """Generate a TransformPreview using LLM analysis framed around the user's intent."""
-    from unjiggle.analyzer import (
-        ANALYSIS_TOOL,
-        _build_context,
-        _parse_result,
-    )
+    """Generate a TransformPreview from the AI Stylist's operations for the user's intent.
 
-    context = _build_context(layout, metadata, score)
+    ``plan_warnings`` lists what the plan asked for and the preview does not do, such
+    as page 1 apps that did not fit (see unjiggle.stylist.plan_warnings).
+    """
+    from unjiggle.stylist import plan_intent
 
-    intent_prompt = (
-        f"The user wants to transform their home screen with this intent: \"{intent}\"\n\n"
-        f"Analyze the layout and generate observations and operations that specifically "
-        f"serve this intent. Focus your suggestions on achieving what the user asked for.\n\n"
-        f"{context}"
-    )
-
-    intent_system = (
-        "You are Unjiggle's AI layout transformation engine. The user has a specific "
-        "intent for how they want their home screen to feel. Generate observations and "
-        "operations that transform the layout to match their intent.\n\n"
-        "Follow the same output format as a standard analysis, but tailor every suggestion "
-        "to the user's stated intent. Be opinionated and decisive.\n\n"
-        "RULES:\n"
-        "- Reference apps by EXACT bundle ID from the input\n"
-        "- Each observation should directly serve the user's intent\n"
-        "- Be specific about which apps to move and where\n"
-        "- 3-5 observations is ideal\n"
-    )
-
-    # Detect provider
-    if api_key.startswith("sk-"):
-        provider = "openai"
-    else:
-        provider = "anthropic"
-
-    if provider == "openai":
-        import openai as _openai
-
-        client = _openai.OpenAI(api_key=api_key)
-        openai_tool = {
-            "type": "function",
-            "function": {
-                "name": ANALYSIS_TOOL["name"],
-                "description": ANALYSIS_TOOL["description"],
-                "parameters": ANALYSIS_TOOL["input_schema"],
-            },
-        }
-        response = client.chat.completions.create(
-            model=model or "gpt-4.1",
-            max_tokens=4096,
-            messages=[
-                {"role": "system", "content": intent_system},
-                {"role": "user", "content": intent_prompt},
-            ],
-            tools=[openai_tool],
-            tool_choice={"type": "function", "function": {"name": "submit_analysis"}},
-        )
-        for choice in response.choices:
-            if choice.message.tool_calls:
-                for tc in choice.message.tool_calls:
-                    if tc.function.name == "submit_analysis":
-                        data = _json.loads(tc.function.arguments)
-                        result = _parse_result(data, layout)
-                        break
-                else:
-                    continue
-                break
-        else:
-            raise RuntimeError("OpenAI did not return a submit_analysis function call")
-    else:
-        try:
-            import anthropic as _anthropic
-        except ImportError:
-            raise RuntimeError("anthropic package required. pip install anthropic")
-
-        client = _anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=model or "claude-sonnet-4-20250514",
-            max_tokens=4096,
-            system=intent_system,
-            tools=[ANALYSIS_TOOL],
-            tool_choice={"type": "tool", "name": "submit_analysis"},
-            messages=[{"role": "user", "content": intent_prompt}],
-        )
-        result = None
-        for block in response.content:
-            if block.type == "tool_use" and block.name == "submit_analysis":
-                result = _parse_result(block.input, layout)
-                break
-        if result is None:
-            raise RuntimeError("Anthropic did not return a submit_analysis tool call")
-
-    # Convert AnalysisResult into TransformPreview format
-    all_ops = []
-    for obs in result.observations:
-        all_ops.extend(obs.operations)
-
-    return _resolve_transform_preview(intent, layout, metadata, score, all_ops)
+    plan = plan_intent(intent, layout, metadata, score, api_key=api_key, model=model)
+    result = _resolve_transform_preview(intent, layout, metadata, score, plan.operations)
+    result["plan_warnings"] = plan.warnings
+    rejected = next((w for w in plan.warnings if w["kind"] == "plan_rejected"), None)
+    if rejected and not plan.operations:
+        result["summary"] = rejected["message"]
+    return result
 
 
 @json.command(name="suggest")
@@ -2072,10 +2129,38 @@ def json_presets():
 
 
 @json.command(name="restore")
-@click.argument("backup_file", type=click.Path(exists=True), required=True)
+# No exists=True: click would print usage text and exit with code 2, and a client needs
+# a JSON document. The body checks the file.
+@click.argument("backup_file", type=click.Path(), required=True)
 def json_restore(backup_file: str):
-    """Restore a previously backed up layout and verify it."""
-    from unjiggle.device import connect, read_layout, restore_layout_from_file, write_layout
+    """Restore a previously backed up layout and verify it. Asks no question.
+
+    The steps, in this order:
+    1. Read the backup. The dates in it become dates again
+       (device.restore_layout_from_file). A backup with no app on the home screen (an
+       empty or damaged file, or a file that is not a backup) is refused, because it
+       would take every icon off the home screen.
+    2. A verified backup of the layout on the phone now (safety.verified_backup). A
+       wrong restore can be undone with it: the output and the errors after the write
+       have its path as "undo_backup". If the backup fails, nothing is written.
+    3. The write, and the read-back check. The check passes when the phone reads back
+       as the backup: the same icon state, or the same layout (the dock, the pages, the
+       folders and the widgets, as the post-write check of `json apply` compares them)
+       with values that SpringBoard changes on a write.
+
+    A backup file does not record the device, so this command cannot refuse a backup
+    of a different iPhone.
+    """
+    from unjiggle.device import (
+        connect,
+        parse_layout_state,
+        read_layout,
+        restore_layout_from_file,
+        write_layout,
+    )
+
+    if not Path(backup_file).is_file():
+        _json_err(f"Backup not found: {backup_file}")
 
     try:
         lockdown, _device = connect()
@@ -2084,20 +2169,38 @@ def json_restore(backup_file: str):
 
     try:
         raw_state = restore_layout_from_file(Path(backup_file))
+        expected = parse_layout_state(raw_state)
     except Exception as e:
         _json_err(f"Failed to read backup: {e}")
+    if expected.page_count == 0 or expected.total_apps == 0:
+        _json_err(f"Not restored: the backup {backup_file} has no apps on the home screen. No changes made.")
 
-    write_layout(lockdown, raw_state)
-    verify = read_layout(lockdown)
+    undo_backup = _json_verified_backup(lockdown, read_layout(lockdown))
+    undo = f"To undo, restore {undo_backup}."
+
+    try:
+        write_layout(lockdown, raw_state)
+        verify = read_layout(lockdown)
+    except Exception as e:
+        _json_err(f"Restore failed: {e}. {undo}", undo_backup=str(undo_backup))
 
     expected_json = _json.dumps(raw_state, default=str, sort_keys=True)
     restored_json = _json.dumps(verify.raw, default=str, sort_keys=True)
     if expected_json != restored_json:
-        _json_err("Restore verification failed.")
+        if _layout_signature(verify) != _layout_signature(expected):
+            _json_err(
+                f"Restore verification failed: the layout on the iPhone does not match the backup. {undo}",
+                undo_backup=str(undo_backup),
+            )
+        _err_console.print(
+            "  The layout matches the backup. Some values of the icon state differ,"
+            " because SpringBoard changes them on a write."
+        )
 
     _json_out({
         "restored": True,
         "backup": str(Path(backup_file)),
+        "undo_backup": str(undo_backup),
         **_snapshot_metadata(verify),
         "result": {
             "page_count": verify.page_count,
@@ -2183,8 +2286,10 @@ def json_render(card: str, action: str, backup: str | None, api_key: str | None,
     else:
         if not backup:
             _json_err("--backup is required for transform cards.")
-        before_raw = restore_layout_from_file(Path(backup))
-        before_layout = parse_layout_state(before_raw)
+        try:
+            before_layout = parse_layout_state(restore_layout_from_file(Path(backup)))
+        except Exception as e:
+            _json_err(f"Failed to read backup: {e}")
         before_metadata = enrich_layout(before_layout)
         before_score = round(compute_score(before_layout, before_metadata).total)
         after_score = round(compute_score(current_layout, current_metadata).total)
@@ -2225,48 +2330,147 @@ def json_render(card: str, action: str, backup: str | None, api_key: str | None,
     })
 
 
-@json.command(name="apply")
-def json_apply():
-    """Apply operations from JSON on stdin."""
+def _read_stdin() -> str:
+    """All of stdin as UTF-8 text. Empty when there is no stdin."""
+    stream = sys.stdin
+    if stream is None:
+        return ""
+    data = stream.buffer.read() if hasattr(stream, "buffer") else stream.read()
+    return data.decode("utf-8-sig") if isinstance(data, bytes) else data
+
+
+def _operation_type_problem(op_data: dict) -> str | None:
+    """What is wrong with the types of one operation of `json apply`, or None. The types
+    are those of the preview's operations (the TransformOperation model of a client):
+    bundle_ids is a list of texts, target_page is a whole number, and folder_name,
+    old_name and gratitude are texts. Each field can also be null or missing."""
+    bundle_ids = op_data.get("bundle_ids")
+    if bundle_ids is not None and not (
+        isinstance(bundle_ids, list) and all(isinstance(b, str) for b in bundle_ids)
+    ):
+        return '"bundle_ids" must be a list of bundle IDs.'
+    target_page = op_data.get("target_page")
+    # A JSON true or false is a bool, and a bool is also an int in Python.
+    if target_page is not None and (not isinstance(target_page, int) or isinstance(target_page, bool)):
+        return '"target_page" must be a whole number.'
+    for key in ("folder_name", "old_name", "gratitude"):
+        if op_data.get(key) is not None and not isinstance(op_data[key], str):
+            return f'"{key}" must be text.'
+    return None
+
+
+def _read_apply_operations() -> tuple[list, str | None]:
+    """The input of `json apply` from stdin: {"operations": [...], "snapshot_id": ...}.
+    Returns the operations and the snapshot_id (None when the input has none). Stops the
+    command with a JSON error when the input is not that."""
     from unjiggle.analyzer import LayoutOperation
-    from unjiggle.device import connect, read_layout, write_layout
-    from unjiggle.layout_engine import apply_operations
 
+    expected = 'Expected {"operations": [...]}'
     try:
-        raw_input = click.get_text_stream("stdin").read()
-        data = _json.loads(raw_input)
-    except (ValueError, _json.JSONDecodeError) as e:
+        data = _json.loads(_read_stdin())
+    except ValueError as e:  # also a JSONDecodeError or a UnicodeDecodeError
         _json_err(f"Invalid JSON input: {e}")
-
-    operations_data = data.get("operations", [])
+    if not isinstance(data, dict):
+        _json_err(f"Invalid JSON input. {expected}")
+    operations_data = data.get("operations")
     if not operations_data:
-        _json_err("No operations provided. Expected {\"operations\": [...]}")
+        _json_err(f"No operations provided. {expected}")
+    if not isinstance(operations_data, list):
+        _json_err(f"Invalid JSON input. {expected}")
+    snapshot_id = data.get("snapshot_id")
+    if snapshot_id is not None and not isinstance(snapshot_id, str):
+        _json_err('Invalid JSON input. "snapshot_id" must be the text that the preview gave, or null.')
 
-    try:
-        lockdown, device = connect()
-    except Exception:
-        _json_err("No iPhone detected")
-
-    layout = read_layout(lockdown)
-
-    # Parse operations
     ops = []
     for op_data in operations_data:
+        shown = _json.dumps(op_data, ensure_ascii=False)
+        if not isinstance(op_data, dict) or not isinstance(op_data.get("action"), str):
+            _json_err(f'Invalid operation: {shown}. Each operation needs an "action".')
+        problem = _operation_type_problem(op_data)
+        if problem:
+            _json_err(f"Invalid operation: {shown}. {problem}")
         ops.append(LayoutOperation(
             action=op_data["action"],
-            bundle_ids=op_data.get("bundle_ids", []),
+            bundle_ids=op_data.get("bundle_ids") or [],
             target_page=op_data.get("target_page"),
             folder_name=op_data.get("folder_name"),
             old_name=op_data.get("old_name"),
             gratitude=op_data.get("gratitude"),
         ))
+    return ops, snapshot_id
 
-    predicted_layout, effective_ops = _preview_effective_operations(layout, ops)
-    if not effective_ops:
+
+def _json_verified_backup(lockdown, layout) -> Path:
+    """safety.verified_backup() with its text on stderr. Stops the command with a JSON
+    error when the backup fails, before anything is written."""
+    from unjiggle import safety
+
+    try:
+        return safety.verified_backup(lockdown, layout, out=_err_console)
+    except Exception as e:
+        _json_err(f"Backup failed: {e}. No changes made.")
+
+
+@json.command(name="apply")
+def json_apply():
+    """Apply operations from JSON on stdin. Asks no question.
+
+    The input is {"operations": [...], "snapshot_id": "..."}. snapshot_id is optional:
+    the snapshot_id of the preview (json suggest or json presets). When it is there and
+    the layout on the phone is not that snapshot any more, nothing is written, because
+    the operations would make a layout that the owner did not see.
+
+    The safety steps, in this order:
+    1. The check of the new icon state (layout_engine.check_write): it must read back as
+       the preview, lose no entry that no operation names, and add no app that is not
+       on the home screen. If not, nothing is written.
+    2. A verified backup (safety.verified_backup). If it fails, nothing is written.
+    3. The write.
+    4. The read-back check: the phone must read back as the preview.
+    The output has the backup path, for undo with `json restore`. After a failed write or
+    a failed read-back check, the error also has it.
+
+    There is no round trip: the write of the unchanged layout that `unjiggle suggest`
+    offers before its write (safety.test_restore_roundtrip). The reasons:
+    - Nobody can answer a question on stdin.
+    - When the write path is broken, the round trip also writes to the phone, so it does
+      not prevent a bad write. Step 4 finds the same problem, and the backup undoes it.
+    - The round trip compares the full icon state. If SpringBoard changes one value on a
+      write, every apply stops.
+    - It adds a write and two reads over USB, and one more reload of the home screen.
+    To test the write path, use `unjiggle safety-test`.
+    """
+    from unjiggle.device import connect, read_layout, write_layout
+
+    ops, snapshot_id = _read_apply_operations()
+
+    try:
+        lockdown, _device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
+    if snapshot_id is not None and snapshot_id != _layout_signature(layout):
+        _json_err("Not written: the layout on the iPhone changed since the preview. Make a new preview.")
+
+    # `applied` counts the operations that change the layout, one at a time. The write
+    # applies all operations together and then cleans up, as the preview of `json
+    # suggest` does, so the prediction is that preview.
+    _one_at_a_time, effective_ops = _preview_effective_operations(layout, ops)
+    modified_raw, predicted_layout, write_problem = _prepare_write(layout, ops)
+    changes = bool(effective_ops) and _layout_signature(predicted_layout) != _layout_signature(layout)
+    if changes and write_problem:
+        _json_err(f"Not written: {write_problem}. No changes made.")
+
+    # The backup is also made when nothing changes. Then "backup" is always the path of
+    # a backup of the layout before this command, which a client can restore.
+    backup_path = _json_verified_backup(lockdown, layout)
+
+    if not changes:
         _json_out({
             "requested": len(ops),
             "applied": 0,
-            "backup": None,
+            "backup": str(backup_path),
             "changed": False,
             **_snapshot_metadata(layout),
             "result": {
@@ -2276,21 +2480,17 @@ def json_apply():
         })
         return
 
-    # Safety: backup first
-    from unjiggle.safety import pre_write_safety_check
-    safe, backup_path = pre_write_safety_check(lockdown, layout)
-    if not safe:
-        _json_err("Safety check failed. No changes made.")
-
-    # Apply and write
-    modified_raw = apply_operations(layout, effective_ops)
-    write_layout(lockdown, modified_raw)
-
-    # Verify
-    from unjiggle.device import read_layout as re_read
-    verify = re_read(lockdown)
+    undo = f"To undo, restore {backup_path}."
+    try:
+        write_layout(lockdown, modified_raw)
+        verify = read_layout(lockdown)
+    except Exception as e:
+        _json_err(f"Write failed: {e}. {undo}", backup=str(backup_path))
     if _layout_signature(verify) != _layout_signature(predicted_layout):
-        _json_err("Write verification failed.")
+        _json_err(
+            f"Write verification failed: the layout on the iPhone does not match the preview. {undo}",
+            backup=str(backup_path),
+        )
 
     _json_out({
         "requested": len(ops),

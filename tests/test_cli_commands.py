@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from click.testing import CliRunner
 
 from unjiggle.cli import (
@@ -80,12 +81,16 @@ def test_beautiful_preset_sorts_known_categories_by_visual_order(chaotic_layout,
     score = compute_score(chaotic_layout, sample_metadata)
     payload = _generate_preset_transform("beautiful", chaotic_layout, sample_metadata, score)
     order = {category: index for index, category in enumerate(_CATEGORY_COLOR_ORDER)}
+    # Phone is in the dock and on page 1: it is fixed, so it stays in both places.
+    fixed = chaotic_layout.fixed_ids()
+    assert "com.apple.mobilephone" in fixed
+    assert payload["proposed_layout"]["dock"] == payload["current_layout"]["dock"]
 
     seen_categories = []
     for page in payload["proposed_layout"]["pages"]:
         assert len(page) <= 24
         for item in page:
-            if item["type"] != "app":
+            if item["type"] != "app" or item["app"]["bundle_id"] in fixed:
                 continue
             category = item["app"]["category"]
             if category != "Other":
@@ -171,14 +176,17 @@ def test_json_render_transform_requires_backup(monkeypatch, clean_layout, sample
     result = CliRunner().invoke(json_group, ["render", "--card", "transform"])
 
     assert result.exit_code == 1
-    assert json.loads(result.output)["error"] == "--backup is required for transform cards."
+    assert json.loads(result.stdout)["error"] == "--backup is required for transform cards."
+    # The message also goes to stderr, for a client that reads only stderr on failure.
+    assert result.stderr.strip() == "--backup is required for transform cards."
 
 
 def test_json_apply_rejects_missing_operations():
     result = CliRunner().invoke(json_group, ["apply"], input=json.dumps({"operations": []}))
 
     assert result.exit_code == 1
-    assert json.loads(result.output)["error"] == 'No operations provided. Expected {"operations": [...]}'
+    assert json.loads(result.stdout)["error"] == 'No operations provided. Expected {"operations": [...]}'
+    assert result.stderr.strip() == 'No operations provided. Expected {"operations": [...]}'
 
 
 def test_json_apply_applies_operations_and_reports_backup(monkeypatch, clean_layout):
@@ -194,8 +202,8 @@ def test_json_apply_applies_operations_and_reports_backup(monkeypatch, clean_lay
 
     monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
     monkeypatch.setattr(device, "read_layout", lambda lockdown: next(reads))
-    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, backup_path))
-    monkeypatch.setattr(layout_engine, "apply_operations", lambda layout, ops: {"iconLists": [["done"]]})
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: backup_path)
+    monkeypatch.setattr(layout_engine, "check_write", lambda layout, ops: ({"iconLists": [["done"]]}, predicted_layout, None))
     monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: written_raw.append(raw))
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (predicted_layout, ops))
 
@@ -220,16 +228,13 @@ def test_json_apply_skips_noop_batches(monkeypatch, clean_layout):
     import unjiggle.safety as safety
 
     writes: list[dict] = []
+    backup_path = Path("/tmp/layout-backup.json")
 
     monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
     monkeypatch.setattr(device, "read_layout", lambda lockdown: clean_layout)
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (layout, []))
     monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: writes.append(raw))
-    monkeypatch.setattr(
-        safety,
-        "pre_write_safety_check",
-        lambda lockdown, layout: (_ for _ in ()).throw(AssertionError("safety should not run for no-ops")),
-    )
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: backup_path)
 
     result = CliRunner().invoke(
         json_group,
@@ -241,7 +246,8 @@ def test_json_apply_skips_noop_batches(monkeypatch, clean_layout):
     payload = json.loads(result.output)
     assert payload["requested"] == 1
     assert payload["applied"] == 0
-    assert payload["backup"] is None
+    # A backup of the unchanged layout, so "backup" is always a path that a client can restore.
+    assert payload["backup"] == str(backup_path)
     assert payload["changed"] is False
     assert payload["layout_signature"] == payload["snapshot_id"]
     assert writes == []
@@ -265,8 +271,8 @@ def test_json_apply_accepts_compact_to_single_page(monkeypatch, clean_layout):
     monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
     monkeypatch.setattr(device, "read_layout", lambda lockdown: next(reads))
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (predicted_layout, ops))
-    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, backup_path))
-    monkeypatch.setattr(layout_engine, "apply_operations", lambda layout, ops: {"iconLists": [["done"]]})
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: backup_path)
+    monkeypatch.setattr(layout_engine, "check_write", lambda layout, ops: ({"iconLists": [["done"]]}, predicted_layout, None))
     monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: written_raw.append(raw))
 
     result = CliRunner().invoke(
@@ -287,6 +293,72 @@ def test_json_apply_accepts_compact_to_single_page(monkeypatch, clean_layout):
     assert payload["applied"] == 1
     assert payload["changed"] is True
     assert written_raw == [{"iconLists": [["done"]]}]
+
+
+def test_json_apply_writes_nothing_when_the_check_finds_a_problem(monkeypatch, clean_layout):
+    from unjiggle import device, layout_engine, safety
+
+    changed = HomeScreenLayout(dock=[], pages=[[clean_layout.pages[0][0]]], raw={"iconLists": [["x"]]})
+    writes: list = []
+    monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
+    monkeypatch.setattr(device, "read_layout", lambda lockdown: clean_layout)
+    monkeypatch.setattr(
+        layout_engine, "check_write",
+        lambda layout, ops: ({"iconLists": [["x"]]}, changed, "the written layout would differ from the preview"),
+    )
+    monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: writes.append(raw))
+    monkeypatch.setattr(
+        safety,
+        "verified_backup",
+        lambda lockdown, layout, out=None: (_ for _ in ()).throw(AssertionError("no backup before a refused write")),
+    )
+
+    result = CliRunner().invoke(
+        json_group,
+        ["apply"],
+        input=json.dumps({"operations": [{"action": "move_to_page", "bundle_ids": ["com.apple.weather"], "target_page": 1}]}),
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"] == (
+        "Not written: the written layout would differ from the preview. No changes made."
+    )
+    assert writes == []
+
+
+def test_json_apply_predicts_all_operations_together(monkeypatch):
+    """json apply writes the operations together, as the preview of json suggest shows
+    them. Here the delete empties page 2, and one operation at a time would give a
+    different page for the move."""
+    from unjiggle import device, safety
+
+    def app(b):
+        return {"bundleIdentifier": b, "iconType": "app"}
+
+    raw = [[app("com.dock")], [app("com.p1")], [app("com.a")], [app("com.b")], [app("com.c"), app("com.d")]]
+    state = {"raw": raw}
+    writes = []
+
+    def write_layout(lockdown, new_raw):
+        writes.append(new_raw)
+        state["raw"] = new_raw
+
+    monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
+    monkeypatch.setattr(device, "read_layout", lambda lockdown: device.parse_layout_state(state["raw"]))
+    monkeypatch.setattr(device, "write_layout", write_layout)
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: Path("/tmp/backup.json"))
+
+    operations = [
+        {"action": "delete", "bundle_ids": ["com.a"]},
+        {"action": "move_to_page", "bundle_ids": ["com.c"], "target_page": 2},
+    ]
+    result = CliRunner().invoke(json_group, ["apply"], input=json.dumps({"operations": operations}))
+
+    assert result.exit_code == 0, result.output
+    assert len(writes) == 1
+    pages = [[item.app.bundle_id for item in page] for page in device.parse_layout_state(writes[0]).pages]
+    # Page index 2 is the page of com.b while page 2 is still there, as in the preview.
+    assert pages == [["com.p1"], ["com.b", "com.c"], ["com.d"]]
 
 
 def test_json_scan_and_diagnose_include_snapshot_identity(monkeypatch, clean_layout, sample_metadata):
@@ -370,8 +442,8 @@ def test_preset_preload_lifecycle_invalidates_after_apply_and_restore(monkeypatc
     )
     monkeypatch.setattr(device, "read_layout", lambda lockdown: current_layout["value"])
     monkeypatch.setattr(itunes, "enrich_layout", lambda layout: sample_metadata)
-    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, backup_file))
-    monkeypatch.setattr(layout_engine, "apply_operations", lambda layout, ops: applied_layout.raw)
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: backup_file)
+    monkeypatch.setattr(layout_engine, "check_write", lambda layout, ops: (applied_layout.raw, applied_layout, None))
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (applied_layout, ops))
     monkeypatch.setattr(
         device,
@@ -417,3 +489,83 @@ def test_preset_preload_lifecycle_invalidates_after_apply_and_restore(monkeypatc
     assert refreshed_payload["layout_signature"] == apply_payload["layout_signature"]
     assert restore_payload["layout_signature"] == initial_payload["layout_signature"]
     assert restored_payload["layout_signature"] == initial_payload["layout_signature"]
+
+
+def _delete_test_state(raw_format: str):
+    """A phone with Maps and Dark Sky on page 1 and a two-app folder on page 2."""
+    dock = [{"bundleIdentifier": "com.apple.mobilephone", "iconType": "app"}]
+    page_1 = [
+        {"bundleIdentifier": "com.apple.Maps", "iconType": "app"},
+        {"bundleIdentifier": "com.darksky.darksky", "iconType": "app"},
+    ]
+    page_2 = [{
+        "displayName": "Travel",
+        "iconType": "folder",
+        "iconLists": [["com.airbnb.app", "com.uber.UberClient", "com.tripit.TripIt"]],
+    }]
+    if raw_format == "ios26":
+        return [dock, page_1, page_2]
+    return {"buttonBar": dock, "iconLists": [page_1, page_2], "ignored": ["com.old.app"]}
+
+
+@pytest.mark.parametrize("raw_format", ["legacy", "ios26"])
+def test_delete_is_previewed_applied_and_verified(monkeypatch, sample_metadata, raw_format):
+    from unjiggle import device, safety
+    from unjiggle.analyzer import LayoutOperation
+    from unjiggle.cli import _resolve_transform_preview
+    from unjiggle.scoring import compute_score
+
+    layout = device.parse_layout_state(_delete_test_state(raw_format))
+    delete = LayoutOperation(
+        action="delete",
+        bundle_ids=["com.darksky.darksky", "com.uber.UberClient"],
+        gratitude="Thanks for the rides.",
+    )
+
+    # The preview shows both apps leaving the home screen.
+    payload = _resolve_transform_preview(
+        "let go of old apps", layout, sample_metadata, compute_score(layout, sample_metadata), [delete],
+    )
+    assert payload["archived"] == 2
+    assert sorted((c["action"], c["bundle_id"]) for c in payload["changes"]) == [
+        ("delete", "com.darksky.darksky"),
+        ("delete", "com.uber.UberClient"),
+    ]
+    # Each delete row carries the gratitude line, and a detail line that says the
+    # write only takes the icon off the home screen.
+    for change in payload["changes"]:
+        assert change["gratitude"] == "Thanks for the rides."
+        assert change["detail"] == (
+            "Thanks for the rides. The icon leaves the home screen. "
+            "The app stays installed until you delete it."
+        )
+
+    # Applying writes the change, and the layout read back matches the preview.
+    state = {"raw": layout.raw}
+    writes = []
+
+    def write_layout(lockdown, raw):
+        writes.append(raw)
+        state["raw"] = raw
+
+    monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
+    monkeypatch.setattr(device, "read_layout", lambda lockdown: device.parse_layout_state(state["raw"]))
+    monkeypatch.setattr(device, "write_layout", write_layout)
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: Path("/tmp/backup.json"))
+
+    result = CliRunner().invoke(
+        json_group,
+        ["apply"],
+        input=json.dumps({"operations": payload["operations"]}),
+    )
+
+    assert result.exit_code == 0, result.output
+    applied = json.loads(result.output)
+    assert applied["applied"] == 1
+    assert applied["changed"] is True
+    assert len(writes) == 1
+    remaining = device.parse_layout_state(writes[0])
+    assert "com.darksky.darksky" not in remaining.all_bundle_ids
+    assert "com.uber.UberClient" not in remaining.all_bundle_ids
+    assert "com.airbnb.app" in remaining.all_bundle_ids
+    assert remaining.ignored == layout.ignored

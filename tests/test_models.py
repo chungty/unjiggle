@@ -85,3 +85,45 @@ class TestScoreBreakdown:
 
     def test_label_perfect(self):
         assert ScoreBreakdown(95, 95, 95, 95).label == "Perfectly Tuned"
+
+
+class TestWidgetSize:
+    def test_iphone_sizes_use_their_slots(self):
+        from unjiggle.models import WidgetSize
+
+        assert [WidgetSize.parse(s).slots for s in ("small", "medium", "large", "extraLarge")] == [4, 8, 16, 16]
+
+    def test_a_size_that_is_not_known_counts_as_the_largest(self):
+        from unjiggle.models import WidgetSize
+
+        assert WidgetSize.parse("systemJumbo") is WidgetSize.LARGE
+        assert WidgetSize.parse(None) is WidgetSize.SMALL  # no gridSize: the parser's default
+
+    def test_a_large_widget_fills_page_one_for_the_stylist(self):
+        from unjiggle import device, stylist
+        from unjiggle.analyzer import page_slots
+        from unjiggle.layout_engine import _raw_item_slots
+
+        def app(b):
+            return {"bundleIdentifier": b, "iconType": "app"}
+
+        bids = [f"com.x.a{i:02d}" for i in range(45)]
+        large = {"iconType": "widget", "containerBundleIdentifier": "com.apple.mobilecal", "gridSize": "large"}
+        raw = [[app(bids[0])], [large] + [app(b) for b in bids[1:9]],
+               [app(b) for b in bids[9:33]], [app(b) for b in bids[33:45]]]
+        layout = device.parse_layout_state(raw)
+        metadata = {b: {"name": b[-3:].upper(), "genre": "Utilities", "super_category": "Utilities"} for b in bids}
+        handles = stylist.build_handles(layout)
+
+        assert page_slots(layout.pages[0]) == 24 and _raw_item_slots(large) == 16
+        context = stylist.build_plan_context(layout, metadata, handles)
+        assert "PAGE 1 NOW: widgets use 16 of 24 slots (1 large)" in context
+        plan = {"page_one": [handles.by_bundle_id[b] for b in bids[33:45]], "folders": [],
+                "app_library": {"groups": [], "apps": []}, "delete": [], "unplaced": "stay"}
+        ops, report = stylist.expand_plan(plan, layout, metadata, handles)
+        # The large widget leaves 8 app slots. The 8 apps there move on, 8 of the 12
+        # arrive, and the other 4 do not fit.
+        after = stylist.preview_operations(layout, ops)
+        assert page_slots(after.pages[0]) == 24
+        assert [i.app.bundle_id for i in after.pages[0] if i.is_app] == bids[33:41]
+        assert report.page_one_overflow == [handles.by_bundle_id[b] for b in bids[41:45]]

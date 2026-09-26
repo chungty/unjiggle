@@ -18,6 +18,22 @@ class TestPreviewOperations:
         assert "com.darksky.darksky" in preview.ignored
         assert preview.page_count <= chaotic_layout.page_count
 
+    def test_delete_takes_apps_off_the_home_screen_without_marking_them_ignored(
+        self, chaotic_layout,
+    ):
+        # Matches layout_engine.apply_operations, which removes deleted icons from
+        # pages and folders but records only move_to_app_library as ignored.
+        ops = [LayoutOperation(
+            action="delete",
+            bundle_ids=["com.darksky.darksky", "com.linkedin.LinkedIn"],
+            gratitude="Thanks for the forecasts.",
+        )]
+        preview = preview_operations(chaotic_layout, ops)
+        assert "com.darksky.darksky" not in preview.all_bundle_ids
+        assert "com.linkedin.LinkedIn" not in preview.all_bundle_ids  # was in a folder
+        assert preview.ignored == chaotic_layout.ignored
+        assert "com.darksky.darksky" in chaotic_layout.all_bundle_ids  # original untouched
+
     def test_move_to_page(self, chaotic_layout):
         ops = [LayoutOperation(
             action="move_to_page",
@@ -109,7 +125,7 @@ class TestPreviewOperations:
         from tests.conftest import make_folder
 
         full_page = [make_app(f"com.test.app{i}") for i in range(23)]
-        full_page.append(make_folder("Source", ["com.test.extra", "com.test.extra2"]))
+        full_page.append(make_folder("Source", ["com.test.extra", "com.test.extra2", "com.test.stays"]))
         layout = HomeScreenLayout(
             dock=[],
             pages=[full_page],
@@ -124,6 +140,24 @@ class TestPreviewOperations:
 
         assert preview.page_count == 2
         assert preview.all_folders()[-1].display_name == "Overflow"
+
+    def test_a_folder_that_the_operation_empties_frees_its_slot(self):
+        from tests.conftest import make_folder
+
+        full_page = [make_app(f"com.test.app{i}") for i in range(23)]
+        full_page.append(make_folder("Source", ["com.test.extra", "com.test.extra2"]))
+        layout = HomeScreenLayout(dock=[], pages=[full_page])
+        ops = [LayoutOperation(
+            action="create_folder",
+            bundle_ids=["com.test.extra", "com.test.extra2"],
+            folder_name="Overflow",
+        )]
+
+        preview = preview_operations(layout, ops)
+
+        # Source has no apps left, and the cleanup removes it, so Overflow fits on page 1.
+        assert preview.page_count == 1
+        assert [folder.display_name for folder in preview.all_folders()] == ["Overflow"]
 
     def test_empty_pages_removed(self, chaotic_layout):
         """If all apps are removed from a page, the page should be cleaned up."""
@@ -255,3 +289,82 @@ class TestParseResult:
 
         assert len(result.observations[0].operations) == 1
         assert result.observations[0].operations[0].action == "rebuild_pages"
+
+
+def _pinned_layout():
+    from unjiggle.device import parse_layout_state
+
+    return parse_layout_state([
+        [{"bundleIdentifier": "com.dock", "iconType": "app"}],
+        [{"bundleIdentifier": "com.a", "iconType": "app"},
+         {"displayIdentifier": "com.web.clip", "displayName": "Clip"},
+         {"displayName": "Old", "listType": "folder",
+          "iconLists": [[{"bundleIdentifier": "com.b"}, {"displayIdentifier": "com.old.game"}]]}],
+    ])
+
+
+class TestPinnedIcons:
+    """An icon with no bundleIdentifier is not an App Store app: no operation acts on it."""
+
+    def test_the_context_marks_pinned_icons_as_fixed(self):
+        from unjiggle.analyzer import _build_context
+        from unjiggle.scoring import compute_score
+
+        layout = _pinned_layout()
+        context = _build_context(layout, {}, compute_score(layout, {}))
+        assert "  com.web.clip FIXED" in context
+        assert "    com.old.game FIXED" in context
+        assert "  com.a\n" in context
+
+    def test_operations_that_name_only_pinned_icons_are_dropped(self):
+        layout = _pinned_layout()
+        data = {
+            "observations": [{
+                "track": "cleanup", "title": "Old", "narrative": "Old things.",
+                "operations": [
+                    {"action": "delete", "bundle_ids": ["com.web.clip"], "gratitude": "Bye."},
+                    {"action": "move_to_app_library", "bundle_ids": ["com.old.game", "com.b"]},
+                ],
+            }],
+            "personality": "Test", "archetype": "Test",
+        }
+        ops = _parse_result(data, layout).observations[0].operations
+        assert [(op.action, op.bundle_ids) for op in ops] == [("move_to_app_library", ["com.b"])]
+
+    def test_the_preview_keeps_pinned_icons_that_an_operation_names(self):
+        layout = _pinned_layout()
+        ops = [LayoutOperation(action="move_to_app_library", bundle_ids=["com.web.clip", "com.old.game", "com.b"])]
+        preview = preview_operations(layout, ops)
+        assert preview.all_bundle_ids == ["com.dock", "com.a", "com.web.clip", "com.old.game"]
+
+    def test_the_icons_of_an_app_with_two_icons_are_fixed(self):
+        from unjiggle.analyzer import _build_context
+        from unjiggle.device import parse_layout_state
+        from unjiggle.scoring import compute_score
+
+        raw = _pinned_layout().raw
+        raw[1].insert(0, {"bundleIdentifier": "com.b", "displayIdentifier": "UUID-B", "iconType": "app"})
+        layout = parse_layout_state(raw)
+        metadata = {"com.b": {"name": "Bee", "super_category": "Productivity"}}
+        context = _build_context(layout, metadata, compute_score(layout, metadata))
+        assert context.count("com.b (Bee) [Productivity]") == 2
+        assert all(line.endswith(" FIXED") for line in context.splitlines() if "com.b (Bee)" in line)
+        data = {
+            "observations": [{
+                "track": "cleanup", "title": "Two", "narrative": "Two icons.",
+                "operations": [{"action": "move_to_app_library", "bundle_ids": ["com.b", "com.a"]}],
+            }],
+            "personality": "Test", "archetype": "Test",
+        }
+        ops = _parse_result(data, layout).observations[0].operations
+        assert [(op.action, op.bundle_ids) for op in ops] == [("move_to_app_library", ["com.a"])]
+
+    def test_the_operation_contract_says_that_widgets_and_fixed_icons_stay(self):
+        from unjiggle.analyzer import OPERATION_SCHEMA, SYSTEM_PROMPT
+
+        actions = OPERATION_SCHEMA["properties"]["action"]["description"]
+        assert "Page 1 keeps its widgets and FIXED icons in their places" in actions
+        assert "Apps and folders not listed leave the home screen" in actions
+        assert "widgets not listed leave" not in actions
+        assert "one of two or more icons of the same app" in SYSTEM_PROMPT
+        assert "No operation moves or removes a FIXED icon, and widgets stay too" in " ".join(SYSTEM_PROMPT.split())

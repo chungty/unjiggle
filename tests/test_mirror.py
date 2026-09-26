@@ -50,3 +50,26 @@ def test_context_includes_score():
 
     assert "ORGANIZATION SCORE:" in context
     assert str(int(score.total)) in context
+
+
+def test_context_lists_each_app_once_with_a_short_description_and_no_timestamps():
+    from unjiggle.mirror import DESCRIPTION_CHARS
+
+    layout = HomeScreenLayout(dock=[], pages=[[_app("com.a"), _app("com.b"), _app("com.c"), _app("com.a")]])
+    metadata = {
+        "com.a": {"name": "Alpha", "super_category": "Games", "last_updated": "2019-05-01T00:00:00Z",
+                  "description": "A long\n\ndescription " * 10},
+        "com.b": {"name": "Beta", "super_category": "System", "last_updated": None, "description": None},
+        "com.c": {"name": "Gamma", "super_category": "Games", "last_updated": "2099-01-01T00:00:00Z",
+                  "description": "Short."},
+    }
+    context = _build_context(layout, metadata, ScoreBreakdown(50, 50, 50, 50))
+
+    assert context.count("Alpha") == 1
+    alpha = next(line for line in context.splitlines() if "Alpha" in line)
+    assert alpha.startswith("  Alpha | last update 2019 | A long description")
+    assert len(alpha.split(" | ")[-1]) == DESCRIPTION_CHARS
+    assert "\n  Gamma | Short.\n" in context
+    assert "\n  Beta\n" in context
+    assert "T00:00:00Z" not in context
+    assert "None" not in context

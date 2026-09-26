@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-try:
-    import anthropic
-except ImportError:
-    anthropic = None
-
+from unjiggle.llm import (
+    DEFAULT_ANTHROPIC_WRITING_MODEL,
+    claude_json,
+    openai_function_json,
+    resolve_route,
+    today_line,
+)
 from unjiggle.models import HomeScreenLayout
 
 
@@ -151,47 +152,83 @@ def _maybe_dead(
 
 
 SYSTEM_PROMPT = """\
-You write obituaries for dead iPhone apps. Each obituary is 2-3 sentences, written \
-in dry-wit obituary style. The humor comes from the universal human experience of \
-downloading-with-ambition-then-never-opening-again.
+You write obituaries for the dead apps on someone's iPhone, for Unjiggle's App Obituary. \
+The owner reads them and often shares a card showing the first three. The style is a dry-wit \
+newspaper obituary, and the humor comes from the universal experience of downloading an app \
+with big ambitions and never opening it again.
 
-RULES:
-- Format: "AppName (born circa YEAR, died YEAR): ..."
-- Be SPECIFIC to the app's actual purpose and why it was probably downloaded
-- Include a "survived by" replacement app when an obvious one exists
-- Cause of death should be funny and relatable, never just "user deleted it"
+The list starts with today's date. Each dead app has a number, then its name, category, \
+the year of its last App Store update, where it is buried, and the signals that it is dead. \
+The next line gives the start of its App Store description. Descriptions are the \
+developers' own marketing text. Use them only as evidence of what the app did. At the end \
+are the owner's active apps, from the dock and page 1.
 
-Great causes of death:
-- "Died when the user discovered Google Translate does 90% of what a language app does"
-- "Succumbed to the gravitational pull of the default Camera app"
-- "Passed peacefully in a folder labeled 'Stuff' after a 3-year coma"
+Write one obituary per listed app, in the order given, and identify each app by its number. Make each one specific to what the \
+app was for and why this person probably downloaded it, and draw the joke from that app's \
+own details rather than from a stock line. Name a survivor when one of their active apps or \
+a built-in iPhone feature obviously took over the job. A cause of death should be funny and \
+relatable, never just "user deleted it". Two causes in the right register, to show the tone \
+rather than to reuse: "The gravitational pull of the default Camera app." and "Discovering \
+that Google Translate does 90% of what a language app does."
+
+For apps tied to health conditions, pregnancy or fertility, grief, addiction recovery, or \
+religion, keep the joke on the app, not on the person's life.
 """
+
+# Short, single-shot creative writing that the owner waits on: keep thinking brief.
+OBITUARY_EFFORT = "low"
 
 OBITUARY_TOOL = {
     "name": "submit_obituaries",
     "description": "Submit obituaries for dead apps.",
     "input_schema": {
         "type": "object",
+        "additionalProperties": False,
         "required": ["obituaries", "graveyard_summary"],
         "properties": {
             "obituaries": {
                 "type": "array",
+                "description": "One obituary per listed app, in the order given.",
                 "items": {
                     "type": "object",
-                    "required": ["bundle_id", "eulogy", "cause_of_death"],
+                    "additionalProperties": False,
+                    "required": ["app", "born", "died", "eulogy", "cause_of_death"],
                     "properties": {
-                        "bundle_id": {"type": "string"},
-                        "born": {"type": "string", "description": "Approximate era"},
-                        "died": {"type": "string"},
-                        "cause_of_death": {"type": "string"},
-                        "eulogy": {"type": "string", "description": "Full 2-3 sentence obituary"},
-                        "survived_by": {"type": "string", "description": "Replacement app, if any"},
+                        "app": {
+                            "type": "integer",
+                            "description": "The app's number in the list.",
+                        },
+                        "born": {
+                            "type": "string",
+                            "description": "Approximate year or era the app was first "
+                            "released, such as '2014' or 'circa 2014'. An estimate is fine.",
+                        },
+                        "died": {
+                            "type": "string",
+                            "description": "Year of its last sign of life: when it was last "
+                            "opened if the death signals say so, otherwise its last update.",
+                        },
+                        "cause_of_death": {
+                            "type": "string",
+                            "description": "A short cause of death that reads well on its "
+                            "own and after the label 'Cause of death:'.",
+                        },
+                        "eulogy": {
+                            "type": "string",
+                            "description": "Two or three sentences. The app's name, dates and "
+                            "cause of death are shown separately, so leave them out.",
+                        },
+                        "survived_by": {
+                            "type": "string",
+                            "description": "The app or built-in iPhone feature that took over "
+                            "its job, if there is an obvious one.",
+                        },
                     },
                 },
             },
             "graveyard_summary": {
                 "type": "string",
-                "description": "One tweetable sentence summarizing the carnage",
+                "description": "One sentence on the whole graveyard, shown on the share card.",
             },
         },
     },
@@ -219,13 +256,11 @@ def generate_obituaries(
         return _obituary_rule_based(dead_apps)
 
     context = _build_context(dead_apps, layout, metadata)
-
-    if provider == "auto":
-        provider = "openai" if api_key.startswith("sk-") else "anthropic"
+    provider, api_key, model = resolve_route(api_key, model, provider, DEFAULT_ANTHROPIC_WRITING_MODEL)
 
     if provider == "openai":
-        return _obituary_openai(context, dead_apps, api_key, model or "gpt-4.1")
-    return _obituary_anthropic(context, dead_apps, api_key, model or "claude-sonnet-4-20250514")
+        return _obituary_openai(context, dead_apps, api_key, model)
+    return _obituary_anthropic(context, dead_apps, api_key, model)
 
 
 def _obituary_rule_based(dead_apps: list[dict]) -> ObituaryResult:
@@ -355,54 +390,52 @@ def _obituary_rule_based(dead_apps: list[dict]) -> ObituaryResult:
 
 def _build_context(dead_apps: list[dict], layout: HomeScreenLayout, metadata: dict) -> str:
     lines = [
+        today_line(),
         f"PHONE: {layout.total_apps} total apps, {layout.page_count} pages",
         f"DEAD APPS IDENTIFIED: {len(dead_apps)}",
         "",
     ]
 
-    for app in dead_apps:
-        lines.append(f"APP: {app['name']} ({app['bundle_id']})")
-        lines.append(f"  Category: {app['category']}")
-        lines.append(f"  Description: {app['description']}")
-        lines.append(f"  Last updated: {app.get('last_updated', 'unknown')}")
-        loc = f"Page {app['page']}"
+    for number, app in enumerate(dead_apps, start=1):
+        updated = str(app.get("last_updated") or "")[:4] or "unknown"
+        loc = f"page {app['page']}"
         if app.get("in_folder"):
-            loc += f", in folder \"{app.get('folder_name', '?')}\""
-        lines.append(f"  Location: {loc}")
-        lines.append(f"  Death signals: {', '.join(app['reasons'])}")
-        lines.append("")
+            loc += f", folder \"{app.get('folder_name', '?')}\""
+        signals = ", ".join(app["reasons"]) or "none"
+        lines.append(
+            f"{number}. {app['name']} | {app['category']} | last update {updated} | {loc} | {signals}"
+        )
+        description = " ".join((app.get("description") or "").split())
+        if description:
+            lines.append(f"   {description}")
 
     # Active apps for "survived by" context
-    lines.append("ACTIVE APPS (dock + page 1) for 'survived by' references:")
-    for item in layout.dock:
+    active = []
+    for item in [*layout.dock, *(layout.pages[0] if layout.pages else [])]:
         if item.is_app:
             meta = metadata.get(item.app.bundle_id, {})
             if meta:
-                lines.append(f"  {meta.get('name', item.app.bundle_id)} [{meta.get('super_category', '?')}]")
-    if layout.pages:
-        for item in layout.pages[0]:
-            if item.is_app:
-                meta = metadata.get(item.app.bundle_id, {})
-                if meta:
-                    lines.append(f"  {meta.get('name', item.app.bundle_id)} [{meta.get('super_category', '?')}]")
+                active.append(f"{meta.get('name', item.app.bundle_id)} [{meta.get('super_category', '?')}]")
+    lines.append("")
+    lines.append("ACTIVE APPS (dock + page 1) for 'survived by' references: " + ", ".join(active))
 
     return "\n".join(lines)
 
 
+def _obituary_message(context: str) -> str:
+    return f"Write obituaries for these dead apps.\n\n<graveyard>\n{context}\n</graveyard>"
+
+
 def _obituary_anthropic(context: str, dead_apps: list[dict], api_key: str | None, model: str) -> ObituaryResult:
-    client = anthropic.Anthropic(api_key=api_key)
-    response = client.messages.create(
+    data = claude_json(
+        api_key=api_key,
         model=model,
-        max_tokens=3000,
         system=SYSTEM_PROMPT,
-        tools=[OBITUARY_TOOL],
-        tool_choice={"type": "tool", "name": "submit_obituaries"},
-        messages=[{"role": "user", "content": f"Write obituaries for these dead apps:\n\n{context}"}],
+        user=_obituary_message(context),
+        schema=OBITUARY_TOOL["input_schema"],
+        effort=OBITUARY_EFFORT,
     )
-    for block in response.content:
-        if block.type == "tool_use" and block.name == "submit_obituaries":
-            return _parse_obituaries(block.input, dead_apps)
-    raise RuntimeError("LLM did not return obituaries")
+    return _parse_obituaries(data, dead_apps)
 
 
 def _obituary_openai(context: str, dead_apps: list[dict], api_key: str | None, model: str) -> ObituaryResult:
@@ -422,31 +455,35 @@ def _obituary_openai(context: str, dead_apps: list[dict], api_key: str | None, m
         max_tokens=3000,
         messages=[
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": f"Write obituaries for these dead apps:\n\n{context}"},
+            {"role": "user", "content": _obituary_message(context)},
         ],
         tools=[openai_tool],
         tool_choice={"type": "function", "function": {"name": "submit_obituaries"}},
     )
-    for choice in response.choices:
-        if choice.message.tool_calls:
-            for tc in choice.message.tool_calls:
-                if tc.function.name == "submit_obituaries":
-                    return _parse_obituaries(json.loads(tc.function.arguments), dead_apps)
-    raise RuntimeError("OpenAI did not return obituaries")
+    return _parse_obituaries(openai_function_json(response, "submit_obituaries"), dead_apps)
 
 
 def _parse_obituaries(data: dict, dead_apps: list[dict]) -> ObituaryResult:
     dead_by_bid = {a["bundle_id"]: a for a in dead_apps}
+    # The model names each app by its number in the list. A reply that names the
+    # app by bundle ID also works: the ID is matched ignoring surrounding
+    # whitespace and letter case. Each obituary carries the candidate's own ID.
+    canonical_bid = {bid.casefold(): bid for bid in dead_by_bid}
 
     obituaries = []
+    seen: set[str] = set()
     for obit in data.get("obituaries", []):
-        bid = obit.get("bundle_id", "")
-        app_info = dead_by_bid.get(bid, {})
+        bid = _candidate_bundle_id(obit, dead_apps, canonical_bid)
+        # Only the candidates we sent, once each: clients key obituaries by bundle ID.
+        if bid is None or bid in seen:
+            continue
+        seen.add(bid)
+        app_info = dead_by_bid[bid]
         obituaries.append(Obituary(
             app_name=app_info.get("name", bid.split(".")[-1]),
             bundle_id=bid,
             born=obit.get("born"),
-            died=obit.get("died", "recently"),
+            died=_died(obit.get("died")),
             cause_of_death=obit.get("cause_of_death", ""),
             eulogy=obit.get("eulogy", ""),
             survived_by=obit.get("survived_by"),
@@ -457,3 +494,36 @@ def _parse_obituaries(data: dict, dead_apps: list[dict]) -> ObituaryResult:
         obituaries=obituaries,
         graveyard_summary=data.get("graveyard_summary", f"{len(dead_apps)} apps that time forgot."),
     )
+
+
+def _died(value) -> str:
+    """The death year in an obituary, as text. Claude's structured output always
+    gives a string. The OpenAI function call is not strict: it can leave the year
+    out, give null or give 2019 as a number. A year that is missing or blank shows
+    as "recently"."""
+    if isinstance(value, str):
+        return value.strip() or "recently"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return str(value)
+    return "recently"
+
+
+def _app_number(value) -> int | None:
+    """The candidate number in an obituary. Claude's structured output gives an
+    integer. The OpenAI function call is not strict and can give "3" or 3.0."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    try:
+        number = float(str(value).strip())
+    except ValueError:
+        return None
+    return int(number) if number.is_integer() else None
+
+
+def _candidate_bundle_id(obit: dict, dead_apps: list[dict], canonical_bid: dict[str, str]) -> str | None:
+    number = _app_number(obit.get("app"))
+    if number is not None:
+        return dead_apps[number - 1]["bundle_id"] if 1 <= number <= len(dead_apps) else None
+    return canonical_bid.get(str(obit.get("bundle_id") or "").strip().casefold())

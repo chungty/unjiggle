@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
 from unjiggle.models import (
@@ -62,6 +63,74 @@ def connect() -> tuple:
     return lockdown, info
 
 
+def is_widget_entry(raw_item) -> bool:
+    """True for a widget or a Smart Stack entry of the icon state."""
+    if not isinstance(raw_item, dict):
+        return False
+    return (
+        raw_item.get("iconType") == "widget"
+        or raw_item.get("elementType") == "widget"
+        or (bool(raw_item.get("elements")) and raw_item.get("iconType") == "custom")
+    )
+
+
+def is_folder_entry(raw_item) -> bool:
+    """True for a folder entry of the icon state.
+
+    SpringBoard marks a folder with listType "folder" (older states use iconType
+    "folder"). On iOS 26, widgets, Smart Stacks and some apps also have an
+    "iconLists" key, often an empty list, so that key alone does not make a folder.
+    An entry with no type and no identifier of its own is a folder only when its
+    iconLists holds entries.
+    """
+    if not isinstance(raw_item, dict) or is_widget_entry(raw_item):
+        return False
+    if raw_item.get("listType") == "folder" or raw_item.get("iconType") == "folder":
+        return True
+    if raw_item.get("bundleIdentifier") or raw_item.get("displayIdentifier"):
+        return False
+    return any(raw_item.get("iconLists") or [])
+
+
+def entry_app_id(raw_item) -> str | None:
+    """The ID of an app entry: its bundleIdentifier, or for an icon that the phone
+    shows without one (a pinned icon, see is_pinned_entry) its displayIdentifier.
+    None for a widget, a folder or an entry that the parser does not show.
+
+    The parser and the write path (layout_engine) find an app by this ID, so both
+    see the same apps.
+    """
+    if isinstance(raw_item, str):
+        return raw_item or None
+    if not isinstance(raw_item, dict) or is_widget_entry(raw_item) or is_folder_entry(raw_item):
+        return None
+    bundle_id = raw_item.get("bundleIdentifier")
+    if bundle_id:
+        return bundle_id
+    if raw_item.get("iconType") in (None, "app"):
+        return raw_item.get("displayIdentifier") or None
+    return None
+
+
+def is_pinned_entry(raw_item) -> bool:
+    """True for an icon that the parser shows as an app, but that has no
+    bundleIdentifier (only a displayIdentifier): an icon that is not an App Store app,
+    such as a web shortcut or an App Clip. The App Library cannot hold it, so the
+    engine never moves or removes it (see models.AppItem.pinned)."""
+    return (
+        isinstance(raw_item, dict)
+        and not raw_item.get("bundleIdentifier")
+        and entry_app_id(raw_item) is not None
+    )
+
+
+def is_app_store_entry(raw_item) -> bool:
+    """True for an app entry with a bundle ID: an App Store app (or an Apple app) that
+    can go to the App Library. A widget, a folder, a pinned icon and an entry that the
+    parser does not show are not."""
+    return entry_app_id(raw_item) is not None and not is_pinned_entry(raw_item)
+
+
 def _parse_item(raw_item) -> LayoutItem | None:
     """Parse a single item from the iOS 26 icon state format."""
     if isinstance(raw_item, str):
@@ -70,50 +139,26 @@ def _parse_item(raw_item) -> LayoutItem | None:
     if not isinstance(raw_item, dict):
         return None
 
-    icon_type = raw_item.get("iconType", raw_item.get("elementType", ""))
     bundle_id = raw_item.get("bundleIdentifier", "")
 
-    # Widget (standalone or in smart stack)
-    if icon_type == "widget" or raw_item.get("elementType") == "widget":
-        size_str = raw_item.get("gridSize", "small")
-        try:
-            size = WidgetSize(size_str)
-        except ValueError:
-            size = WidgetSize.SMALL
+    if is_widget_entry(raw_item):
+        # A Smart Stack is a custom entry with an elements array of widgets.
+        stack = raw_item.get("iconType") != "widget" and raw_item.get("elementType") != "widget"
         return LayoutItem(widget=WidgetItem(
-            container_bundle_id=raw_item.get("containerBundleIdentifier", bundle_id),
-            grid_size=size,
+            container_bundle_id="smartstack" if stack else raw_item.get("containerBundleIdentifier", bundle_id),
+            grid_size=WidgetSize.parse(raw_item.get("gridSize")),
             raw=raw_item,
         ))
 
-    # Smart Stack (has elements array with multiple widgets)
-    if raw_item.get("elements") and raw_item.get("iconType") == "custom":
-        size_str = raw_item.get("gridSize", "small")
-        try:
-            size = WidgetSize(size_str)
-        except ValueError:
-            size = WidgetSize.SMALL
-        return LayoutItem(widget=WidgetItem(
-            container_bundle_id="smartstack",
-            grid_size=size,
-            raw=raw_item,
-        ))
-
-    # Folder (has iconLists with actual content)
-    if raw_item.get("iconType") == "folder" or (
-        raw_item.get("iconLists") and any(raw_item.get("iconLists", []))
-    ):
+    if is_folder_entry(raw_item):
         folder_pages = []
         for folder_page in raw_item.get("iconLists", []):
             apps = []
             for entry in folder_page:
-                if isinstance(entry, str):
-                    apps.append(AppItem(bundle_id=entry))
-                elif isinstance(entry, dict):
-                    bid = entry.get("bundleIdentifier", "")
-                    name = entry.get("displayName")
-                    if bid:
-                        apps.append(AppItem(bundle_id=bid, display_name=name))
+                app_id = entry_app_id(entry)
+                if app_id:
+                    name = entry.get("displayName") if isinstance(entry, dict) else None
+                    apps.append(AppItem(bundle_id=app_id, display_name=name, pinned=is_pinned_entry(entry)))
             folder_pages.append(apps)
         return LayoutItem(folder=FolderItem(
             display_name=raw_item.get("displayName", "Unnamed Folder"),
@@ -121,11 +166,14 @@ def _parse_item(raw_item) -> LayoutItem | None:
             raw=raw_item,
         ))
 
-    # Regular app (dict format in iOS 26)
-    if bundle_id:
+    # An app (a dict on iOS 26). An icon with no bundleIdentifier is found by its
+    # displayIdentifier: it takes a slot, and it is pinned (not an App Store app).
+    app_id = entry_app_id(raw_item)
+    if app_id:
         return LayoutItem(app=AppItem(
-            bundle_id=bundle_id,
+            bundle_id=app_id,
             display_name=raw_item.get("displayName"),
+            pinned=is_pinned_entry(raw_item),
         ))
 
     return None
@@ -221,9 +269,41 @@ def backup_layout(layout: HomeScreenLayout, path: Path) -> None:
     path.write_text(json.dumps(layout.raw, indent=2, default=str))
 
 
-def restore_layout_from_file(path: Path) -> dict:
-    """Load a raw layout state from a JSON backup file."""
-    return json.loads(path.read_text())
+def restore_layout_from_file(path: Path):
+    """Load a raw layout state from a JSON backup file.
+
+    A backup is the icon state as json.dumps(default=str) writes it
+    (safety.verified_backup), so each date that the phone gave (the iconModDate of an
+    app) is text in the file, such as "2026-09-23 19:06:58.692950". Each such text
+    becomes a datetime again (see dates_from_backup), so that a restore writes the same
+    types that the phone gave, as a write of `json apply` does.
+    """
+    return dates_from_backup(json.loads(path.read_text()))
+
+
+# The keys of the icon state that hold a date. JSON has no date type, so a backup
+# holds each one as text.
+_DATE_KEYS = frozenset({"iconModDate"})
+
+
+def dates_from_backup(value):
+    """A copy of a raw state from a backup file, with each iconModDate text that is an
+    ISO date changed back to a datetime. Other values stay as they are."""
+    if isinstance(value, list):
+        return [dates_from_backup(item) for item in value]
+    if isinstance(value, dict):
+        restored = {}
+        for key, item in value.items():
+            if key in _DATE_KEYS and isinstance(item, str):
+                try:
+                    item = datetime.fromisoformat(item)
+                except ValueError:
+                    pass
+            else:
+                item = dates_from_backup(item)
+            restored[key] = item
+        return restored
+    return value
 
 
 # Keep old name as alias for tests
