@@ -136,6 +136,43 @@ class TestRestoreFromBackup:
         assert len(undo) == 1
         assert json.loads(undo[0].read_text()) == [[], [{"bundleIdentifier": "com.now.only"}]]
 
+    def _phone_that_adds_an_app(self, tmp_path, monkeypatch, change=None):
+        from tests.fake_springboard import adds_unlisted_app
+
+        phone, backup = self._setup(tmp_path, monkeypatch, json.dumps(_phone_state()))
+
+        def write_layout(lockdown, state):
+            phone.write_layout(lockdown, state)
+            phone.raw = adds_unlisted_app(phone.raw)
+            if change:
+                change(phone.raw)
+
+        monkeypatch.setattr(device, "write_layout", write_layout)
+        return phone, backup
+
+    def test_restore_names_an_app_that_ios_adds(self, tmp_path, monkeypatch, capsys):
+        phone, backup = self._phone_that_adds_an_app(tmp_path, monkeypatch)
+
+        assert safety.restore_from_backup(None, backup) is True
+
+        out = capsys.readouterr().out
+        assert "Restore verified." in out
+        assert "iOS added an app that the backup does not have: Amazon (page 1)." in out
+        assert "minor differences" not in out
+        assert len(phone.writes) == 1
+
+    def test_restore_with_another_difference_says_what_it_said_before(self, tmp_path, monkeypatch, capsys):
+        def drop_page_b(state):
+            del state[1][1]
+
+        _phone, backup = self._phone_that_adds_an_app(tmp_path, monkeypatch, change=drop_page_b)
+
+        assert safety.restore_from_backup(None, backup) is True
+
+        out = capsys.readouterr().out
+        assert "minor differences" in out
+        assert "iOS added" not in out
+
     def test_restore_refuses_a_backup_with_no_apps(self, tmp_path, monkeypatch):
         for content in ("[]", "{}", "[[]]"):
             phone, backup = self._setup(tmp_path, monkeypatch, content)

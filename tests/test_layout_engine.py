@@ -1142,3 +1142,163 @@ class TestFolderPagesAndShapes:
         existing = next(item for item in raw[2] if item.get("displayName") == "Pictures")
         assert set(new) == set(existing) == {"displayName", "iconLists", "listType"}
         assert new["listType"] == "folder"
+
+
+class TestIosAddedApps:
+    """layout_engine.ios_added_apps: the apps that iOS added at a write, when they are
+    the only difference between the read-back layout and the expected layout."""
+
+    AMAZON = {"bundleIdentifier": "com.amazon.Amazon", "displayIdentifier": "com.amazon.Amazon",
+              "displayName": "Amazon"}
+
+    @staticmethod
+    def _app(bundle_id):
+        return {"bundleIdentifier": bundle_id, "displayIdentifier": bundle_id}
+
+    def _state(self):
+        return [
+            [self._app("com.dock.a")],
+            [self._app("com.page.a"), self._app("com.page.b"), self._app("com.page.c")],
+            [{"displayName": "F", "listType": "folder", "iconLists": [[self._app("com.folder.a")]]},
+             self._app("com.page.d")],
+        ]
+
+    @staticmethod
+    def _check(read_back, expected, before=None):
+        from unjiggle.device import parse_layout_state
+        from unjiggle.layout_engine import ios_added_apps
+
+        return ios_added_apps(
+            parse_layout_state(read_back),
+            parse_layout_state(expected),
+            None if before is None else parse_layout_state(before),
+        )
+
+    def test_the_same_layout_has_no_added_app(self):
+        assert self._check(self._state(), self._state()) == []
+
+    def test_an_app_at_the_end_of_a_page(self):
+        read_back = self._state()
+        read_back[2].append(self.AMAZON)
+
+        assert self._check(read_back, self._state(), before=self._state()) == [
+            {"bundle_id": "com.amazon.Amazon", "name": "Amazon", "page": 2},
+        ]
+
+    def test_an_app_in_the_middle_of_a_page_moves_only_the_entries_after_it(self):
+        read_back = self._state()
+        read_back[1].insert(1, self.AMAZON)
+
+        assert self._check(read_back, self._state()) == [
+            {"bundle_id": "com.amazon.Amazon", "name": "Amazon", "page": 1},
+        ]
+
+    def test_an_app_on_a_new_page(self):
+        read_back = [*self._state(), [self.AMAZON]]
+
+        assert self._check(read_back, self._state()) == [
+            {"bundle_id": "com.amazon.Amazon", "name": "Amazon", "page": 3},
+        ]
+
+    def test_an_app_with_no_display_name_is_named_by_its_bundle_id(self):
+        read_back = self._state()
+        read_back[2].append(self._app("com.example.NewApp"))
+
+        assert self._check(read_back, self._state())[0]["name"] == "NewApp"
+
+    def test_two_added_apps(self):
+        read_back = self._state()
+        read_back[1].append(self.AMAZON)
+        read_back[2].append(self._app("com.example.other"))
+
+        assert [app["bundle_id"] for app in self._check(read_back, self._state())] == [
+            "com.amazon.Amazon", "com.example.other",
+        ]
+
+    def test_an_app_that_was_on_the_home_screen_before_the_write_is_not_added(self):
+        # An operation took the app off the home screen, and the phone put it back.
+        before = self._state()
+        before[1].append(self.AMAZON)
+        read_back = self._state()
+        read_back[2].append(self.AMAZON)
+
+        assert self._check(read_back, self._state(), before=before) is None
+
+    @pytest.mark.parametrize("bundle_id", ["com.dock.a", "com.page.a", "com.folder.a"])
+    def test_a_second_icon_of_an_app_on_the_home_screen_is_not_added(self, bundle_id):
+        read_back = self._state()
+        read_back[2].append(self._app(bundle_id))
+
+        assert self._check(read_back, self._state()) is None
+
+    def test_two_icons_of_the_added_app_are_not_added(self):
+        read_back = self._state()
+        read_back[1].append(self.AMAZON)
+        read_back[2].append({**self.AMAZON, "displayIdentifier": "UUID-1"})
+
+        assert self._check(read_back, self._state()) is None
+
+    @pytest.mark.parametrize("where", ["dock", "folder"])
+    def test_an_app_that_is_not_loose_on_a_page_is_not_added(self, where):
+        read_back = self._state()
+        if where == "dock":
+            read_back[0].append(self.AMAZON)
+        else:
+            read_back[2][0]["iconLists"][0].append(self.AMAZON)
+
+        assert self._check(read_back, self._state()) is None
+
+    @pytest.mark.parametrize("entry", [
+        {"iconType": "widget", "containerBundleIdentifier": "com.w.new", "gridSize": "small"},
+        {"displayIdentifier": "com.apple.webapp.new", "displayName": "Web"},
+        {"displayName": "New", "listType": "folder", "iconLists": [[AMAZON]]},
+    ], ids=["widget", "pinned-icon", "folder"])
+    def test_an_entry_that_is_not_an_app_store_app_is_not_added(self, entry):
+        read_back = self._state()
+        read_back[2].append(entry)
+
+        assert self._check(read_back, self._state()) is None
+
+    @pytest.mark.parametrize("change", ["dropped", "moved", "reordered"])
+    def test_another_difference_still_fails(self, change):
+        read_back = self._state()
+        read_back[2].append(self.AMAZON)
+        if change == "dropped":
+            read_back[1].pop()
+        elif change == "moved":
+            read_back[2].append(read_back[1].pop(0))
+        else:
+            read_back[1][0], read_back[1][1] = read_back[1][1], read_back[1][0]
+
+        assert self._check(read_back, self._state()) is None
+
+    def test_a_legacy_state_takes_the_added_app_out_of_the_app_library_list(self):
+        expected = {"buttonBar": ["com.dock.a"], "iconLists": [["com.page.a", "com.page.b"]],
+                    "ignored": ["com.amazon.Amazon", "com.apple.tips"]}
+        read_back = {"buttonBar": ["com.dock.a"], "iconLists": [["com.page.a", "com.page.b", "com.amazon.Amazon"]],
+                     "ignored": ["com.apple.tips"]}
+
+        assert self._check(read_back, expected, before=expected) == [
+            {"bundle_id": "com.amazon.Amazon", "name": "Amazon", "page": 1},
+        ]
+
+    def test_a_legacy_state_still_compares_the_rest_of_the_app_library_list(self):
+        expected = {"buttonBar": [], "iconLists": [["com.page.a"]], "ignored": ["com.amazon.Amazon", "com.apple.tips"]}
+        read_back = {"buttonBar": [], "iconLists": [["com.page.a", "com.amazon.Amazon"]], "ignored": []}
+
+        assert self._check(read_back, expected) is None
+
+    def test_the_message(self):
+        from unjiggle.layout_engine import describe_ios_added
+
+        one = [{"bundle_id": "com.amazon.Amazon", "name": "Amazon", "page": 2}]
+        two = [*one, {"bundle_id": "com.example.b", "name": "B", "page": 8}]
+
+        assert describe_ios_added(one, "preview") == (
+            "iOS added an app that the preview does not have: Amazon (page 2)."
+            " Unjiggle did not move or remove it. All other icons agree with the preview."
+        )
+        assert describe_ios_added(two, "backup") == (
+            "iOS added 2 apps that the backup does not have: Amazon (page 2), B (page 8)."
+            " Unjiggle did not move or remove them. All other icons agree with the backup."
+        )

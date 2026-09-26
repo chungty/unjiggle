@@ -569,3 +569,55 @@ def test_delete_is_previewed_applied_and_verified(monkeypatch, sample_metadata, 
     assert "com.uber.UberClient" not in remaining.all_bundle_ids
     assert "com.airbnb.app" in remaining.all_bundle_ids
     assert remaining.ignored == layout.ignored
+
+
+@pytest.mark.parametrize("phone_change", ["ios_adds_an_app", "ios_adds_an_app_and_drops_one"])
+def test_suggest_accepts_only_apps_that_ios_adds_at_the_write(monkeypatch, tmp_path, phone_change):
+    """`unjiggle suggest` uses the read-back check of `json apply`: it accepts an app
+    that iOS added from the App Library, and it fails for every other difference."""
+    import click
+
+    from tests.fake_springboard import UNLISTED_APP, adds_unlisted_app, page_of
+    from tests.test_json_contract import FakePhone
+    from tests.test_preservation import owner_shaped_phone
+    from unjiggle import analyzer, cli, device, itunes, safety, screentime
+
+    layout, metadata = owner_shaped_phone()
+    phone = FakePhone(layout.raw, metadata, tmp_path)
+    amazon = UNLISTED_APP["bundleIdentifier"]
+
+    def keep(state):
+        state = adds_unlisted_app(state)
+        if phone_change == "ios_adds_an_app_and_drops_one":
+            page = state[-1]
+            del page[max(i for i, entry in enumerate(page) if device.is_app_store_entry(entry)
+                         and device.entry_app_id(entry) != amazon)]
+        return state
+
+    phone.keep = keep
+    operations = cli._PRESET_BUILDERS["focus"](layout, metadata)
+    monkeypatch.setattr(device, "connect", phone.connect)
+    monkeypatch.setattr(device, "read_layout", phone.read_layout)
+    monkeypatch.setattr(device, "write_layout", phone.write_layout)
+    monkeypatch.setattr(itunes, "enrich_layout", lambda layout, progress_callback=None: metadata)
+    monkeypatch.setattr(screentime, "get_usage", lambda *args, **kwargs: {})
+    # No AI model: the analysis gives the operations of the focus preset.
+    monkeypatch.setattr(analyzer, "analyze", lambda *args, **kwargs: analyzer.AnalysisResult(
+        observations=[analyzer.Observation("organization", "Focus", "Work apps first.", operations)],
+        personality="", archetype="Test",
+    ))
+    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, tmp_path / "layout-before.json"))
+    monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: True)
+
+    result = CliRunner().invoke(cli.main, ["suggest", "--api-key", "sk-ant-test", "--apply-all"])
+
+    assert result.exit_code == 0, result.output
+    assert len(phone.writes) == 1
+    if phone_change == "ios_adds_an_app":
+        page = page_of(phone.raw, amazon)
+        assert f"iOS added an app that the preview does not have: Amazon (page {page})." in result.output
+        assert "Done!" in result.output
+    else:
+        assert "Write verification failed." in result.output
+        assert "iOS added" not in result.output
+        assert "Done!" not in result.output

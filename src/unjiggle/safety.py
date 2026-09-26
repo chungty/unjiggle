@@ -134,10 +134,18 @@ def restore_from_backup(lockdown, backup_path: Path) -> bool:
     if restored_json == expected_json:
         console.print("  [green]Restore verified.[/green] Your phone is back to the backed-up state.")
         return True
-    else:
-        console.print("  [yellow]Restore applied but verification shows minor differences.[/yellow]")
-        console.print("  [yellow]This is usually cosmetic (SpringBoard may normalize some values).[/yellow]")
-        return True  # Still likely fine
+    # iOS can add an app from the App Library to the home screen at the write. As in
+    # `unjiggle json restore`, only the backup tells which apps were on the home screen.
+    from unjiggle.layout_engine import describe_ios_added, ios_added_apps
+
+    ios_added = ios_added_apps(restored, expected)
+    if ios_added:
+        console.print("  [green]Restore verified.[/green] Your phone is back to the backed-up state.")
+        console.print(f"  {describe_ios_added(ios_added, 'backup')}", markup=False, highlight=False, soft_wrap=True)
+        return True
+    console.print("  [yellow]Restore applied but verification shows minor differences.[/yellow]")
+    console.print("  [yellow]This is usually cosmetic (SpringBoard may normalize some values).[/yellow]")
+    return True  # Still likely fine
 
 
 def _backup_order(path: Path) -> tuple:

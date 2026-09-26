@@ -33,6 +33,7 @@ import click
 import pytest
 from click.testing import CliRunner
 
+from tests.fake_springboard import UNLISTED_APP, adds_unlisted_app, page_of, put_in_first_free_slot, without_app
 from tests.test_preservation import owner_shaped_phone
 from unjiggle import cli, device, itunes, layout_engine, llm, render, safety, screentime, stylist
 from unjiggle.cli import PRESET_CHOICES
@@ -134,8 +135,15 @@ PRESETS_RESPONSE = {
 }
 
 LAYOUT_MUTATION_RESULT = {"page_count": int, "total_apps": int}
-APPLIED_TRANSFORM = {"applied": int, "backup": str, "result": LAYOUT_MUTATION_RESULT}
-RESTORED_LAYOUT = {"restored": bool, "backup": str, "result": LAYOUT_MUTATION_RESULT, "undo_backup": Opt(str)}
+# An app that iOS added to the home screen at the write (layout_engine.ios_added_apps).
+IOS_ADDED_APP = {"bundle_id": str, "name": str, "page": int}
+APPLIED_TRANSFORM = {
+    "applied": int, "backup": str, "result": LAYOUT_MUTATION_RESULT, "ios_added": Opt(ArrayOf(IOS_ADDED_APP)),
+}
+RESTORED_LAYOUT = {
+    "restored": bool, "backup": str, "result": LAYOUT_MUTATION_RESULT, "undo_backup": Opt(str),
+    "ios_added": Opt(ArrayOf(IOS_ADDED_APP)),
+}
 RENDERED_CARD = {"success": bool, "action": str, "card": str, "html_path": str, "path": Opt(str)}
 DEVICE_STATUS = {"connected": bool, "device_name": Opt(str), "model": Opt(str), "ios_version": Opt(str)}
 
@@ -818,6 +826,221 @@ def test_restore_with_a_file_that_is_not_a_backup(phone):
     assert phone.writes == []
 
 
+# --- apps that iOS adds at a write --------------------------------------------------------
+# On the owner's iPhone (iOS 26.0), SpringBoard added an installed app from the App Library
+# (Amazon) to the home screen after the write of json apply, and again after the undo. See
+# tests/fake_springboard.py.
+
+AMAZON = UNLISTED_APP["bundleIdentifier"]
+WRITE_CHECK_FAILED = {"apply": "Write verification failed", "restore": "Restore verification failed"}
+
+
+def _write(phone, command: str):
+    """Run a command that writes: json apply of the focus preset, or json restore of a
+    backup after a change of the phone."""
+    if command == "apply":
+        preview = _focus_preview()
+        return run("apply", stdin=app_payload(preview["operations"], preview["snapshot_id"]))
+    _expected, backup = _changed_phone(phone)
+    return run("restore", str(backup))
+
+
+def _loose_apps(state: list) -> list[tuple[int, int]]:
+    """(page index, entry index) of each loose App Store app on the pages of a raw state,
+    but not the app that iOS adds."""
+    return [
+        (page_index, entry_index)
+        for page_index, page in enumerate(state)
+        if page_index > 0
+        for entry_index, entry in enumerate(page)
+        if device.is_app_store_entry(entry) and device.entry_app_id(entry) != AMAZON
+    ]
+
+
+def _single_icon_app(state: list) -> dict:
+    """A loose App Store app entry with no other icon of its app on the home screen."""
+    icons = device.parse_layout_state(copy.deepcopy(state)).all_bundle_ids
+    for page_index, entry_index in reversed(_loose_apps(state)):
+        entry = state[page_index][entry_index]
+        if icons.count(device.entry_app_id(entry)) == 1:
+            return entry
+    raise AssertionError("the phone has no app with one icon")
+
+
+def test_apply_passes_when_ios_adds_an_app_from_the_app_library(phone):
+    phone.keep = adds_unlisted_app
+    preview = _focus_preview()
+
+    result = run("apply", stdin=app_payload(preview["operations"], preview["snapshot_id"]))
+
+    payload = ok(result, APPLIED_TRANSFORM)
+    page = page_of(phone.raw, AMAZON)
+    assert payload["changed"] is True
+    assert payload["ios_added"] == [{"bundle_id": AMAZON, "name": "Amazon", "page": page}]
+    assert f"iOS added an app that the preview does not have: Amazon (page {page})." in result.stderr
+    # One write, with no entry for the app. The command did not move or remove the app.
+    assert len(phone.writes) == 1
+    assert AMAZON not in device.parse_layout_state(phone.writes[0]).all_bundle_ids
+    assert without_app(phone.raw, AMAZON) == phone.writes[0]
+    # The output tells what the phone has now, with the app.
+    assert payload["result"]["total_apps"] == preview["proposed_layout"]["total_apps"] + 1
+    assert payload["snapshot_id"] == cli._layout_signature(device.parse_layout_state(phone.raw))
+
+
+def test_restore_passes_when_ios_adds_an_app_from_the_app_library(phone):
+    expected, backup = _changed_phone(phone)
+    phone.keep = adds_unlisted_app
+
+    result = run("restore", str(backup))
+
+    payload = ok(result, RESTORED_LAYOUT)
+    page = page_of(phone.raw, AMAZON)
+    assert payload["restored"] is True
+    assert payload["ios_added"] == [{"bundle_id": AMAZON, "name": "Amazon", "page": page}]
+    assert f"iOS added an app that the backup does not have: Amazon (page {page})." in result.stderr
+    assert len(phone.writes) == 1
+    assert _as_backup(phone.writes[0]) == expected
+    assert _as_backup(without_app(phone.raw, AMAZON)) == expected
+
+
+def test_apply_and_undo_pass_when_ios_adds_the_app_at_each_write(phone):
+    # The finding on the owner's iPhone. After the apply, the app is on the home screen.
+    # The undo writes the backup, which does not have the app, and iOS adds the app
+    # again. json restore compares with the backup only, so the undo passes.
+    before = _as_backup(phone.raw)
+    phone.keep = adds_unlisted_app
+    preview = _focus_preview()
+
+    applied = ok(run("apply", stdin=app_payload(preview["operations"], preview["snapshot_id"])), APPLIED_TRANSFORM)
+    assert [app["bundle_id"] for app in applied["ios_added"]] == [AMAZON]
+
+    undone = ok(run("restore", applied["backup"]), RESTORED_LAYOUT)
+
+    assert undone["ios_added"] == [{"bundle_id": AMAZON, "name": "Amazon", "page": page_of(phone.raw, AMAZON)}]
+    assert _as_backup(without_app(phone.raw, AMAZON)) == before
+    assert len(phone.writes) == 2
+
+
+def test_apply_names_each_app_that_ios_adds(phone):
+    other = {**UNLISTED_APP, "bundleIdentifier": "com.example.news", "displayIdentifier": "com.example.news",
+             "displayName": "News [Daily]"}
+    phone.keep = lambda state: adds_unlisted_app(adds_unlisted_app(state), other)
+
+    result = _write(phone, "apply")
+
+    payload = ok(result, APPLIED_TRANSFORM)
+    assert [(app["bundle_id"], app["name"]) for app in payload["ios_added"]] == [
+        (AMAZON, "Amazon"), ("com.example.news", "News [Daily]"),
+    ]
+    # The names come from the phone, and they are not read as Rich markup.
+    assert "iOS added 2 apps that the preview does not have: Amazon (page " in result.stderr
+    assert "News [Daily] (page " in result.stderr
+
+
+def test_apply_with_no_app_that_ios_adds_has_no_ios_added_key(phone):
+    payload = ok(_write(phone, "apply"), APPLIED_TRANSFORM)
+
+    assert "ios_added" not in payload
+
+
+@pytest.mark.parametrize("command", ["apply", "restore"])
+def test_the_check_fails_when_ios_adds_a_second_icon_of_an_app(phone, command):
+    # The app is already on the home screen, in another place.
+    def second_icon(state):
+        return put_in_first_free_slot(state, {**_single_icon_app(state), "displayIdentifier": "UUID-NEW"})
+
+    phone.keep = second_icon
+
+    payload = failed(_write(phone, command))
+
+    assert payload["error"].startswith(WRITE_CHECK_FAILED[command])
+    assert "ios_added" not in payload
+    assert len(phone.writes) == 1
+
+
+def test_apply_fails_when_the_phone_puts_back_an_app_that_an_operation_took_off(phone):
+    # The app was on the home screen before the write, so iOS did not add it: the write
+    # did not do what the preview shows.
+    entry = _single_icon_app(phone.raw)
+    bundle_id = device.entry_app_id(entry)
+    phone.keep = lambda state: put_in_first_free_slot(state, entry)
+    operations = [{"action": "move_to_app_library", "bundle_ids": [bundle_id]}]
+
+    payload = failed(run("apply", stdin=app_payload(operations)))
+
+    assert payload["error"].startswith("Write verification failed")
+    assert payload["backup"] == str(phone.backups()[0])
+    assert bundle_id not in device.parse_layout_state(phone.writes[0]).all_bundle_ids
+
+
+def _drop(state):
+    page_index, entry_index = _loose_apps(state)[-1]
+    del state[page_index][entry_index]
+
+
+def _move(state):
+    # The first loose app goes to the end of the last page.
+    page_index, entry_index = _loose_apps(state)[0]
+    state[-1].append(state[page_index].pop(entry_index))
+
+
+def _reorder(state):
+    places = _loose_apps(state)
+    for (page_a, index_a), (page_b, index_b) in zip(places, places[1:]):
+        a, b = state[page_a][index_a], state[page_b][index_b]
+        if page_a == page_b and device.entry_app_id(a) != device.entry_app_id(b):
+            state[page_a][index_a], state[page_b][index_b] = b, a
+            return
+    raise AssertionError("no two apps to swap")
+
+
+@pytest.mark.parametrize("command", ["apply", "restore"])
+@pytest.mark.parametrize("change", [_drop, _move, _reorder], ids=["dropped", "moved", "reordered"])
+def test_the_check_fails_when_an_expected_entry_changes_and_ios_adds_an_app(phone, command, change):
+    def keep(state):
+        state = adds_unlisted_app(state)
+        change(state)
+        return state
+
+    phone.keep = keep
+
+    payload = failed(_write(phone, command))
+
+    assert payload["error"].startswith(WRITE_CHECK_FAILED[command])
+    assert "ios_added" not in payload
+
+
+def _in_dock(state):
+    state[0].append(copy.deepcopy(UNLISTED_APP))
+    return state
+
+
+def _in_a_folder(state):
+    folder = next(entry for page in state[1:] for entry in page if device.is_folder_entry(entry))
+    folder["iconLists"][0].append(copy.deepcopy(UNLISTED_APP))
+    return state
+
+
+@pytest.mark.parametrize("command", ["apply", "restore"])
+@pytest.mark.parametrize("keep", [
+    lambda state: put_in_first_free_slot(state, {
+        "widgetIdentifier": "com.w.new.w", "iconLists": [], "elementType": "widget", "containerBundleIdentifier": "com.w.new",
+        "bundleIdentifier": "com.w.new.ext", "displayIdentifier": "W-new", "gridSize": "small", "iconType": "custom"}),
+    lambda state: put_in_first_free_slot(state, {"displayIdentifier": "com.apple.webapp.new", "displayName": "Web"}),
+    lambda state: put_in_first_free_slot(state, {
+        "displayName": "New", "listType": "folder", "iconLists": [[copy.deepcopy(UNLISTED_APP)]]}),
+    lambda state: _in_dock(copy.deepcopy(state)),
+    lambda state: _in_a_folder(copy.deepcopy(state)),
+], ids=["widget", "pinned-icon", "folder", "app-in-the-dock", "app-in-a-folder"])
+def test_the_check_fails_when_the_phone_adds_an_entry_that_is_not_a_loose_app(phone, command, keep):
+    phone.keep = keep
+
+    payload = failed(_write(phone, command))
+
+    assert payload["error"].startswith(WRITE_CHECK_FAILED[command])
+    assert "ios_added" not in payload
+
+
 # --- the app's flow in a real process ---------------------------------------------------
 
 
@@ -834,10 +1057,15 @@ def _phone_files(tmp_path: Path, source: str) -> tuple[list, dict]:
     return json.loads(json.dumps(layout.raw, default=str)), metadata
 
 
-def _process(tmp_path: Path, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
+def _process(
+    tmp_path: Path, *args: str, stdin: str | None = None, ios_adds: dict | None = None,
+) -> subprocess.CompletedProcess:
     """`unjiggle json <args>` in a new process, as the Mac app starts it: stdin is a pipe
-    that holds only the payload and is then closed, or /dev/null."""
-    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY")}
+    that holds only the payload and is then closed, or /dev/null. With ``ios_adds``, the
+    phone adds that app at each write that does not have it (FAKE_PHONE_IOS_ADDS)."""
+    env = {k: v for k, v in os.environ.items() if k not in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "FAKE_PHONE_IOS_ADDS")}
+    if ios_adds is not None:
+        env["FAKE_PHONE_IOS_ADDS"] = json.dumps(ios_adds)
     env.update(
         HOME=str(tmp_path),
         PYTHONPATH=os.pathsep.join([str(SRC), str(TESTS.parent)]),
@@ -896,3 +1124,48 @@ def test_preview_apply_and_undo_in_a_process(tmp_path, source, preset):
     assert undo["restored"] is True
     assert writes.read_text().count("write") == 2
     assert json.loads(state.read_text()) == raw
+
+
+def _unlisted_app(raw) -> dict:
+    """The entry of an app that the phone does not have on the home screen: the app that
+    iOS added on the owner's iPhone, or a made-up app when the phone has that one."""
+    if AMAZON not in device.parse_layout_state(copy.deepcopy(raw)).all_bundle_ids:
+        return copy.deepcopy(UNLISTED_APP)
+    return {**UNLISTED_APP, "bundleIdentifier": "com.example.unlisted", "displayIdentifier": "com.example.unlisted",
+            "displayName": "Unlisted"}
+
+
+@pytest.mark.parametrize("preset", PRESET_CHOICES)
+@pytest.mark.parametrize("source", ["synthetic", "real"])
+def test_preview_apply_and_undo_in_a_process_when_ios_adds_an_app(tmp_path, source, preset):
+    # The flow of the finding on the owner's iPhone: iOS adds an app at the apply and
+    # again at the undo. Both commands pass, name the app, and leave it where iOS put it.
+    raw, metadata = _phone_files(tmp_path, source)
+    entry = _unlisted_app(raw)
+    bundle_id = entry["bundleIdentifier"]
+    state = tmp_path / "phone.json"
+    state.write_text(json.dumps(raw))
+    (tmp_path / "metadata.json").write_text(json.dumps(metadata))
+    writes = tmp_path / "writes.log"
+
+    preview = _process_ok(_process(tmp_path, "suggest", "--preset", preset, ios_adds=entry), TRANSFORM_PREVIEW)
+    assert preview["operations"], f"{preset} has nothing to apply on this phone"
+
+    applied = _process(tmp_path, "apply", stdin=app_payload(preview["operations"], preview["snapshot_id"]), ios_adds=entry)
+    applied_payload = _process_ok(applied, APPLIED_TRANSFORM)
+    assert applied_payload["changed"] is True
+    phone_now = json.loads(state.read_text())
+    assert applied_payload["ios_added"] == [
+        {"bundle_id": bundle_id, "name": entry["displayName"], "page": page_of(phone_now, bundle_id)},
+    ]
+    assert "iOS added an app that the preview does not have" in applied.stderr
+    assert applied_payload["result"]["total_apps"] == preview["proposed_layout"]["total_apps"] + 1
+    assert writes.read_text().count("write") == 1
+
+    undo = _process(tmp_path, "restore", applied_payload["backup"], ios_adds=entry)
+    undo_payload = _process_ok(undo, RESTORED_LAYOUT)
+    assert undo_payload["restored"] is True
+    assert [app["bundle_id"] for app in undo_payload["ios_added"]] == [bundle_id]
+    assert "iOS added an app that the backup does not have" in undo.stderr
+    assert writes.read_text().count("write") == 2
+    assert without_app(json.loads(state.read_text()), bundle_id) == raw

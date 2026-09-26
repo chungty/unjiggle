@@ -611,10 +611,13 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         # Verify the write took effect
         from unjiggle.device import read_layout as re_read
         verify = re_read(lockdown)
-        if _layout_signature(verify) != _layout_signature(final_preview):
+        ios_added = _read_back_check(verify, final_preview, before=layout)
+        if ios_added is None:
             console.print("  [red]Write verification failed.[/red] The device layout did not match the preview.\n")
             return
         console.print(f"  [dim]Verifying write... {verify.page_count} pages, {verify.total_apps} apps read back.[/dim]")
+        if ios_added:
+            _print_ios_added(ios_added, "preview", console)
 
         console.print("\n  [green bold]Done![/green bold] Your iPhone has been reorganized.")
         console.print(f"  Undo anytime: [bold]unjiggle restore {backup_path}[/bold]")
@@ -1056,6 +1059,8 @@ def demo():
 #    for an error that it does not catch). json apply has no round trip, takes the
 #    snapshot_id of the preview, and names the backup in an error after the write.
 #    json restore refuses a backup with no apps and returns undo_backup.
+# A new optional key does not change the version. For example, json apply and json
+# restore add "ios_added" only when iOS added apps to the home screen at the write.
 JSON_CONTRACT = 2
 
 # The real stdout while a json command runs. None outside a json command.
@@ -1613,6 +1618,30 @@ def _layout_signature(layout) -> str:
     )
 
 
+def _read_back_check(read_back, expected, before=None) -> list[dict] | None:
+    """The read-back check after a write (json apply, json restore, `unjiggle suggest`).
+
+    Returns [] when the phone reads back as ``expected`` (the same _layout_signature).
+    Returns the apps that iOS added to the home screen at the write, when they are the
+    only difference (see layout_engine.ios_added_apps; ``before`` is the layout before
+    the write). Returns None for all other differences: then the check fails.
+    """
+    from unjiggle import layout_engine
+
+    if _layout_signature(read_back) == _layout_signature(expected):
+        return []
+    # An empty list here would mean no difference, which the line above did not find.
+    return layout_engine.ios_added_apps(read_back, expected, before) or None
+
+
+def _print_ios_added(added: list[dict], reference: str, out: Console) -> None:
+    """Tell the owner about the apps that iOS added at the write, on one line (a client
+    can show it). The names come from the phone, so they are not read as Rich markup."""
+    from unjiggle import layout_engine
+
+    out.print(f"  {layout_engine.describe_ios_added(added, reference)}", markup=False, highlight=False, soft_wrap=True)
+
+
 def _snapshot_metadata(layout) -> dict:
     """Stable identity for one concrete layout snapshot."""
     signature = _layout_signature(layout)
@@ -2146,7 +2175,13 @@ def json_restore(backup_file: str):
     3. The write, and the read-back check. The check passes when the phone reads back
        as the backup: the same icon state, or the same layout (the dock, the pages, the
        folders and the widgets, as the post-write check of `json apply` compares them)
-       with values that SpringBoard changes on a write.
+       with values that SpringBoard changes on a write. It also passes when the only
+       difference is apps that iOS added to the home screen at the write
+       (layout_engine.ios_added_apps). The output names them in "ios_added", and the
+       command does not move them. Only the backup tells which apps were on the home
+       screen: the layout before the restore is not used. The restore often undoes an
+       apply, and iOS can have added the same app at that apply. The backup does not
+       have the app, so iOS adds it again.
 
     A backup file does not record the device, so this command cannot refuse a backup
     of a different iPhone.
@@ -2186,18 +2221,24 @@ def json_restore(backup_file: str):
 
     expected_json = _json.dumps(raw_state, default=str, sort_keys=True)
     restored_json = _json.dumps(verify.raw, default=str, sort_keys=True)
+    ios_added = []
     if expected_json != restored_json:
-        if _layout_signature(verify) != _layout_signature(expected):
+        # No `before` layout: see step 3 in the docstring.
+        ios_added = _read_back_check(verify, expected)
+        if ios_added is None:
             _json_err(
                 f"Restore verification failed: the layout on the iPhone does not match the backup. {undo}",
                 undo_backup=str(undo_backup),
             )
-        _err_console.print(
-            "  The layout matches the backup. Some values of the icon state differ,"
-            " because SpringBoard changes them on a write."
-        )
+        if ios_added:
+            _print_ios_added(ios_added, "backup", _err_console)
+        else:
+            _err_console.print(
+                "  The layout matches the backup. Some values of the icon state differ,"
+                " because SpringBoard changes them on a write."
+            )
 
-    _json_out({
+    restored = {
         "restored": True,
         "backup": str(Path(backup_file)),
         "undo_backup": str(undo_backup),
@@ -2206,7 +2247,10 @@ def json_restore(backup_file: str):
             "page_count": verify.page_count,
             "total_apps": verify.total_apps,
         },
-    })
+    }
+    if ios_added:
+        restored["ios_added"] = ios_added
+    _json_out(restored)
 
 
 @json.command(name="render")
@@ -2426,7 +2470,10 @@ def json_apply():
        on the home screen. If not, nothing is written.
     2. A verified backup (safety.verified_backup). If it fails, nothing is written.
     3. The write.
-    4. The read-back check: the phone must read back as the preview.
+    4. The read-back check: the phone must read back as the preview. The only difference
+       that it accepts is apps that iOS added to the home screen at the write, which
+       were not on the home screen before it (layout_engine.ios_added_apps). The output
+       names them in "ios_added", and the command does not move them.
     The output has the backup path, for undo with `json restore`. After a failed write or
     a failed read-back check, the error also has it.
 
@@ -2486,13 +2533,16 @@ def json_apply():
         verify = read_layout(lockdown)
     except Exception as e:
         _json_err(f"Write failed: {e}. {undo}", backup=str(backup_path))
-    if _layout_signature(verify) != _layout_signature(predicted_layout):
+    ios_added = _read_back_check(verify, predicted_layout, before=layout)
+    if ios_added is None:
         _json_err(
             f"Write verification failed: the layout on the iPhone does not match the preview. {undo}",
             backup=str(backup_path),
         )
+    if ios_added:
+        _print_ios_added(ios_added, "preview", _err_console)
 
-    _json_out({
+    applied = {
         "requested": len(ops),
         "applied": len(effective_ops),
         "backup": str(backup_path),
@@ -2502,7 +2552,10 @@ def json_apply():
             "page_count": verify.page_count,
             "total_apps": verify.total_apps,
         },
-    })
+    }
+    if ios_added:
+        applied["ios_added"] = ios_added
+    _json_out(applied)
 
 
 if __name__ == "__main__":
