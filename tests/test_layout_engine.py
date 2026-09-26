@@ -559,8 +559,9 @@ def _ios26_state():
     """The item shapes of a real iOS 26 icon state (the owner's phone, 2026-09).
 
     Page 1 has widgets, a Smart Stack and two apps, and all of them have an empty
-    "iconLists" key. Folders have listType "folder" and no iconType. Some apps have no
-    bundleIdentifier, only a displayIdentifier: offloaded apps, loose and in folders.
+    "iconLists" key. Folders have listType "folder" and no iconType. Some icons have no
+    bundleIdentifier, only a displayIdentifier: pinned icons that are not App Store
+    apps (such as web shortcuts), loose and in folders.
     """
     def app(b):
         return {"bundleIdentifier": b, "displayIdentifier": b, "displayName": b.rsplit(".", 1)[-1]}
@@ -593,7 +594,7 @@ def _ios26_state():
 
 class TestRealIconStateShapes:
     """A widget, a Smart Stack or an app with an empty "iconLists" key is not a folder,
-    and an app without a bundleIdentifier is an icon on the phone."""
+    and an icon without a bundleIdentifier is a pinned icon on the phone."""
 
     @staticmethod
     def _check(raw, ops):
@@ -617,11 +618,13 @@ class TestRealIconStateShapes:
         assert [item.is_widget for item in first] == [True, True, True, False, False]
         assert [item.app.bundle_id for item in first if item.is_app] == ["com.apple.mobilenotes", "com.apple.Health"]
         assert page_slots(first) == 8 + 4 + 4 + 2
-        # The apps without a bundleIdentifier are apps, found by their displayIdentifier.
+        # The icons without a bundleIdentifier are pinned, found by their displayIdentifier.
         assert page_slots(layout.pages[1]) == 24
         games = layout.pages[1][1].folder
         assert [app.bundle_id for app in games.pages[0]] == ["com.g.installed", "com.g.off1", "com.g.off2"]
+        assert [app.pinned for app in games.pages[0]] == [False, True, True]
         assert "com.microsoft.Office.Word" in layout.all_bundle_ids
+        assert layout.pinned_ids() == {"com.g.off1", "com.g.off2", "com.microsoft.Office.Word", "com.apple.clips"}
 
     def test_a_rename_keeps_the_widgets_and_page_one(self):
         raw = _ios26_state()
@@ -641,18 +644,18 @@ class TestRealIconStateShapes:
         assert written[1][:5] == raw[1]
         assert written[1][5]["bundleIdentifier"] == "com.y.b0"
 
-    def test_a_folder_with_offloaded_apps_stays_when_its_installed_app_leaves(self):
+    def test_a_folder_with_pinned_icons_stays_when_its_app_leaves(self):
         raw = _ios26_state()
         op = LayoutOperation(action="move_to_app_library", bundle_ids=["com.g.installed"])
         _layout, written = self._check(raw, [op])
         games = [item for item in written[2] if item.get("displayName") == "Games Archive"]
         assert games and games[0]["iconLists"] == [[raw[2][1]["iconLists"][0][1], raw[2][1]["iconLists"][0][2]]]
 
-    def test_an_offloaded_app_takes_a_slot(self):
+    def test_a_pinned_icon_takes_a_slot(self):
         from unjiggle.device import parse_layout_state
 
         raw = _ios26_state()
-        # Page 2 is full: 2 folders, 20 apps and 2 offloaded apps.
+        # Page 2 is full: 2 folders, 20 apps and 2 pinned icons.
         op = LayoutOperation(action="move_to_page", bundle_ids=["com.y.b0"], target_page=1)
         layout, written = self._check(raw, [op])
         assert written == raw
@@ -668,13 +671,20 @@ class TestRealIconStateShapes:
         _layout, written = self._check(raw, [LayoutOperation(action="move_to_page", bundle_ids=seven, target_page=0)])
         assert written == raw
 
-    def test_compact_to_single_page_takes_at_most_24_apps(self):
+    def test_compact_to_single_page_takes_the_apps_that_fit_beside_the_widgets(self):
         raw = _ios26_state()
-        apps = [f"com.x.a{i:02d}" for i in range(20)] + ["com.y.b0", "com.y.b1", "com.p.one", "com.p.two", "com.g.off1"]
+        # The widgets of page 1 use 16 slots, so 8 apps fit and 9 do not.
+        apps = [f"com.x.a{i:02d}" for i in range(9)]
         _layout, written = self._check(raw, [LayoutOperation(action="compact_to_single_page", bundle_ids=apps)])
         assert written == raw
-        _layout, written = self._check(raw, [LayoutOperation(action="compact_to_single_page", bundle_ids=apps[:24])])
-        assert len(written) == 2 and len(written[1]) == 24
+        _layout, written = self._check(raw, [LayoutOperation(action="compact_to_single_page", bundle_ids=apps[:8])])
+        # Page 1: the widgets in their places, then the apps.
+        assert written[1][:3] == raw[1][:3]
+        assert [item["bundleIdentifier"] for item in written[1][3:]] == apps[:8]
+        # Page 2: the folder with only its pinned icons, then the loose pinned icons.
+        games = raw[2][1]
+        assert written[2] == [{**games, "iconLists": [games["iconLists"][0][1:]]}, raw[2][-2], raw[2][-1]]
+        assert len(written) == 3
 
     def test_an_operation_on_a_dock_app_changes_the_preview_dock_too(self):
         from unjiggle.analyzer import preview_operations
@@ -699,10 +709,20 @@ class TestLostEntries:
 
         before = _ios26_state()
         after = [list(page) for page in before]
-        after[2] = [item for item in after[2] if item.get("displayIdentifier") != "com.apple.clips"]
-        assert lost_entries(before, after, []) == ["com.apple.clips"]
-        remove = LayoutOperation(action="move_to_app_library", bundle_ids=["com.apple.clips"])
+        after[2] = [item for item in after[2] if item.get("displayIdentifier") != "com.x.a05"]
+        assert lost_entries(before, after, []) == ["com.x.a05"]
+        remove = LayoutOperation(action="move_to_app_library", bundle_ids=["com.x.a05"])
         assert lost_entries(before, after, [remove]) == []
+
+    def test_a_pinned_icon_is_lost_even_when_an_operation_names_it(self):
+        from unjiggle.layout_engine import lost_entries
+
+        before = _ios26_state()
+        after = [list(page) for page in before]
+        after[2] = [item for item in after[2] if item.get("displayIdentifier") != "com.apple.clips"]
+        for action in ("move_to_app_library", "delete", "rebuild_pages"):
+            op = LayoutOperation(action=action, bundle_ids=["com.apple.clips"])
+            assert lost_entries(before, after, [op]) == ["com.apple.clips"]
 
     def test_a_lost_widget_is_found(self):
         from unjiggle.layout_engine import lost_entries
@@ -712,13 +732,21 @@ class TestLostEntries:
         after[1] = after[1][3:]
         assert lost_entries(before, after, []) == ["com.whoop.widget", "com.sleep.widget", "STACK-1"]
 
-    def test_after_a_rebuild_only_the_dock_is_checked(self):
+    def test_after_a_rebuild_the_dock_widgets_and_pinned_icons_are_checked(self):
+        from unjiggle.device import parse_layout_state
         from unjiggle.layout_engine import lost_entries
 
         before = _ios26_state()
         rebuild = LayoutOperation(action="rebuild_pages", bundle_ids=["com.y.b0"])
-        assert lost_entries(before, [before[0], [before[3][0]]], [rebuild]) == []
-        assert lost_entries(before, [[], [before[3][0]]], [rebuild]) == ["com.apple.mobilesafari"]
+        # Apps that the rebuild does not list may leave. Widgets and pinned icons may not.
+        assert lost_entries(before, [before[0], [before[3][0]]], [rebuild]) == [
+            "com.whoop.widget", "com.sleep.widget", "STACK-1",
+            "com.g.off1", "com.g.off2", "com.microsoft.Office.Word", "com.apple.clips",
+        ]
+        written = apply_operations(parse_layout_state(before), [rebuild])
+        assert lost_entries(before, written, [rebuild]) == []
+        written[0] = []
+        assert lost_entries(before, written, [rebuild]) == ["com.apple.mobilesafari"]
 
     def test_check_write_stops_a_write_that_loses_an_entry(self, monkeypatch):
         from unjiggle import layout_engine
@@ -742,3 +770,161 @@ class TestLostEntries:
         # A lost entry that the parser does not show is found in the raw state.
         monkeypatch.setattr(layout_engine, "apply_operations", lambda layout, ops: losing(layout, ops, clip))
         assert layout_engine.check_write(layout, [op])[2] == "the write would remove Web clip, which no operation names"
+
+
+class TestPinnedIconsStay:
+    """An icon with no bundleIdentifier is not an App Store app. The App Library cannot
+    hold it, so no operation moves or removes it, in the preview and in the write."""
+
+    _check = staticmethod(TestRealIconStateShapes._check)
+
+    def test_no_operation_moves_or_removes_a_pinned_icon(self):
+        raw = _ios26_state()
+        for op in (
+            LayoutOperation(action="move_to_app_library", bundle_ids=["com.apple.clips", "com.g.off1"]),
+            LayoutOperation(action="delete", bundle_ids=["com.microsoft.Office.Word"]),
+            LayoutOperation(action="move_to_page", bundle_ids=["com.apple.clips"], target_page=2),
+            LayoutOperation(action="create_folder", bundle_ids=["com.g.off1", "com.g.off2"], folder_name="Old"),
+            LayoutOperation(action="move_to_folder", bundle_ids=["com.apple.clips"], folder_name="Pictures"),
+        ):
+            _layout, written = self._check(raw, [op])
+            assert written == raw, op.action
+
+    def test_an_operation_acts_on_the_apps_and_leaves_the_pinned_icons(self):
+        raw = _ios26_state()
+        op = LayoutOperation(action="move_to_app_library", bundle_ids=["com.g.installed", "com.g.off1", "com.x.a00"])
+        _layout, written = self._check(raw, [op])
+        games = next(item for item in written[2] if item.get("displayName") == "Games Archive")
+        assert [entry["displayIdentifier"] for entry in games["iconLists"][0]] == ["com.g.off1", "com.g.off2"]
+        assert "com.x.a00" not in parse_layout_state_ids(written)
+
+    def test_an_id_that_an_app_and_a_pinned_icon_share_moves_only_the_app(self):
+        from unjiggle.device import parse_layout_state
+
+        raw = _ios26_state()
+        raw[3].append({"displayIdentifier": "com.y.b0", "displayName": "b0 shortcut"})
+        layout = parse_layout_state(raw)
+        assert "com.y.b0" not in layout.pinned_ids()
+        op = LayoutOperation(action="move_to_app_library", bundle_ids=["com.y.b0"])
+        _layout, written = self._check(raw, [op])
+        assert written[3] == [raw[3][1], raw[3][2]]
+
+
+def parse_layout_state_ids(raw) -> list[str]:
+    from unjiggle.device import parse_layout_state
+
+    return parse_layout_state(raw).all_bundle_ids
+
+
+def _entry(b):
+    return {"bundleIdentifier": b, "displayIdentifier": b, "displayName": b}
+
+
+def _widget(name, size):
+    return {"bundleIdentifier": f"{name}.ext", "containerBundleIdentifier": name, "displayIdentifier": name.upper(),
+            "elementType": "widget", "gridSize": size, "iconType": "custom", "iconLists": []}
+
+
+class TestRebuildsKeepWidgetsAndPinnedIcons:
+    """compact_to_single_page and rebuild_pages keep page 1's widgets and pinned icons
+    in their places, fit the apps around them, and keep what stays of the other pages
+    (widgets, pinned icons, folders with pinned icons) from page 2 on."""
+
+    _check = staticmethod(TestRealIconStateShapes._check)
+
+    def test_page_one_widgets_keep_their_places_among_the_apps(self):
+        pin = {"displayIdentifier": "com.web.clip", "displayName": "Clip"}
+        raw = [
+            [_entry("com.dock")],
+            [_entry("com.p1.a"), _entry("com.p1.b"), _widget("com.w.medium", "medium"), pin, _entry("com.p1.c")],
+            [_entry(f"com.p2.a{i:02d}") for i in range(20)] + [_widget("com.w.large", "large")],
+        ]
+        apps = [f"com.p2.a{i:02d}" for i in range(20)]
+        _layout, written = self._check(raw, [LayoutOperation(action="rebuild_pages", bundle_ids=apps)])
+        first = written[1]
+        # The two apps before the widget give their places to the first two apps, and
+        # the widget and the pinned icon stay where they were.
+        assert first[:5] == [_entry(apps[0]), _entry(apps[1]), raw[1][2], pin, _entry(apps[2])]
+        # Page 1: 8 + 1 + 15 apps = 24 slots. The other 5 apps go to page 2, then the
+        # large widget of page 2 (16 slots) fits after them.
+        assert len(first) == 5 + 12 and [e.get("bundleIdentifier") for e in first[5:]] == apps[3:15]
+        assert written[2] == [_entry(b) for b in apps[15:]] + [raw[2][-1]]
+        assert len(written) == 3
+
+    def test_the_apps_take_the_places_of_the_page_one_apps_that_leave(self):
+        raw = _ios26_state()
+        apps = ["com.x.a00", "com.x.a01"]
+        _layout, written = self._check(raw, [LayoutOperation(action="rebuild_pages", bundle_ids=apps)])
+        assert written[1] == raw[1][:3] + [_entry_like(raw, "com.x.a00"), _entry_like(raw, "com.x.a01")]
+
+    def test_a_page_one_full_of_widgets_takes_no_app_in_a_compact(self):
+        raw = [
+            [_entry("com.dock")],
+            [_widget("com.w.l1", "large"), _widget("com.w.m1", "medium")],
+            [_entry("com.p2.a"), _entry("com.p2.b")],
+        ]
+        compact = LayoutOperation(action="compact_to_single_page", bundle_ids=["com.p2.a"])
+        _layout, written = self._check(raw, [compact])
+        assert written == raw
+        rebuild = LayoutOperation(action="rebuild_pages", bundle_ids=["com.p2.a"])
+        _layout, written = self._check(raw, [rebuild])
+        assert written == [raw[0], raw[1], [raw[2][0]]]
+
+    def test_widgets_of_later_pages_and_unparsed_entries_stay(self):
+        web = {"iconType": "custom", "displayName": "Web clip"}  # the parser drops it
+        raw = [
+            [_entry("com.dock")],
+            [_entry("com.p1.a"), web],
+            [],
+            [web, {"displayName": "Mixed", "listType": "folder",
+                   "iconLists": [[_entry("com.f.a"), web], [{"displayIdentifier": "com.f.pin"}]]}],
+            [_widget("com.w.s", "small"), _entry("com.p4.a")],
+        ]
+        op = LayoutOperation(action="compact_to_single_page", bundle_ids=["com.p4.a"])
+        _layout, written = self._check(raw, [op])
+        # Page 1: the app in the place of com.p1.a, and the web clip in its place.
+        assert written[1] == [_entry("com.p4.a"), web]
+        # Page 2: the web clip of page 3, the folder with what is not an App Store app
+        # (on one page: the page with the pinned icon), and the small widget of page 4.
+        folder = {"displayName": "Mixed", "listType": "folder", "iconLists": [[web, {"displayIdentifier": "com.f.pin"}]]}
+        assert written[2] == [web, folder, raw[4][0]]
+        assert len(written) == 3
+
+    def test_a_legacy_state_keeps_its_widgets_and_pinned_icons(self):
+        raw = {
+            "buttonBar": ["com.dock"],
+            "iconLists": [
+                [{"iconType": "widget", "containerBundleIdentifier": "com.w", "gridSize": "medium"}, "com.a", "com.b"],
+                ["com.c", {"displayIdentifier": "com.pin", "displayName": "Pin"}],
+            ],
+            "ignored": [],
+        }
+        ops = [
+            LayoutOperation(action="move_to_app_library", bundle_ids=["com.b", "com.pin"]),
+            LayoutOperation(action="compact_to_single_page", bundle_ids=["com.c"]),
+        ]
+        _layout, written = self._check(raw, ops)
+        assert written["iconLists"] == [[raw["iconLists"][0][0], "com.c"], [raw["iconLists"][1][1]]]
+        assert written["ignored"] == ["com.b"]
+
+    def test_the_one_page_primitive_keeps_widgets_and_pinned_icons(self):
+        from unjiggle.device import parse_layout_state
+
+        raw = _ios26_state()
+        keep = [f"com.x.a{i:02d}" for i in range(12)]
+        written = compact_to_single_page(parse_layout_state(raw), keep, ["com.y.b0", "com.apple.clips"])
+        # 8 apps fit beside the widgets. The pinned icons stay on page 2.
+        assert written[1][:3] == raw[1][:3]
+        assert [item["bundleIdentifier"] for item in written[1][3:]] == keep[:8]
+        pinned = [e for page in written[2:] for item in page
+                  for e in ([item] if "listType" not in item else item["iconLists"][0])]
+        assert {e["displayIdentifier"] for e in pinned} == {
+            "com.g.off1", "com.g.off2", "com.microsoft.Office.Word", "com.apple.clips"}
+
+
+def _entry_like(raw, bundle_id):
+    for page in raw:
+        for item in page:
+            if isinstance(item, dict) and item.get("bundleIdentifier") == bundle_id:
+                return item
+    raise KeyError(bundle_id)

@@ -92,9 +92,9 @@ def is_folder_entry(raw_item) -> bool:
 
 
 def entry_app_id(raw_item) -> str | None:
-    """The ID of an app entry: its bundleIdentifier, or for an app that the phone
-    shows without one (such as an offloaded app) its displayIdentifier. None for a
-    widget, a folder or an entry that is not an app.
+    """The ID of an app entry: its bundleIdentifier, or for an icon that the phone
+    shows without one (a pinned icon, see is_pinned_entry) its displayIdentifier.
+    None for a widget, a folder or an entry that the parser does not show.
 
     The parser and the write path (layout_engine) find an app by this ID, so both
     see the same apps.
@@ -109,6 +109,25 @@ def entry_app_id(raw_item) -> str | None:
     if raw_item.get("iconType") in (None, "app"):
         return raw_item.get("displayIdentifier") or None
     return None
+
+
+def is_pinned_entry(raw_item) -> bool:
+    """True for an icon that the parser shows as an app, but that has no
+    bundleIdentifier (only a displayIdentifier): an icon that is not an App Store app,
+    such as a web shortcut or an App Clip. The App Library cannot hold it, so the
+    engine never moves or removes it (see models.AppItem.pinned)."""
+    return (
+        isinstance(raw_item, dict)
+        and not raw_item.get("bundleIdentifier")
+        and entry_app_id(raw_item) is not None
+    )
+
+
+def is_app_store_entry(raw_item) -> bool:
+    """True for an app entry with a bundle ID: an App Store app (or an Apple app) that
+    can go to the App Library. A widget, a folder, a pinned icon and an entry that the
+    parser does not show are not."""
+    return entry_app_id(raw_item) is not None and not is_pinned_entry(raw_item)
 
 
 def _parse_item(raw_item) -> LayoutItem | None:
@@ -138,7 +157,7 @@ def _parse_item(raw_item) -> LayoutItem | None:
                 app_id = entry_app_id(entry)
                 if app_id:
                     name = entry.get("displayName") if isinstance(entry, dict) else None
-                    apps.append(AppItem(bundle_id=app_id, display_name=name))
+                    apps.append(AppItem(bundle_id=app_id, display_name=name, pinned=is_pinned_entry(entry)))
             folder_pages.append(apps)
         return LayoutItem(folder=FolderItem(
             display_name=raw_item.get("displayName", "Unnamed Folder"),
@@ -146,13 +165,14 @@ def _parse_item(raw_item) -> LayoutItem | None:
             raw=raw_item,
         ))
 
-    # An app (a dict on iOS 26). An app with no bundleIdentifier is found by its
-    # displayIdentifier: it is an icon on the phone and takes a slot.
+    # An app (a dict on iOS 26). An icon with no bundleIdentifier is found by its
+    # displayIdentifier: it takes a slot, and it is pinned (not an App Store app).
     app_id = entry_app_id(raw_item)
     if app_id:
         return LayoutItem(app=AppItem(
             bundle_id=app_id,
             display_name=raw_item.get("displayName"),
+            pinned=is_pinned_entry(raw_item),
         ))
 
     return None

@@ -289,3 +289,59 @@ class TestParseResult:
 
         assert len(result.observations[0].operations) == 1
         assert result.observations[0].operations[0].action == "rebuild_pages"
+
+
+def _pinned_layout():
+    from unjiggle.device import parse_layout_state
+
+    return parse_layout_state([
+        [{"bundleIdentifier": "com.dock", "iconType": "app"}],
+        [{"bundleIdentifier": "com.a", "iconType": "app"},
+         {"displayIdentifier": "com.web.clip", "displayName": "Clip"},
+         {"displayName": "Old", "listType": "folder",
+          "iconLists": [[{"bundleIdentifier": "com.b"}, {"displayIdentifier": "com.old.game"}]]}],
+    ])
+
+
+class TestPinnedIcons:
+    """An icon with no bundleIdentifier is not an App Store app: no operation acts on it."""
+
+    def test_the_context_marks_pinned_icons_as_fixed(self):
+        from unjiggle.analyzer import _build_context
+        from unjiggle.scoring import compute_score
+
+        layout = _pinned_layout()
+        context = _build_context(layout, {}, compute_score(layout, {}))
+        assert "  com.web.clip FIXED" in context
+        assert "    com.old.game FIXED" in context
+        assert "  com.a\n" in context
+
+    def test_operations_that_name_only_pinned_icons_are_dropped(self):
+        layout = _pinned_layout()
+        data = {
+            "observations": [{
+                "track": "cleanup", "title": "Old", "narrative": "Old things.",
+                "operations": [
+                    {"action": "delete", "bundle_ids": ["com.web.clip"], "gratitude": "Bye."},
+                    {"action": "move_to_app_library", "bundle_ids": ["com.old.game", "com.b"]},
+                ],
+            }],
+            "personality": "Test", "archetype": "Test",
+        }
+        ops = _parse_result(data, layout).observations[0].operations
+        assert [(op.action, op.bundle_ids) for op in ops] == [("move_to_app_library", ["com.b"])]
+
+    def test_the_preview_keeps_pinned_icons_that_an_operation_names(self):
+        layout = _pinned_layout()
+        ops = [LayoutOperation(action="move_to_app_library", bundle_ids=["com.web.clip", "com.old.game", "com.b"])]
+        preview = preview_operations(layout, ops)
+        assert preview.all_bundle_ids == ["com.dock", "com.a", "com.web.clip", "com.old.game"]
+
+    def test_the_operation_contract_says_that_widgets_and_fixed_icons_stay(self):
+        from unjiggle.analyzer import OPERATION_SCHEMA, SYSTEM_PROMPT
+
+        actions = OPERATION_SCHEMA["properties"]["action"]["description"]
+        assert "Page 1 keeps its widgets and FIXED icons in their places" in actions
+        assert "Apps and folders not listed leave the home screen" in actions
+        assert "widgets not listed leave" not in actions
+        assert "no operation moves or removes it, and widgets stay too" in SYSTEM_PROMPT
