@@ -1099,3 +1099,124 @@ def test_json_apply_writes_and_verifies_a_full_restyle(monkeypatch, sample_metad
     folder_items = [item for page in written[1:] for item in page if item.get("iconType") == "folder"]
     members = [app for folder in folder_items for app in folder["iconLists"][0]]
     assert members and all(app["displayName"] == _label(app["bundleIdentifier"]) for app in members)
+
+
+# --- widgets and pinned icons ---------------------------------------------------------------
+
+
+def _pinned_phone():
+    """Page 1: a medium widget, a pinned icon and two apps. Page 2: a folder (Arcade) with two
+    apps and a pinned icon, a folder of apps, and loose apps. Page 3: a pinned icon."""
+    fmt = "ios26"
+    bids = [f"com.pin.app{i:02d}" for i in range(20)]
+    metadata = _metadata(bids, random.Random(9))
+    clip = {"displayIdentifier": "com.web.clip", "displayName": "Clip"}
+    game = {"displayIdentifier": "com.old.game", "displayName": "Old Game"}
+    word = {"displayIdentifier": "com.old.word", "displayName": "Word"}
+    pages = [
+        [_widget(0, "medium"), clip, _app(bids[0], fmt), _app(bids[1], fmt)],
+        [{"displayName": "Arcade", "listType": "folder", "iconLists": [[_app(bids[2], fmt), game, _app(bids[3], fmt)]]},
+         _folder("Work", bids[4:7], fmt)] + [_app(b, fmt) for b in bids[7:20]],
+        [word],
+    ]
+    return device.parse_layout_state(_state([_app("com.pin.dock", fmt)], pages, fmt)), metadata
+
+
+def test_handles_skip_pinned_icons_and_keep_the_numbers_of_the_apps():
+    layout, _metadata = _pinned_phone()
+    handles = stylist.build_handles(layout)
+    assert not {"com.web.clip", "com.old.game", "com.old.word"} & set(handles.by_bundle_id)
+    # Each pinned icon uses up a number: the clip on page 1 (a1), and the icon between
+    # com.pin.app02 and com.pin.app03 (a5).
+    assert handles.by_bundle_id["com.pin.app00"] == "a2"
+    assert handles.by_bundle_id["com.pin.app02"] == "a4"
+    assert handles.by_bundle_id["com.pin.app03"] == "a6"
+    assert handles.lookup("a1") is None and handles.lookup("a5") is None
+
+
+def test_the_context_counts_fixed_icons_and_the_room_of_a_new_layout():
+    layout, metadata = _pinned_phone()
+    context = stylist.build_plan_context(layout, metadata, stylist.build_handles(layout))
+    assert "\nPHONE: 21 apps on 3 pages, 2 folders, 1 widgets\n" in context
+    assert "PAGE 1 NOW: widgets use 8 of 24 slots (1 medium), 1 fixed icon, a2 " in context
+    assert "\nPAGE 1 ROOM FOR APPS: 15 of 24 slots\n" in context
+    assert '"Arcade" p2 (2, 1 fixed), "Work" p2 (3)' in context
+    assert "\nFIXED ICONS: 2 loose, 1 in folders\n" in context
+    assert "com.web.clip" not in context and "Old Game" not in context
+    # A folder on page 1 leaves it in a new layout, so the room differs there.
+    raw = [list(page) for page in layout.raw]
+    raw[1] = raw[1] + [_folder("Tools", ["com.pin.tool1", "com.pin.tool2"], "ios26")]
+    layout = device.parse_layout_state(raw)
+    context = stylist.build_plan_context(layout, metadata, stylist.build_handles(layout))
+    assert "\nPAGE 1 ROOM FOR APPS: 14 of 24 slots\nPAGE 1 ROOM IN A NEW LAYOUT: 15 of 24 slots\n" in context
+
+
+def test_the_prompt_says_that_widgets_and_fixed_icons_stay():
+    prompt = stylist.INTENT_SYSTEM_PROMPT
+    assert "widgets leave the home screen" not in prompt
+    assert "No plan moves or removes a widget or a fixed icon." in prompt
+    assert "page 1 keeps its widgets and fixed \\\nicons" not in prompt  # one paragraph, no stray breaks
+    assert "In a new layout (unplaced is folders or app_library), page 1 keeps its widgets and fixed icons" in \
+        " ".join(prompt.split())
+
+
+@pytest.mark.parametrize("mode", ["folders", "app_library"])
+def test_a_new_layout_keeps_widgets_and_fixed_icons(mode):
+    layout, metadata = _pinned_phone()
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    plan = _stay_plan(page_one=[h(f"com.pin.app{i:02d}") for i in range(8, 12)], unplaced=mode)
+    ops, _report = check_expansion(layout, metadata, plan)
+    after = preview_operations(layout, ops)
+    first = after.pages[0]
+    # The widget and the pinned icon keep their places; the plan's apps fill the rest.
+    assert first[0].is_widget and first[1].app.bundle_id == "com.web.clip"
+    assert [i.app.bundle_id for i in first[2:6]] == [f"com.pin.app{i:02d}" for i in range(8, 12)]
+    assert "com.old.word" in after.all_bundle_ids and "com.old.game" in after.all_bundle_ids
+    arcade = [i.folder for page in after.pages for i in page if i.is_folder and i.folder.display_name == "Arcade"]
+    assert len(arcade) == 1
+    if mode == "folders":
+        # The apps of "Arcade" go back into the folder that the rebuild kept.
+        assert ("move_to_folder", "Arcade") in [(op.action, op.folder_name) for op in ops]
+        assert sorted(a.bundle_id for p in arcade[0].pages for a in p) == \
+            ["com.old.game", "com.pin.app02", "com.pin.app03"]
+    else:
+        assert [a.bundle_id for p in arcade[0].pages for a in p] == ["com.old.game"]
+
+
+def test_a_page_one_that_does_not_fit_beside_the_widgets_is_rebuilt():
+    layout, metadata = widget_phone()
+    handles = stylist.build_handles(layout)
+    wanted = [b for b in handles.bundle_ids() if b >= "com.example.wd50"][:6]
+    plan = _stay_plan(page_one=[handles.by_bundle_id[b] for b in wanted], unplaced="app_library")
+    ops, report = check_expansion(layout, metadata, plan)
+    after = preview_operations(layout, ops)
+    # The widgets use 20 slots: 4 apps fit on page 1, and 2 go to page 2.
+    assert "rebuild_pages" in [op.action for op in ops]
+    assert [i.is_widget for i in after.pages[0]] == [True] * 4 + [False] * 4
+    assert [i.app.bundle_id for i in after.pages[0][4:]] == wanted[:4]
+    assert report.page_one_overflow == [handles.by_bundle_id[b] for b in wanted[4:]]
+    # The extraLarge widget of page 3 stays too.
+    assert sum(1 for page in after.pages for i in page if i.is_widget) == 5
+
+
+def test_hiding_a_folder_with_fixed_icons_warns_that_they_stay():
+    layout, metadata = _pinned_phone()
+    handles = stylist.build_handles(layout)
+    plan = _stay_plan(app_library={"groups": ["Arcade"], "apps": []})
+    ops, report = check_expansion(layout, metadata, plan)
+    assert [(op.action, sorted(op.bundle_ids)) for op in ops] == [
+        ("move_to_app_library", ["com.pin.app02", "com.pin.app03"])]
+    assert report.fixed_kept == ["com.old.game"]
+    warnings = stylist.plan_warnings(report, handles, stylist.context_names(layout, metadata, handles))
+    assert warnings == [{
+        "kind": "fixed_kept",
+        "message": "Kept on the home screen: Old Game. They are not App Store apps (such as web "
+                   "shortcuts), so the App Library cannot hold them.",
+        "bundle_ids": ["com.old.game"],
+    }]
+
+
+def test_the_expansion_check_rejects_a_step_that_names_a_pinned_icon():
+    layout, _metadata = _pinned_phone()
+    op = stylist.LayoutOperation("move_to_page", ["com.web.clip"], target_page=1)
+    assert stylist.expansion_problem(layout, [op]) == "names an icon that is not an App Store app"

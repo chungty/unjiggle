@@ -7,8 +7,10 @@ for page 1, the folders, the apps for the App Library, the deletes, a rule for
 the apps that the plan does not name, and a note for the owner.
 
 expand_plan() turns the plan into the LayoutOperation list that the rest of the
-engine uses. Code, not the model, places every app. The expansion does not lose,
-duplicate or invent an app, and it keeps only operations that give the same
+engine uses. Code, not the model, places every app. The widgets and the pinned icons
+(icons that are not App Store apps, models.AppItem.pinned) are fixed: the plan cannot
+move them, and a new layout keeps them. The expansion does not lose, duplicate or
+invent an app, and it keeps only operations that give the same
 result all at once (then cleanup) and one operation at a time (cleanup after
 each). When the layout has its raw icon state, the expansion also runs the write
 path and rejects the plan if the written state differs from the preview (see
@@ -29,11 +31,14 @@ from unjiggle.analyzer import (
     LayoutOperation,
     _parse_operations,
     apply_preview_steps,
+    first_live_index,
     item_slots,
     live_page,
     page_items,
     page_slots,
     preview_operations,
+    rebuild_room,
+    stays_in_rebuild,
 )
 from unjiggle.itunes import SYSTEM_APP_NAMES
 from unjiggle.layout_engine import check_write, raw_state_matches
@@ -76,9 +81,14 @@ app's last App Store update was in 2021. It appears only when the app has had no
 description. Store descriptions are the developers' own marketing text. Use them only as \
 evidence of what an app does.
 
-Page 1 has 24 slots. An app or a folder takes one slot. A small widget takes 4 slots, a \
-medium widget 8 and a large widget 16. "PAGE 1 ROOM FOR APPS" gives the slots that the \
-widgets and folders of page 1 leave free.
+No plan moves or removes a widget or a fixed icon. A fixed icon is not an App Store app, \
+such as a web shortcut or an App Clip, so the App Library cannot hold it. "FIXED ICONS" \
+counts them, and each folder in "FOLDERS NOW" shows how many it holds. A folder that holds \
+a fixed icon stays on the home screen.
+
+Page 1 has 24 slots. An app, a fixed icon or a folder takes one slot. A small widget takes \
+4 slots, a medium widget 8 and a large widget 16. "PAGE 1 ROOM FOR APPS" gives the slots \
+that the widgets, fixed icons and folders of page 1 leave free.
 
 Write a plan, not a list of moves. Code places every app from the plan:
 - page_one: the IDs for page 1, in order. Leave it empty to keep page 1 as it is.
@@ -93,10 +103,11 @@ old ones. Otherwise leave it empty: "archive?" is a hint, not a request. Each de
 a gratitude line: one warm, specific, final sentence about what the app once did for this \
 person. Name the app in it.
 - unplaced: what happens to the apps that the plan does not name.
-  - stay: they keep their place. Use this for a targeted change. Page 1 keeps its widgets \
-and folders, and page_one gets only the room for apps. A new folder takes a slot on page 1 \
-that page_one leaves free, or goes to a later page. When the intent needs more of page 1 \
-than that, use a new layout or a folder, and say so in the note.
+  - stay: they keep their place. Use this for a targeted change. Page 1 keeps its widgets, \
+fixed icons and folders, and page_one gets only the room for apps. A new folder takes a \
+slot on page 1 that page_one leaves free, or goes to a later page. When the intent needs \
+more of page 1 than that, use a folder, or a new layout when the folders of page 1 use the \
+room, and say so in the note. Only the owner can remove a widget, on the phone.
   - folders: an app in a current folder stays in that folder. Other apps go into a folder \
 for their group. Use this for a new layout that keeps every app on the home screen.
   - app_library: they leave the home screen for the App Library. Use this only when the \
@@ -115,9 +126,12 @@ all of its apps fit the folder, and place the other apps by ID. This also holds 
 apps that unplaced folders puts into a folder for their group. When most apps of a current \
 folder move, name the rest too.
 
-In a new layout (unplaced is folders or app_library), page 1 shows page_one and then the \
-folders, and the widgets leave the home screen. Make page_one and the folders fit in the 24 \
-slots of page 1 together. Folders that do not fit go to page 2.
+In a new layout (unplaced is folders or app_library), page 1 keeps its widgets and fixed \
+icons in their places, and a folder of page 1 that holds a fixed icon. page_one and then \
+the folders fill the other slots of page 1. "PAGE 1 ROOM IN A NEW LAYOUT" gives those slots \
+when they differ from the room for apps. Make page_one and the folders fit in them together. \
+The page_one apps that do not fit go to page 2, then the fixed icons of the other pages, and \
+then the folders that do not fit.
 
 An ID in the plan wins over its group. The dock stays as it is. The plan ignores an ID or a \
 name that is not in the layout.
@@ -182,14 +196,23 @@ INTENT_TOOL = {
 
 @dataclass
 class AppHandles:
-    """Short IDs (a1, a2, ...) for the apps that a plan can move, in layout order."""
+    """Short IDs (a1, a2, ...) for the apps that a plan can move, in layout order.
+
+    A pinned icon uses up a number but gets no handle, so an app keeps the handle
+    that it had before pinned icons were left out, and a recorded plan still names
+    the same apps.
+    """
 
     by_bundle_id: dict[str, str] = field(default_factory=dict)
     by_handle: dict[str, str] = field(default_factory=dict)
+    numbered: set[str] = field(default_factory=set)
 
-    def add(self, bundle_id: str) -> None:
-        if bundle_id not in self.by_bundle_id:
-            handle = f"a{len(self.by_bundle_id) + 1}"
+    def add(self, bundle_id: str, movable: bool = True) -> None:
+        if bundle_id in self.numbered:
+            return
+        self.numbered.add(bundle_id)
+        if movable:
+            handle = f"a{len(self.numbered)}"
             self.by_bundle_id[bundle_id] = handle
             self.by_handle[handle] = bundle_id
 
@@ -228,14 +251,31 @@ def _page_apps(item) -> list[str]:
 
 
 def build_handles(layout: HomeScreenLayout) -> AppHandles:
+    """Handles for the apps on the pages and in their folders, without the dock apps
+    and the pinned icons."""
     dock = dock_bundle_ids(layout)
+    pinned = layout.pinned_ids()
     handles = AppHandles()
     for page in layout.pages:
         for item in page:
             for bundle_id in _page_apps(item):
                 if bundle_id not in dock:
-                    handles.add(bundle_id)
+                    handles.add(bundle_id, movable=bundle_id not in pinned)
     return handles
+
+
+def pinned_icons(layout: HomeScreenLayout) -> dict[str, list[str]]:
+    """The pinned icons on the pages (not in the dock), in layout order: under "" the
+    loose ones, and under a folder's name (casefold) the ones in that folder."""
+    pinned = layout.pinned_ids()
+    out: dict[str, list[str]] = {}
+    for page in layout.pages:
+        for item in page:
+            key = item.folder.display_name.casefold() if item.is_folder else ""
+            for bundle_id in _page_apps(item):
+                if bundle_id in pinned:
+                    out.setdefault(key, []).append(bundle_id)
+    return out
 
 
 def app_group(bundle_id: str, metadata: dict[str, dict]) -> str:
@@ -321,10 +361,16 @@ def _display_names(layout: HomeScreenLayout) -> dict[str, str]:
 
 
 def context_names(layout: HomeScreenLayout, metadata: dict[str, dict], handles: AppHandles) -> dict[str, str]:
-    """plan_names() for the dock apps and the apps that a plan can move."""
+    """plan_names() for the dock apps and the apps that a plan can move, and the short
+    name of each pinned icon on the pages (for the warnings)."""
     dock_apps = [item.app.bundle_id for item in layout.dock if item.is_app]
     bundle_ids = list(dict.fromkeys(dock_apps + handles.bundle_ids()))
-    return plan_names(bundle_ids, metadata, _display_names(layout))
+    display = _display_names(layout)
+    labels = plan_names(bundle_ids, metadata, display)
+    for members in pinned_icons(layout).values():
+        for bundle_id in members:
+            labels.setdefault(bundle_id, short_name(bundle_id, metadata, display))
+    return labels
 
 
 def build_plan_context(
@@ -339,6 +385,7 @@ def build_plan_context(
     dock_apps = [item.app.bundle_id for item in layout.dock if item.is_app]
     candidates = {c["bundle_id"] for c in archive_candidates or []}
 
+    pinned = layout.pinned_ids()
     where: dict[str, str] = {}
     widgets = 0
     folder_bits = []
@@ -350,7 +397,9 @@ def build_plan_context(
                 where.setdefault(item.app.bundle_id, f"p{number}")
             elif item.is_folder:
                 members = _page_apps(item)
-                folder_bits.append(f'"{item.folder.display_name}" p{number} ({len(members)})')
+                fixed_count = sum(1 for bundle_id in members if bundle_id in pinned)
+                count = f"{len(members) - fixed_count}, {fixed_count} fixed" if fixed_count else f"{len(members)}"
+                folder_bits.append(f'"{item.folder.display_name}" p{number} ({count})')
                 for bundle_id in members:
                     where.setdefault(bundle_id, f'"{item.folder.display_name}"')
 
@@ -364,6 +413,9 @@ def build_plan_context(
         page_one.append(
             f"widgets use {page_slots(page_one_widgets)} of {PAGE_SLOTS} slots ({kinds})"
         )
+    page_one_fixed = sum(1 for item in first_page if item.is_app and item.app.bundle_id in pinned)
+    if page_one_fixed:
+        page_one.append(f"{page_one_fixed} fixed icon{'s' if page_one_fixed > 1 else ''}")
     for item in first_page:
         if item.is_app and item.app.bundle_id in handles.by_bundle_id:
             bundle_id = item.app.bundle_id
@@ -371,11 +423,18 @@ def build_plan_context(
         elif item.is_folder:
             page_one.append(f'"{item.folder.display_name}"')
 
-    fixed = [item for item in first_page if not item.is_app]
+    # In a targeted change, page 1 keeps its widgets, folders and pinned icons. In a
+    # new layout, it keeps what stays in a rebuild (analyzer.stays_in_rebuild).
+    fixed = [item for item in first_page if not item.is_app or item.app.bundle_id in pinned]
     room = max(PAGE_SLOTS - page_slots(fixed), 0)
+    new_room = max(rebuild_room([(item, item_slots(item) > 0) for item in first_page], stays_in_rebuild, item_slots), 0)
+    by_place = pinned_icons(layout)
+    loose_fixed = len(by_place.get("", []))
+    foldered_fixed = sum(len(members) for key, members in by_place.items() if key)
 
+    apps = layout.total_apps - loose_fixed - foldered_fixed
     phone = (
-        f"PHONE: {layout.total_apps} apps on {layout.page_count} pages, "
+        f"PHONE: {apps} apps on {layout.page_count} pages, "
         f"{len(layout.all_folders())} folders, {widgets} widgets"
     )
     lines = [
@@ -384,9 +443,13 @@ def build_plan_context(
         "DOCK (fixed): " + (", ".join(dock) or "empty"),
         "PAGE 1 NOW: " + (", ".join(page_one) or "empty"),
         f"PAGE 1 ROOM FOR APPS: {room} of {PAGE_SLOTS} slots",
-        "FOLDERS NOW: " + (", ".join(folder_bits) or "none"),
-        "",
     ]
+    if new_room != room:
+        lines.append(f"PAGE 1 ROOM IN A NEW LAYOUT: {new_room} of {PAGE_SLOTS} slots")
+    lines.append("FOLDERS NOW: " + (", ".join(folder_bits) or "none"))
+    if loose_fixed or foldered_fixed:
+        lines.append(f"FIXED ICONS: {loose_fixed} loose, {foldered_fixed} in folders")
+    lines.append("")
 
     groups: dict[str, list[str]] = {}
     for bundle_id in handles.bundle_ids():
@@ -437,6 +500,9 @@ class PlanReport:
     # page_one_overflow go to the pages after page 1. In stay mode they stay.
     page_one_rebuilt: bool = False
     not_moved: list[str] = field(default_factory=list)
+    # Pinned icons (bundle IDs, not short IDs) that stay on the home screen although
+    # the plan sends the apps around them to the App Library.
+    fixed_kept: list[str] = field(default_factory=list)
     dropped_operations: list[str] = field(default_factory=list)
     # Steps left out: ``dropped`` gave a different result all at once and one at a
     # time, and ``overfull`` would fill a page past its slots.
@@ -556,6 +622,7 @@ def expand_plan(
                     if bundle_id not in members:
                         members.append(bundle_id)
                     in_folder.setdefault(bundle_id, key)
+    fixed_by_folder = pinned_icons(layout)
 
     def ids(values) -> list[str]:
         out: list[str] = []
@@ -659,6 +726,15 @@ def expand_plan(
     for key in plan_folders:
         claim(named_apps(specs[key]["groups"]), "folder", key)
     claim(named_apps(library.get("groups")), "library")
+    # Pinned icons stay where the plan sends the apps around them to the App Library.
+    if mode == "app_library":
+        report.fixed_kept = [b for members in fixed_by_folder.values() for b in members]
+    else:
+        for value in library.get("groups") or []:
+            key = _clean_name(value, current.keys()).casefold()
+            if key and key in current:
+                report.fixed_kept += fixed_by_folder.get(key, [])
+    report.fixed_kept = list(dict.fromkeys(report.fixed_kept))
 
     # 5. The apps that the plan does not name.
     unclaimed = [b for b in home if b not in dest]
@@ -666,9 +742,12 @@ def expand_plan(
         claim(unclaimed, "library")
     elif mode == "folders":
         loose_by_group: dict[str, list[str]] = {}
-        # An app stays in its current folder when another app stays with it. An app
-        # that would stay alone goes into the folder for its group.
+        # An app stays in its current folder when another app or a pinned icon stays
+        # with it. An app that would stay alone goes into the folder for its group.
         staying = Counter(in_folder[b] for b in unclaimed if b in in_folder)
+        for key, members in fixed_by_folder.items():
+            if key:
+                staying[key] += len(members)
         for bundle_id in unclaimed:
             key = in_folder.get(bundle_id)
             if key is not None and (staying[key] >= 2 or key in folder_title):
@@ -707,21 +786,25 @@ def expand_plan(
                 if members[key]:
                     page1 = [members[key].pop(0)]
                     break
-        candidates = deletes + archive
-        if page1:
-            if len(page1) <= PAGE_SLOTS:
-                candidates.append(LayoutOperation("compact_to_single_page", page1))
-            else:
-                # 24 apps per page. The folders follow on the first page with room.
-                report.page_one_overflow += [handles.by_bundle_id[b] for b in page1[PAGE_SLOTS:]]
-                report.page_one_rebuilt = True
-                candidates.append(LayoutOperation("rebuild_pages", page1))
-            candidates += [
-                LayoutOperation("create_folder", members[key], folder_name=folder_title[key])
-                for key in folder_order if members[key]
-            ]
-        for op in candidates:
+        for op in deletes + archive:
             sequence.add(op)
+        if page1:
+            # Page 1 keeps its widgets and pinned icons (analyzer.rebuilt_pages). The
+            # apps that do not fit in the room they leave go to page 2, and the
+            # folders follow on the first page with room.
+            pages = sequence.pages()
+            index = first_live_index(pages, item_slots)
+            first = [(item, item_slots(item) > 0) for item in pages[index]] if index is not None else []
+            room = max(rebuild_room(first, stays_in_rebuild, item_slots), 0)
+            if len(page1) <= room:
+                sequence.add(LayoutOperation("compact_to_single_page", page1))
+            else:
+                report.page_one_overflow += [handles.by_bundle_id[b] for b in page1[room:]]
+                report.page_one_rebuilt = True
+                sequence.add(LayoutOperation("rebuild_pages", page1))
+            for key in folder_order:
+                if members[key]:
+                    sequence.add(_new_layout_folder(sequence, members[key], folder_title[key]))
 
     ops = sequence.ops
     problem = expansion_problem(work, ops)
@@ -831,6 +914,19 @@ def _stay_operations(
         sequence.add(op)
 
 
+def _new_layout_folder(sequence, apps: list[str], name: str) -> LayoutOperation:
+    """The step for a folder of a new layout: create_folder, or move_to_folder when
+    the rebuild kept a page folder with this name (it holds pinned icons) and no other
+    folder, in the dock or on a page, has the name."""
+    state = apply_preview_steps(sequence.layout, sequence.ops)
+    on_pages = [item for page in state.pages for item in page
+                if item.is_folder and item.folder.display_name == name]
+    in_dock = [item for item in state.dock if item.is_folder and item.folder.display_name == name]
+    if len(on_pages) == 1 and not in_dock:
+        return LayoutOperation("move_to_folder", apps, folder_name=name)
+    return LayoutOperation("create_folder", apps, folder_name=name)
+
+
 def _early_removals(sequence, deletes, library_apps) -> set[str]:
     """The removed apps that are loose on page 1 and can go before page_one: taking
     them off the home screen together empties no folder and no page. An emptied folder
@@ -931,6 +1027,13 @@ def _layout_key(layout: HomeScreenLayout) -> str:
     }, sort_keys=True)
 
 
+def _widget_count(layout: HomeScreenLayout) -> Counter:
+    return Counter(
+        json.dumps(_item_key(item), sort_keys=True)
+        for page in [layout.dock, *layout.pages] for item in page if item.is_widget
+    )
+
+
 def _dock_key(layout: HomeScreenLayout) -> str:
     return json.dumps([_item_key(item) for item in layout.dock], sort_keys=True)
 
@@ -1007,12 +1110,13 @@ def expansion_problem(layout: HomeScreenLayout, ops: list[LayoutOperation]) -> s
     """None when the operations keep every app. Otherwise a short description.
 
     The checks:
-    - No operation names a dock app or an app that is not on the phone.
+    - No operation names a dock app, a pinned icon or an app that is not on the phone.
     - No app is in two operations.
     - After the preview, each app is on the home screen (once, unless it was there
       more than once before), or an operation deletes it or sends it to the App
       Library.
     - The dock does not change.
+    - Every widget and pinned icon stays on the home screen.
     - No page uses more than 24 slots, unless one did before.
     - The preview matches the preview one operation at a time.
     """
@@ -1021,6 +1125,8 @@ def expansion_problem(layout: HomeScreenLayout, ops: list[LayoutOperation]) -> s
     named = [b for op in ops for b in op.bundle_ids]
     if any(b in dock for b in named):
         return "names a dock app"
+    if any(b in layout.pinned_ids() for b in named):
+        return "names an icon that is not an App Store app"
     if any(b not in on_phone for b in named):
         return "names an app that is not on the phone"
     if len(named) != len(set(named)):
@@ -1039,6 +1145,8 @@ def expansion_problem(layout: HomeScreenLayout, ops: list[LayoutOperation]) -> s
             return f"loses {bundle_id}"
     if _dock_key(after) != _dock_key(layout):
         return "changes the dock"
+    if _widget_count(after) != _widget_count(layout):
+        return "loses a widget"
     if any(page_slots(page) > slot_limit(layout) for page in after.pages):
         return "overfills a page"
     if _layout_key(after) != _layout_key(_one_at_a_time(layout, ops)):
@@ -1101,7 +1209,8 @@ def plan_intent(
         )
 
     ops, report = expand_plan(plan, layout, metadata, handles)
-    operations = _parse_operations([_operation_dict(op) for op in ops], set(layout.all_bundle_ids))
+    valid = set(layout.all_bundle_ids) - layout.pinned_ids()
+    operations = _parse_operations([_operation_dict(op) for op in ops], valid)
     return IntentPlan(operations, plan_warnings(report, handles, context_names(layout, metadata, handles)))
 
 
@@ -1133,7 +1242,7 @@ def plan_warnings(report: PlanReport, handles: AppHandles, names: dict[str, str]
 
     Each warning has a kind, a message and the bundle IDs that it is about. Kinds:
     stylist_note (the plan's note), plan_rejected, page_one_overflow, not_moved,
-    dropped_delete and dropped_step. The message gives the reason.
+    fixed_kept, dropped_delete and dropped_step. The message gives the reason.
     """
     def bundle_ids(short_ids: list[str]) -> list[str]:
         return list(dict.fromkeys(handles.by_handle[h] for h in short_ids if h in handles.by_handle))
@@ -1158,6 +1267,10 @@ def plan_warnings(report: PlanReport, handles: AppHandles, names: dict[str, str]
     if apps:
         add("not_moved", f"No free slot on a later page for {_app_list(apps, names)}. "
             "They stay on page 1.", apps)
+    apps = list(report.fixed_kept)
+    if apps:
+        add("fixed_kept", f"Kept on the home screen: {_app_list(apps, names)}. They are not "
+            "App Store apps (such as web shortcuts), so the App Library cannot hold them.", apps)
     apps = bundle_ids(report.deletes_without_line)
     if apps:
         add("dropped_delete", f"Not deleted: {_app_list(apps, names)}. The plan gave no "
