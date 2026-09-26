@@ -1091,7 +1091,7 @@ def test_json_apply_writes_and_verifies_a_full_restyle(monkeypatch, sample_metad
     monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
     monkeypatch.setattr(device, "read_layout", lambda lockdown: device.parse_layout_state(state["raw"]))
     monkeypatch.setattr(device, "write_layout", write_layout)
-    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, Path("/tmp/b.json")))
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: Path("/tmp/b.json"))
 
     result = CliRunner().invoke(json_group, ["apply"], input=json.dumps({"operations": payload_ops}))
 

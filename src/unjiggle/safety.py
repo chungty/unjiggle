@@ -21,10 +21,12 @@ console = Console()
 BACKUP_DIR = Path.home() / ".unjiggle" / "backups"
 
 
-def verified_backup(lockdown, layout: HomeScreenLayout) -> Path:
+def verified_backup(lockdown, layout: HomeScreenLayout, out: Console | None = None) -> Path:
     """Create a backup and verify it by reading it back.
 
-    Returns the backup path. Raises if verification fails.
+    Returns the backup path. Raises if verification fails. It asks no question, so the
+    json commands can use it. ``out`` gets the progress text (default: stdout; the json
+    commands give a stderr console).
     """
     from unjiggle.device import read_layout
 
@@ -47,7 +49,7 @@ def verified_backup(lockdown, layout: HomeScreenLayout) -> Path:
     fresh_layout = read_layout(lockdown)
     fresh_json = json.dumps(fresh_layout.raw, indent=2, default=str)
     if fresh_json != raw_json:
-        console.print("[yellow]  Warning: device state changed between reads. Re-backing up...[/yellow]")
+        (out or console).print("[yellow]  Warning: device state changed between reads. Re-backing up...[/yellow]")
         path.write_text(fresh_json)
 
     return path
@@ -122,9 +124,11 @@ def list_backups() -> list[Path]:
 
 
 def pre_write_safety_check(lockdown, layout: HomeScreenLayout) -> tuple[bool, Path | None]:
-    """Run the full safety check before any write operation.
+    """Run the full safety check before a write of the human CLI (`unjiggle suggest`).
 
-    Returns (safe_to_proceed, backup_path).
+    Returns (safe_to_proceed, backup_path). It asks a question (the round trip), so a
+    json command must not use it: `unjiggle json apply` reads its payload from stdin, and
+    nobody can answer. json apply uses verified_backup() directly (see cli.json_apply).
     """
     console.print("\n  [bold]Safety Check[/bold]\n")
 

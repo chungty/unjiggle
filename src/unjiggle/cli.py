@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json as _json
 import sys
 from datetime import datetime
@@ -1040,20 +1041,77 @@ def demo():
 
 # ---------------------------------------------------------------------------
 # JSON API command group — structured output for external clients (no Rich, no TTY)
+#
+# A client starts `unjiggle json <command>`, writes the payload (or nothing) to stdin
+# and closes it, then decodes stdout. So a json command asks no question, and stdout
+# gets exactly one JSON document: _json_out() or _json_err(). All other text (the Rich
+# consoles, click.echo, print, a library) goes to stderr (see _stdout_to_stderr and
+# _JsonCommand, the class of each command of the json group).
 # ---------------------------------------------------------------------------
+
+# The real stdout while a json command runs. None outside a json command.
+_json_stdout = None
+
+# Progress text of a json command, for example from safety.verified_backup().
+_err_console = Console(stderr=True)
+
+
+@contextlib.contextmanager
+def _stdout_to_stderr():
+    """Send everything that writes to sys.stdout to stderr until the json command ends.
+
+    Only _json_out() and _json_err() write to the real stdout. The Rich consoles and
+    click.echo find sys.stdout when they write, so they also follow the swap.
+    """
+    global _json_stdout
+    real_stdout, outer = sys.stdout, _json_stdout
+    _json_stdout = real_stdout
+    sys.stdout = sys.stderr
+    try:
+        yield
+    finally:
+        sys.stdout = real_stdout
+        _json_stdout = outer
+
+
+class _JsonCommand(click.Command):
+    """A json command: its body runs in _stdout_to_stderr(). Its --help still goes to
+    stdout, because click parses the arguments before it calls invoke()."""
+
+    def invoke(self, ctx):
+        with _stdout_to_stderr():
+            return super().invoke(ctx)
+
+
+class _JsonGroup(click.Group):
+    command_class = _JsonCommand
+
+
+def _write_json_document(data: dict) -> None:
+    text = _json.dumps(data, ensure_ascii=False)
+    if _json_stdout is None:
+        click.echo(text)
+        return
+    swapped = sys.stdout
+    sys.stdout = _json_stdout
+    try:
+        click.echo(text)
+    finally:
+        sys.stdout = swapped
 
 
 def _json_out(data: dict) -> None:
-    """Print JSON to stdout and exit cleanly."""
-    click.echo(_json.dumps(data, ensure_ascii=False))
+    """Write the JSON document of the command to stdout."""
+    _write_json_document(data)
 
 
-def _json_err(message: str) -> None:
-    """Print a JSON error to stdout, and the message to stderr, then exit with code 1.
+def _json_err(message: str, **extra) -> None:
+    """Write {"error": message, **extra} to stdout, and the message to stderr, then exit
+    with code 1.
 
     A client that reads only stderr after a non-zero exit still gets the message.
     """
-    click.echo(_json.dumps({"error": message}, ensure_ascii=False))
+    _write_json_document({"error": message, **extra})
     click.echo(message, err=True)
     sys.exit(1)
 
@@ -1225,10 +1283,13 @@ def _analysis_to_json(result) -> dict:
     }
 
 
-@main.group()
+@main.group(cls=_JsonGroup)
 def json():
-    """Machine-readable JSON output for external clients. No Rich formatting."""
-    pass
+    """Machine-readable JSON output for external clients. No Rich formatting.
+
+    Each command asks no question and writes exactly one JSON document to stdout. Other
+    text goes to stderr. On failure the document is {"error": ...} and the exit code is 1.
+    """
 
 
 @json.command(name="status")
@@ -1238,9 +1299,17 @@ def json_status():
 
     try:
         _lockdown, device = connect()
-        _json_out({"connected": True, "device": _device_dict(device)})
     except Exception:
         _json_out({"connected": False})
+        return
+    _json_out({
+        "connected": True,
+        "device": _device_dict(device),
+        # The same fields at the top level, for a client that reads them there.
+        "device_name": device.name,
+        "model": device.model,
+        "ios_version": device.ios_version,
+    })
 
 
 @json.command(name="scan")
@@ -2041,8 +2110,19 @@ def json_presets():
 @json.command(name="restore")
 @click.argument("backup_file", type=click.Path(exists=True), required=True)
 def json_restore(backup_file: str):
-    """Restore a previously backed up layout and verify it."""
-    from unjiggle.device import connect, read_layout, restore_layout_from_file, write_layout
+    """Restore a previously backed up layout and verify it. Asks no question.
+
+    The check passes when the phone reads back as the backup: the same icon state, or
+    the same layout (the dock, the pages, the folders and the widgets, as the post-write
+    check of `json apply` compares them) with values that SpringBoard changes on a write.
+    """
+    from unjiggle.device import (
+        connect,
+        parse_layout_state,
+        read_layout,
+        restore_layout_from_file,
+        write_layout,
+    )
 
     try:
         lockdown, _device = connect()
@@ -2051,16 +2131,25 @@ def json_restore(backup_file: str):
 
     try:
         raw_state = restore_layout_from_file(Path(backup_file))
+        expected = parse_layout_state(raw_state)
     except Exception as e:
         _json_err(f"Failed to read backup: {e}")
 
-    write_layout(lockdown, raw_state)
-    verify = read_layout(lockdown)
+    try:
+        write_layout(lockdown, raw_state)
+        verify = read_layout(lockdown)
+    except Exception as e:
+        _json_err(f"Restore failed: {e}")
 
     expected_json = _json.dumps(raw_state, default=str, sort_keys=True)
     restored_json = _json.dumps(verify.raw, default=str, sort_keys=True)
     if expected_json != restored_json:
-        _json_err("Restore verification failed.")
+        if _layout_signature(verify) != _layout_signature(expected):
+            _json_err("Restore verification failed: the layout on the iPhone does not match the backup.")
+        _err_console.print(
+            "  The layout matches the backup. Some values of the icon state differ,"
+            " because SpringBoard changes them on a write."
+        )
 
     _json_out({
         "restored": True,
@@ -2150,8 +2239,10 @@ def json_render(card: str, action: str, backup: str | None, api_key: str | None,
     else:
         if not backup:
             _json_err("--backup is required for transform cards.")
-        before_raw = restore_layout_from_file(Path(backup))
-        before_layout = parse_layout_state(before_raw)
+        try:
+            before_layout = parse_layout_state(restore_layout_from_file(Path(backup)))
+        except Exception as e:
+            _json_err(f"Failed to read backup: {e}")
         before_metadata = enrich_layout(before_layout)
         before_score = round(compute_score(before_layout, before_metadata).total)
         after_score = round(compute_score(current_layout, current_metadata).total)
@@ -2192,51 +2283,112 @@ def json_render(card: str, action: str, backup: str | None, api_key: str | None,
     })
 
 
-@json.command(name="apply")
-def json_apply():
-    """Apply operations from JSON on stdin."""
+def _read_stdin() -> str:
+    """All of stdin as UTF-8 text. Empty when there is no stdin."""
+    stream = sys.stdin
+    if stream is None:
+        return ""
+    data = stream.buffer.read() if hasattr(stream, "buffer") else stream.read()
+    return data.decode("utf-8-sig") if isinstance(data, bytes) else data
+
+
+def _read_apply_operations() -> list:
+    """The operations of `json apply` from stdin: {"operations": [...]}. Stops the
+    command with a JSON error when the input is not that."""
     from unjiggle.analyzer import LayoutOperation
-    from unjiggle.device import connect, read_layout, write_layout
 
+    expected = 'Expected {"operations": [...]}'
     try:
-        raw_input = click.get_text_stream("stdin").read()
-        data = _json.loads(raw_input)
-    except (ValueError, _json.JSONDecodeError) as e:
+        data = _json.loads(_read_stdin())
+    except ValueError as e:  # also a JSONDecodeError or a UnicodeDecodeError
         _json_err(f"Invalid JSON input: {e}")
-
-    operations_data = data.get("operations", [])
+    if not isinstance(data, dict):
+        _json_err(f"Invalid JSON input. {expected}")
+    operations_data = data.get("operations")
     if not operations_data:
-        _json_err("No operations provided. Expected {\"operations\": [...]}")
+        _json_err(f"No operations provided. {expected}")
+    if not isinstance(operations_data, list):
+        _json_err(f"Invalid JSON input. {expected}")
 
-    try:
-        lockdown, device = connect()
-    except Exception:
-        _json_err("No iPhone detected")
-
-    layout = read_layout(lockdown)
-
-    # Parse operations
     ops = []
     for op_data in operations_data:
+        if not isinstance(op_data, dict) or not isinstance(op_data.get("action"), str):
+            shown = _json.dumps(op_data, ensure_ascii=False)
+            _json_err(f'Invalid operation: {shown}. Each operation needs an "action".')
         ops.append(LayoutOperation(
             action=op_data["action"],
-            bundle_ids=op_data.get("bundle_ids", []),
+            bundle_ids=op_data.get("bundle_ids") or [],
             target_page=op_data.get("target_page"),
             folder_name=op_data.get("folder_name"),
             old_name=op_data.get("old_name"),
             gratitude=op_data.get("gratitude"),
         ))
+    return ops
+
+
+def _json_verified_backup(lockdown, layout) -> Path:
+    """safety.verified_backup() with its text on stderr. Stops the command with a JSON
+    error when the backup fails, before anything is written."""
+    from unjiggle import safety
+
+    try:
+        return safety.verified_backup(lockdown, layout, out=_err_console)
+    except Exception as e:
+        _json_err(f"Backup failed: {e}. No changes made.")
+
+
+@json.command(name="apply")
+def json_apply():
+    """Apply operations from JSON on stdin. Asks no question.
+
+    The safety steps, in this order:
+    1. The check of the new icon state (layout_engine.check_write): it must read back as
+       the preview and lose no entry that no operation names. If not, nothing is written.
+    2. A verified backup (safety.verified_backup). If it fails, nothing is written.
+    3. The write.
+    4. The read-back check: the phone must read back as the preview.
+    The output has the backup path, for undo with `json restore`. After a failed write or
+    a failed read-back check, the error also has it.
+
+    There is no round trip: the write of the unchanged layout that `unjiggle suggest`
+    offers before its write (safety.test_restore_roundtrip). The reasons:
+    - Nobody can answer a question on stdin.
+    - When the write path is broken, the round trip also writes to the phone, so it does
+      not prevent a bad write. Step 4 finds the same problem, and the backup undoes it.
+    - The round trip compares the full icon state. If SpringBoard changes one value on a
+      write, every apply stops.
+    - It adds a write and two reads over USB, and one more reload of the home screen.
+    To test the write path, use `unjiggle safety-test`.
+    """
+    from unjiggle.device import connect, read_layout, write_layout
+
+    ops = _read_apply_operations()
+
+    try:
+        lockdown, _device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
 
     # `applied` counts the operations that change the layout, one at a time. The write
     # applies all operations together and then cleans up, as the preview of `json
     # suggest` does, so the prediction is that preview.
     _one_at_a_time, effective_ops = _preview_effective_operations(layout, ops)
     modified_raw, predicted_layout, write_problem = _prepare_write(layout, ops)
-    if not effective_ops or _layout_signature(predicted_layout) == _layout_signature(layout):
+    changes = bool(effective_ops) and _layout_signature(predicted_layout) != _layout_signature(layout)
+    if changes and write_problem:
+        _json_err(f"Not written: {write_problem}. No changes made.")
+
+    # The backup is also made when nothing changes. Then "backup" is always the path of
+    # a backup of the layout before this command, which a client can restore.
+    backup_path = _json_verified_backup(lockdown, layout)
+
+    if not changes:
         _json_out({
             "requested": len(ops),
             "applied": 0,
-            "backup": None,
+            "backup": str(backup_path),
             "changed": False,
             **_snapshot_metadata(layout),
             "result": {
@@ -2246,23 +2398,17 @@ def json_apply():
         })
         return
 
-    if write_problem:
-        _json_err(f"Not written: {write_problem}. No changes made.")
-
-    # Safety: backup first
-    from unjiggle.safety import pre_write_safety_check
-    safe, backup_path = pre_write_safety_check(lockdown, layout)
-    if not safe:
-        _json_err("Safety check failed. No changes made.")
-
-    # Write the checked raw state
-    write_layout(lockdown, modified_raw)
-
-    # Verify
-    from unjiggle.device import read_layout as re_read
-    verify = re_read(lockdown)
+    undo = f"To undo, restore {backup_path}."
+    try:
+        write_layout(lockdown, modified_raw)
+        verify = read_layout(lockdown)
+    except Exception as e:
+        _json_err(f"Write failed: {e}. {undo}", backup=str(backup_path))
     if _layout_signature(verify) != _layout_signature(predicted_layout):
-        _json_err("Write verification failed.")
+        _json_err(
+            f"Write verification failed: the layout on the iPhone does not match the preview. {undo}",
+            backup=str(backup_path),
+        )
 
     _json_out({
         "requested": len(ops),

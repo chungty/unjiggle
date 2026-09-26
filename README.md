@@ -66,7 +66,11 @@ Useful preset endpoints:
 
 In a transform preview, each entry of `changes` has `from_page` and `to_page` counted from 1, as the owner counts pages. A `delete` change also has `gratitude` and a `detail` line: a delete takes the icon off the home screen, and the app stays installed. The preview of `unjiggle json suggest --intent` also has `plan_warnings`: what the AI Stylist's plan asked for that the preview does not do, such as apps that did not fit on page 1. Each warning has a `kind`, a `message` and the `bundle_ids` that it is about.
 
-`unjiggle json apply` applies all operations together, as the preview of `json suggest` shows them. Before it writes, it checks the new icon state: when that state would differ from the preview, or would remove an icon that no operation names, it writes nothing and returns an error that starts with `Not written:`.
+Every `unjiggle json` command asks no question and writes exactly one JSON document to stdout. All other text goes to stderr. On failure, the document is `{"error": "..."}`, the message also goes to stderr, and the exit code is 1.
+
+`unjiggle json apply` reads `{"operations": [...]}` from stdin and applies all operations together, as the preview of `json suggest` shows them. Before it writes, it checks the new icon state: when that state would differ from the preview, or would remove an icon that no operation names, it writes nothing and returns an error that starts with `Not written:`. Then it makes a verified backup, writes, and reads the layout back to compare it with the preview. It does not do the round trip of `unjiggle suggest` (a write of the unchanged layout before the real write). To test the write path, use `unjiggle safety-test`. In the output, `backup` is the path of the backup of the layout before the command, also when nothing changed (`"changed": false`). `unjiggle json restore <backup>` undoes the change. When the write or the read-back check fails, the error also has `backup`.
+
+`unjiggle json restore` passes when the phone reads back as the backup. It accepts values of the icon state that SpringBoard changes on a write, when the dock, the pages, the folders and the widgets are the same.
 
 ## Requirements
 

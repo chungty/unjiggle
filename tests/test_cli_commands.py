@@ -202,7 +202,7 @@ def test_json_apply_applies_operations_and_reports_backup(monkeypatch, clean_lay
 
     monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
     monkeypatch.setattr(device, "read_layout", lambda lockdown: next(reads))
-    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, backup_path))
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: backup_path)
     monkeypatch.setattr(layout_engine, "check_write", lambda layout, ops: ({"iconLists": [["done"]]}, predicted_layout, None))
     monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: written_raw.append(raw))
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (predicted_layout, ops))
@@ -228,16 +228,13 @@ def test_json_apply_skips_noop_batches(monkeypatch, clean_layout):
     import unjiggle.safety as safety
 
     writes: list[dict] = []
+    backup_path = Path("/tmp/layout-backup.json")
 
     monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
     monkeypatch.setattr(device, "read_layout", lambda lockdown: clean_layout)
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (layout, []))
     monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: writes.append(raw))
-    monkeypatch.setattr(
-        safety,
-        "pre_write_safety_check",
-        lambda lockdown, layout: (_ for _ in ()).throw(AssertionError("safety should not run for no-ops")),
-    )
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: backup_path)
 
     result = CliRunner().invoke(
         json_group,
@@ -249,7 +246,8 @@ def test_json_apply_skips_noop_batches(monkeypatch, clean_layout):
     payload = json.loads(result.output)
     assert payload["requested"] == 1
     assert payload["applied"] == 0
-    assert payload["backup"] is None
+    # A backup of the unchanged layout, so "backup" is always a path that a client can restore.
+    assert payload["backup"] == str(backup_path)
     assert payload["changed"] is False
     assert payload["layout_signature"] == payload["snapshot_id"]
     assert writes == []
@@ -273,7 +271,7 @@ def test_json_apply_accepts_compact_to_single_page(monkeypatch, clean_layout):
     monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
     monkeypatch.setattr(device, "read_layout", lambda lockdown: next(reads))
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (predicted_layout, ops))
-    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, backup_path))
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: backup_path)
     monkeypatch.setattr(layout_engine, "check_write", lambda layout, ops: ({"iconLists": [["done"]]}, predicted_layout, None))
     monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: written_raw.append(raw))
 
@@ -311,8 +309,8 @@ def test_json_apply_writes_nothing_when_the_check_finds_a_problem(monkeypatch, c
     monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: writes.append(raw))
     monkeypatch.setattr(
         safety,
-        "pre_write_safety_check",
-        lambda lockdown, layout: (_ for _ in ()).throw(AssertionError("no backup before a refused write")),
+        "verified_backup",
+        lambda lockdown, layout, out=None: (_ for _ in ()).throw(AssertionError("no backup before a refused write")),
     )
 
     result = CliRunner().invoke(
@@ -348,7 +346,7 @@ def test_json_apply_predicts_all_operations_together(monkeypatch):
     monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
     monkeypatch.setattr(device, "read_layout", lambda lockdown: device.parse_layout_state(state["raw"]))
     monkeypatch.setattr(device, "write_layout", write_layout)
-    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, Path("/tmp/backup.json")))
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: Path("/tmp/backup.json"))
 
     operations = [
         {"action": "delete", "bundle_ids": ["com.a"]},
@@ -444,7 +442,7 @@ def test_preset_preload_lifecycle_invalidates_after_apply_and_restore(monkeypatc
     )
     monkeypatch.setattr(device, "read_layout", lambda lockdown: current_layout["value"])
     monkeypatch.setattr(itunes, "enrich_layout", lambda layout: sample_metadata)
-    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, backup_file))
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: backup_file)
     monkeypatch.setattr(layout_engine, "check_write", lambda layout, ops: (applied_layout.raw, applied_layout, None))
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (applied_layout, ops))
     monkeypatch.setattr(
@@ -553,7 +551,7 @@ def test_delete_is_previewed_applied_and_verified(monkeypatch, sample_metadata, 
     monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
     monkeypatch.setattr(device, "read_layout", lambda lockdown: device.parse_layout_state(state["raw"]))
     monkeypatch.setattr(device, "write_layout", write_layout)
-    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, Path("/tmp/backup.json")))
+    monkeypatch.setattr(safety, "verified_backup", lambda lockdown, layout, out=None: Path("/tmp/backup.json"))
 
     result = CliRunner().invoke(
         json_group,
