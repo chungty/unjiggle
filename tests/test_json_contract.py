@@ -26,6 +26,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import click
@@ -134,7 +135,7 @@ PRESETS_RESPONSE = {
 
 LAYOUT_MUTATION_RESULT = {"page_count": int, "total_apps": int}
 APPLIED_TRANSFORM = {"applied": int, "backup": str, "result": LAYOUT_MUTATION_RESULT}
-RESTORED_LAYOUT = {"restored": bool, "backup": str, "result": LAYOUT_MUTATION_RESULT}
+RESTORED_LAYOUT = {"restored": bool, "backup": str, "result": LAYOUT_MUTATION_RESULT, "undo_backup": Opt(str)}
 RENDERED_CARD = {"success": bool, "action": str, "card": str, "html_path": str, "path": Opt(str)}
 DEVICE_STATUS = {"connected": bool, "device_name": Opt(str), "model": Opt(str), "ios_version": Opt(str)}
 
@@ -660,15 +661,97 @@ def _changed_phone(phone) -> tuple[list, Path]:
     return json.loads(backup.read_text()), backup
 
 
+def _as_backup(state) -> list:
+    """The state as a backup file holds it: dates as text."""
+    return json.loads(json.dumps(state, default=str))
+
+
+def _icon_dates(state) -> list:
+    dates = []
+    for page in state:
+        for entry in page:
+            if isinstance(entry, dict):
+                if "iconModDate" in entry:
+                    dates.append(entry["iconModDate"])
+                for folder_page in entry.get("iconLists") or []:
+                    dates.extend(f["iconModDate"] for f in folder_page if isinstance(f, dict) and "iconModDate" in f)
+    return dates
+
+
 def test_restore(phone):
     expected, backup = _changed_phone(phone)
+    changed = copy.deepcopy(phone.raw)
 
     payload = ok(run("restore", str(backup)), RESTORED_LAYOUT)
 
     assert payload["restored"] is True
     assert payload["backup"] == str(backup)
-    assert phone.writes == [expected]
-    assert phone.raw == expected
+    assert len(phone.writes) == 1
+    assert _as_backup(phone.writes[0]) == expected
+    assert _as_backup(phone.raw) == expected
+    # Before the write, a verified backup of the layout on the phone then, for undo.
+    undo_backup = Path(payload["undo_backup"])
+    assert phone.backups() == [undo_backup]
+    assert json.loads(undo_backup.read_text()) == _as_backup(changed)
+
+
+def test_restore_writes_the_dates_of_the_backup_as_dates(phone):
+    _expected, backup = _changed_phone(phone)
+
+    ok(run("restore", str(backup)), RESTORED_LAYOUT)
+
+    dates = _icon_dates(phone.writes[0])
+    assert dates, "the phone has icon dates"
+    # The phone gave a date (a plist <date>), and a restore must send a date too, not
+    # the text of the JSON file.
+    assert all(isinstance(date, datetime) for date in dates)
+    assert str(dates[0]) == "2026-01-01 00:00:00"
+
+
+def test_undo_of_an_apply_in_the_same_second_keeps_both_backups(phone, monkeypatch):
+    class OneSecond(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 9, 25, 15, 40, 39)
+
+    monkeypatch.setattr(safety, "datetime", OneSecond)
+    preview = _focus_preview()
+    applied = ok(run("apply", stdin=app_payload(preview["operations"], preview["snapshot_id"])), APPLIED_TRANSFORM)
+
+    undone = ok(run("restore", applied["backup"]), RESTORED_LAYOUT)
+
+    assert undone["undo_backup"] != applied["backup"]
+    assert len(phone.backups()) == 2
+    # The backup of the apply still holds the layout from before the apply.
+    assert _as_backup(phone.raw) == json.loads(Path(applied["backup"]).read_text())
+
+
+@pytest.mark.parametrize("content", ["[]", "{}", "[[]]", "[[], []]", '{"iconLists": []}'])
+def test_restore_refuses_a_backup_with_no_apps(phone, content):
+    before = copy.deepcopy(phone.raw)
+    backup = phone.home / "layout-empty.json"
+    backup.write_text(content)
+
+    payload = failed(run("restore", str(backup)))
+
+    assert payload["error"] == f"Not restored: the backup {backup} has no apps on the home screen. No changes made."
+    assert phone.writes == []
+    assert phone.backups() == []
+    assert phone.raw == before
+
+
+def test_restore_with_a_failed_backup_writes_nothing(phone, monkeypatch):
+    _expected, backup = _changed_phone(phone)
+
+    def broken_backup(*_args, **_kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(safety, "verified_backup", broken_backup)
+
+    payload = failed(run("restore", str(backup)))
+
+    assert payload["error"] == "Backup failed: disk full. No changes made."
+    assert phone.writes == []
 
 
 def test_restore_accepts_values_that_springboard_changes(phone):
@@ -697,6 +780,8 @@ def test_restore_fails_when_the_layout_differs(phone):
     payload = failed(run("restore", str(backup)))
 
     assert payload["error"].startswith("Restore verification failed")
+    assert payload["undo_backup"] == str(phone.backups()[0])
+    assert payload["error"].endswith(f"To undo, restore {payload['undo_backup']}.")
 
 
 def test_restore_with_a_write_error(phone):
@@ -706,6 +791,7 @@ def test_restore_with_a_write_error(phone):
     payload = failed(run("restore", str(backup)))
 
     assert "USB connection lost" in payload["error"]
+    assert payload["undo_backup"] == str(phone.backups()[0])
 
 
 def test_restore_with_a_missing_file(phone):

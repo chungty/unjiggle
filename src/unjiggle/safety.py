@@ -32,6 +32,11 @@ def verified_backup(lockdown, layout: HomeScreenLayout, out: Console | None = No
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = BACKUP_DIR / f"layout-{timestamp}.json"
+    # Two backups in the same second (an apply and then its undo) get two files.
+    number = 2
+    while path.exists():
+        path = BACKUP_DIR / f"layout-{timestamp}-{number}.json"
+        number += 1
     path.parent.mkdir(parents=True, exist_ok=True)
 
     # Save (default=str handles datetime objects from pymobiledevice3)
@@ -89,15 +94,34 @@ def test_restore_roundtrip(lockdown) -> bool:
 def restore_from_backup(lockdown, backup_path: Path) -> bool:
     """Restore a layout from a backup file.
 
-    Returns True if the restore succeeds and is verified.
+    Returns True if the restore succeeds and is verified. As `unjiggle json restore`
+    does, it refuses a backup with no app on the home screen, makes a verified backup
+    of the layout on the phone before the write, and writes the dates of the backup as
+    dates (device.restore_layout_from_file).
     """
-    from unjiggle.device import read_layout, write_layout
+    from unjiggle.device import parse_layout_state, read_layout, restore_layout_from_file, write_layout
 
     if not backup_path.exists():
         console.print(f"  [red]Backup file not found: {backup_path}[/red]")
         return False
 
-    state = json.loads(backup_path.read_text())
+    try:
+        state = restore_layout_from_file(backup_path)
+        expected = parse_layout_state(state)
+    except Exception as e:
+        console.print(f"  [red]Cannot read the backup: {e}[/red]")
+        return False
+    if expected.page_count == 0 or expected.total_apps == 0:
+        console.print("  [red]The backup has no apps on the home screen. Nothing was restored.[/red]")
+        return False
+
+    console.print("  [dim]Backing up the current layout first...[/dim]")
+    try:
+        undo_path = verified_backup(lockdown, read_layout(lockdown))
+    except Exception as e:
+        console.print(f"  [red]Backup failed: {e}. Nothing was restored.[/red]")
+        return False
+    console.print(f"  To undo this restore: [bold]unjiggle restore {undo_path}[/bold]")
 
     console.print("  [dim]Restoring layout from backup...[/dim]")
     write_layout(lockdown, state)
@@ -116,11 +140,19 @@ def restore_from_backup(lockdown, backup_path: Path) -> bool:
         return True  # Still likely fine
 
 
+def _backup_order(path: Path) -> tuple:
+    """layout-<date>-<time>.json, then layout-<date>-<time>-2.json and so on: the
+    backups of one second in the order that verified_backup() made them."""
+    parts = path.stem.split("-")
+    number = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 1
+    return parts[1:3], number
+
+
 def list_backups() -> list[Path]:
     """List all available backups, newest first."""
     if not BACKUP_DIR.exists():
         return []
-    return sorted(BACKUP_DIR.glob("layout-*.json"), reverse=True)
+    return sorted(BACKUP_DIR.glob("layout-*.json"), key=_backup_order, reverse=True)
 
 
 def pre_write_safety_check(lockdown, layout: HomeScreenLayout) -> tuple[bool, Path | None]:

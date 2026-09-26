@@ -2126,9 +2126,21 @@ def json_presets():
 def json_restore(backup_file: str):
     """Restore a previously backed up layout and verify it. Asks no question.
 
-    The check passes when the phone reads back as the backup: the same icon state, or
-    the same layout (the dock, the pages, the folders and the widgets, as the post-write
-    check of `json apply` compares them) with values that SpringBoard changes on a write.
+    The steps, in this order:
+    1. Read the backup. The dates in it become dates again
+       (device.restore_layout_from_file). A backup with no app on the home screen (an
+       empty or damaged file, or a file that is not a backup) is refused, because it
+       would take every icon off the home screen.
+    2. A verified backup of the layout on the phone now (safety.verified_backup). A
+       wrong restore can be undone with it: the output and the errors after the write
+       have its path as "undo_backup". If the backup fails, nothing is written.
+    3. The write, and the read-back check. The check passes when the phone reads back
+       as the backup: the same icon state, or the same layout (the dock, the pages, the
+       folders and the widgets, as the post-write check of `json apply` compares them)
+       with values that SpringBoard changes on a write.
+
+    A backup file does not record the device, so this command cannot refuse a backup
+    of a different iPhone.
     """
     from unjiggle.device import (
         connect,
@@ -2151,18 +2163,26 @@ def json_restore(backup_file: str):
         expected = parse_layout_state(raw_state)
     except Exception as e:
         _json_err(f"Failed to read backup: {e}")
+    if expected.page_count == 0 or expected.total_apps == 0:
+        _json_err(f"Not restored: the backup {backup_file} has no apps on the home screen. No changes made.")
+
+    undo_backup = _json_verified_backup(lockdown, read_layout(lockdown))
+    undo = f"To undo, restore {undo_backup}."
 
     try:
         write_layout(lockdown, raw_state)
         verify = read_layout(lockdown)
     except Exception as e:
-        _json_err(f"Restore failed: {e}")
+        _json_err(f"Restore failed: {e}. {undo}", undo_backup=str(undo_backup))
 
     expected_json = _json.dumps(raw_state, default=str, sort_keys=True)
     restored_json = _json.dumps(verify.raw, default=str, sort_keys=True)
     if expected_json != restored_json:
         if _layout_signature(verify) != _layout_signature(expected):
-            _json_err("Restore verification failed: the layout on the iPhone does not match the backup.")
+            _json_err(
+                f"Restore verification failed: the layout on the iPhone does not match the backup. {undo}",
+                undo_backup=str(undo_backup),
+            )
         _err_console.print(
             "  The layout matches the backup. Some values of the icon state differ,"
             " because SpringBoard changes them on a write."
@@ -2171,6 +2191,7 @@ def json_restore(backup_file: str):
     _json_out({
         "restored": True,
         "backup": str(Path(backup_file)),
+        "undo_backup": str(undo_backup),
         **_snapshot_metadata(verify),
         "result": {
             "page_count": verify.page_count,

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 
 from unjiggle.models import (
@@ -268,9 +269,41 @@ def backup_layout(layout: HomeScreenLayout, path: Path) -> None:
     path.write_text(json.dumps(layout.raw, indent=2, default=str))
 
 
-def restore_layout_from_file(path: Path) -> dict:
-    """Load a raw layout state from a JSON backup file."""
-    return json.loads(path.read_text())
+def restore_layout_from_file(path: Path):
+    """Load a raw layout state from a JSON backup file.
+
+    A backup is the icon state as json.dumps(default=str) writes it
+    (safety.verified_backup), so each date that the phone gave (the iconModDate of an
+    app) is text in the file, such as "2026-09-23 19:06:58.692950". Each such text
+    becomes a datetime again (see dates_from_backup), so that a restore writes the same
+    types that the phone gave, as a write of `json apply` does.
+    """
+    return dates_from_backup(json.loads(path.read_text()))
+
+
+# The keys of the icon state that hold a date. JSON has no date type, so a backup
+# holds each one as text.
+_DATE_KEYS = frozenset({"iconModDate"})
+
+
+def dates_from_backup(value):
+    """A copy of a raw state from a backup file, with each iconModDate text that is an
+    ISO date changed back to a datetime. Other values stay as they are."""
+    if isinstance(value, list):
+        return [dates_from_backup(item) for item in value]
+    if isinstance(value, dict):
+        restored = {}
+        for key, item in value.items():
+            if key in _DATE_KEYS and isinstance(item, str):
+                try:
+                    item = datetime.fromisoformat(item)
+                except ValueError:
+                    pass
+            else:
+                item = dates_from_backup(item)
+            restored[key] = item
+        return restored
+    return value
 
 
 # Keep old name as alias for tests
