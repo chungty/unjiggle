@@ -131,10 +131,35 @@ def is_app_store_entry(raw_item) -> bool:
     return entry_app_id(raw_item) is not None and not is_pinned_entry(raw_item)
 
 
+# Keys of a widget, a Smart Stack or a folder. The entry of an app icon has none of them.
+_NOT_APP_KEYS = ("elementType", "elements", "listType", "containerBundleIdentifier", "widgetIdentifier", "gridSize")
+
+
+def is_plain_app_entry(raw_item) -> bool:
+    """True for an entry that is only the icon of an App Store app, as SpringBoard adds
+    an app from the App Library: a bundle ID (the legacy format), or a dict with a
+    bundleIdentifier, an iconType that is absent or "app", a displayIdentifier that is
+    absent or the bundleIdentifier, no folder pages and no key of a widget or a folder.
+
+    A widget, a folder, a pinned icon, a second icon of an app (its displayIdentifier
+    is a UUID) and an entry of another type (for example iconType "custom") are not.
+    """
+    if isinstance(raw_item, str):
+        return bool(raw_item)
+    if not is_app_store_entry(raw_item):
+        return False
+    return (
+        raw_item.get("iconType") in (None, "app")
+        and raw_item.get("displayIdentifier") in (None, raw_item["bundleIdentifier"])
+        and not raw_item.get("iconLists")
+        and not any(key in raw_item for key in _NOT_APP_KEYS)
+    )
+
+
 def _parse_item(raw_item) -> LayoutItem | None:
     """Parse a single item from the iOS 26 icon state format."""
     if isinstance(raw_item, str):
-        return LayoutItem(app=AppItem(bundle_id=raw_item))
+        return LayoutItem(app=AppItem(bundle_id=raw_item, plain_entry=bool(raw_item)))
 
     if not isinstance(raw_item, dict):
         return None
@@ -158,7 +183,12 @@ def _parse_item(raw_item) -> LayoutItem | None:
                 app_id = entry_app_id(entry)
                 if app_id:
                     name = entry.get("displayName") if isinstance(entry, dict) else None
-                    apps.append(AppItem(bundle_id=app_id, display_name=name, pinned=is_pinned_entry(entry)))
+                    apps.append(AppItem(
+                        bundle_id=app_id,
+                        display_name=name,
+                        pinned=is_pinned_entry(entry),
+                        plain_entry=is_plain_app_entry(entry),
+                    ))
             folder_pages.append(apps)
         return LayoutItem(folder=FolderItem(
             display_name=raw_item.get("displayName", "Unnamed Folder"),
@@ -174,6 +204,7 @@ def _parse_item(raw_item) -> LayoutItem | None:
             bundle_id=app_id,
             display_name=raw_item.get("displayName"),
             pinned=is_pinned_entry(raw_item),
+            plain_entry=is_plain_app_entry(raw_item),
         ))
 
     return None

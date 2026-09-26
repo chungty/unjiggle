@@ -10,6 +10,9 @@ Environment:
 - FAKE_PHONE_METADATA: JSON file with the App Store metadata (optional).
 - FAKE_PHONE_WRITES: file that gets one line for each write to the phone.
 - FAKE_PHONE_BACKUPS: directory for the backups.
+- FAKE_PHONE_IOS_ADDS: a raw app entry in JSON (optional). At each write that does not
+  have that app on the home screen, the phone puts it in the first free slot, as
+  SpringBoard did on the owner's iPhone (see tests/fake_springboard.py).
 """
 
 from __future__ import annotations
@@ -18,6 +21,7 @@ import json
 import os
 from pathlib import Path
 
+from tests.fake_springboard import adds_unlisted_app
 from unjiggle import cli, device, itunes, safety, screentime
 from unjiggle.models import DeviceInfo
 
@@ -25,6 +29,7 @@ STATE = Path(os.environ["FAKE_PHONE_STATE"])
 WRITES = Path(os.environ["FAKE_PHONE_WRITES"])
 METADATA_PATH = os.environ.get("FAKE_PHONE_METADATA")
 METADATA = json.loads(Path(METADATA_PATH).read_text()) if METADATA_PATH else {}
+IOS_ADDS = json.loads(os.environ["FAKE_PHONE_IOS_ADDS"]) if os.environ.get("FAKE_PHONE_IOS_ADDS") else None
 
 
 def _connect():
@@ -39,6 +44,8 @@ def _read_layout(_lockdown):
 
 def _write_layout(_lockdown, state):
     print("fake springboard: set_icon_state")
+    if IOS_ADDS:
+        state = adds_unlisted_app(state, IOS_ADDS)
     STATE.write_text(json.dumps(state, default=str))
     with WRITES.open("a") as log:
         log.write("write\n")

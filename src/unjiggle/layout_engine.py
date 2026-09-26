@@ -423,6 +423,117 @@ def added_apps(before, after) -> list[str]:
     return list(dict.fromkeys(app_id for app_id in app_ids(after) if app_id not in known))
 
 
+def ios_added_apps(
+    read_back: HomeScreenLayout,
+    expected: HomeScreenLayout,
+    before: HomeScreenLayout | None = None,
+    *,
+    apps_of_before: bool = True,
+) -> list[dict] | None:
+    """The apps that iOS added to the home screen at a write, when they are the only
+    difference between the layout that the phone reads back and the expected layout.
+    None when the two layouts are different in another way: then the read-back check
+    fails.
+
+    On iOS 26, SpringBoard can add an installed app that is only in the App Library to
+    the home screen when it gets a new icon state. It puts the app in the first free
+    slot. The write is correct, but the phone reads back one more app. An entry of
+    ``read_back`` is such an app only when all of these are true:
+
+    - It is only the icon of an App Store app (AppItem.plain_entry, see
+      device.is_plain_app_entry). A widget, a folder, a pinned icon, a second icon of
+      an app and an entry of another type (for example iconType "custom") are not.
+    - It is loose on a page. An app in the dock or in a folder is not.
+    - Its app is not on the home screen of ``expected``: not in the dock, not on a page
+      and not in a folder. With ``apps_of_before`` (the default), its app is also not
+      on the home screen of ``before``. So an app that an operation took off the home
+      screen, and a second icon of an app, are not such apps.
+    - It is the only icon of its app in ``read_back``.
+
+    When these entries are removed from ``read_back`` (and a page that then has no
+    entry), the rest must be the layout of ``expected``, as the post-write check
+    compares layouts (see _signature): the same dock, pages, folders and widgets, in the
+    same order. Only the added entries can move the entries after them on their page.
+    In a legacy state, the App Library list (``ignored``) is compared without the added
+    apps, because iOS takes an app out of that list when it adds the app.
+
+    ``before`` is the layout on the phone just before the write, when the caller has
+    it. When ``read_back`` has the layout of ``before`` and not the layout of
+    ``expected``, the write had no effect, and the result is None. For example, the
+    owner put an app on the home screen after a backup, and SpringBoard ignored the
+    write of that backup: the extra app is not an app that iOS added. `json restore`
+    gives ``apps_of_before=False``: it compares the apps with the backup only, because
+    iOS can have added the same app at the apply that the restore undoes.
+
+    Returns [{"bundle_id", "name", "page"}], with the page number in ``read_back`` from
+    1. An empty list when ``read_back`` has the layout of ``expected``.
+    """
+    read_back_signature = _signature(read_back)
+    if (
+        before is not None
+        and read_back_signature == _signature(before)
+        and read_back_signature != _signature(expected)
+    ):
+        return None
+    on_home_screen = set(expected.all_bundle_ids)
+    if before is not None and apps_of_before:
+        on_home_screen |= set(before.all_bundle_ids)
+    icons = Counter(read_back.all_bundle_ids)
+
+    added = []
+    pages = []
+    for number, page in enumerate(read_back.pages, start=1):
+        rest = []
+        for item in page:
+            app = item.app
+            if (
+                app is not None
+                and app.plain_entry
+                and not app.pinned
+                and app.bundle_id not in on_home_screen
+                and icons[app.bundle_id] == 1
+            ):
+                added.append({
+                    "bundle_id": app.bundle_id,
+                    "name": app.display_name or app.bundle_id.split(".")[-1],
+                    "page": number,
+                })
+            else:
+                rest.append(item)
+        if rest:
+            pages.append(rest)
+
+    added_ids = {app["bundle_id"] for app in added}
+    remaining = HomeScreenLayout(
+        dock=read_back.dock,
+        pages=pages,
+        ignored=[bundle_id for bundle_id in read_back.ignored if bundle_id not in added_ids],
+    )
+    wanted = HomeScreenLayout(
+        dock=expected.dock,
+        pages=expected.pages,
+        ignored=[bundle_id for bundle_id in expected.ignored if bundle_id not in added_ids],
+    )
+    if _signature(remaining) != _signature(wanted):
+        return None
+    return added
+
+
+def describe_ios_added(added: list[dict], reference: str) -> str:
+    """A short message about the apps of ios_added_apps(). ``reference`` is what the
+    layout was compared with, such as "preview" or "backup"."""
+    shown = ", ".join(f"{app['name']} (page {app['page']})" for app in added)
+    if len(added) == 1:
+        return (
+            f"iOS added an app that the {reference} does not have: {shown}."
+            f" Unjiggle did not move or remove it. All other icons agree with the {reference}."
+        )
+    return (
+        f"iOS added {len(added)} apps that the {reference} does not have: {shown}."
+        f" Unjiggle did not move or remove them. All other icons agree with the {reference}."
+    )
+
+
 def compact_to_single_page(
     layout: HomeScreenLayout,
     keep_visible_bundle_ids: list[str],
