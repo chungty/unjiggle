@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json as _json
 import sys
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -1398,10 +1399,16 @@ def _get_app_name(bundle_id: str, metadata: dict) -> str:
 
 
 def _collect_all_apps_with_positions(layout, metadata: dict) -> list[dict]:
-    """Build a list of all non-dock apps with their current page, category, name."""
+    """Build a list of all non-dock apps with their current page, category, name.
+
+    Pinned icons (models.AppItem.pinned) are left out: no preset moves or removes
+    them, and a rebuild keeps them (see analyzer.rebuilt_pages).
+    """
     apps = []
     for page_idx, page in enumerate(layout.pages):
         for item in page:
+            if item.is_app and item.app.pinned:
+                continue
             if item.is_app:
                 bid = item.app.bundle_id
                 apps.append({
@@ -1413,6 +1420,8 @@ def _collect_all_apps_with_positions(layout, metadata: dict) -> list[dict]:
             elif item.is_folder:
                 for fpage in item.folder.pages:
                     for app in fpage:
+                        if app.pinned:
+                            continue
                         bid = app.bundle_id
                         apps.append({
                             "bundle_id": bid,
@@ -1749,11 +1758,17 @@ def _prepare_write(layout, operations: list) -> tuple[object, object, str | None
 def _build_minimal_one_page_plan(layout, metadata: dict) -> tuple[list[str], list[str]]:
     """Return (keep_visible_bundle_ids, archive_bundle_ids) for the minimal preset.
 
-    Keeps the most important apps visible on a single physical page.
-    Everything else gets archived so previews and writes stay truthful.
+    Keeps the most important apps visible on a single physical page, in the slots
+    that page 1's widgets and pinned icons leave free: a rebuild keeps those on page
+    1 (analyzer.rebuilt_pages). Everything else gets archived so previews and writes
+    stay truthful. Pinned icons cannot go to the App Library, so they stay.
     """
+    from unjiggle.analyzer import first_live_index, item_slots, rebuild_room, stays_in_rebuild
+
     all_apps = _collect_all_apps_with_positions(layout, metadata)
-    max_visible = 24
+    index = first_live_index(layout.pages, item_slots)
+    first = [(item, item_slots(item) > 0) for item in layout.pages[index]] if index is not None else []
+    max_visible = max(rebuild_room(first, stays_in_rebuild, item_slots), 0)
 
     dock_bids = set()
     for item in layout.dock:
@@ -1763,24 +1778,14 @@ def _build_minimal_one_page_plan(layout, metadata: dict) -> tuple[list[str], lis
     priority_apps = [a for a in all_apps if a["category"] in _MINIMAL_KEEP_CATS]
     keep_visible = []
     seen = set()
-    for app in priority_apps:
+    for app in priority_apps + all_apps:
         bid = app["bundle_id"]
+        if len(keep_visible) >= max_visible:
+            break
         if bid in seen or bid in dock_bids:
             continue
         keep_visible.append(bid)
         seen.add(bid)
-        if len(keep_visible) >= max_visible:
-            break
-
-    if len(keep_visible) < max_visible:
-        for app in all_apps:
-            bid = app["bundle_id"]
-            if bid in seen or bid in dock_bids:
-                continue
-            keep_visible.append(bid)
-            seen.add(bid)
-            if len(keep_visible) >= max_visible:
-                break
 
     archive_bids = []
     archived_seen = set()
@@ -1795,11 +1800,16 @@ def _build_minimal_one_page_plan(layout, metadata: dict) -> tuple[list[str], lis
 
 
 def _build_weighted_page_operations(layout, metadata: dict, front_cats: set[str], later_cats: set[str]) -> list:
+    """move_to_page steps by category. An app that is on the home screen more than
+    once does not move: a move takes every copy of an app and places one."""
     from unjiggle.analyzer import LayoutOperation
 
     all_apps = _collect_all_apps_with_positions(layout, metadata)
+    copies = Counter(layout.all_bundle_ids)
     operations = []
     for app in all_apps:
+        if copies[app["bundle_id"]] > 1:
+            continue
         cat = app["category"]
         if cat in front_cats and app["from_page"] != 1:
             operations.append(LayoutOperation(
