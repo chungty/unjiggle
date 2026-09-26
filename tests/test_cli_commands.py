@@ -81,12 +81,16 @@ def test_beautiful_preset_sorts_known_categories_by_visual_order(chaotic_layout,
     score = compute_score(chaotic_layout, sample_metadata)
     payload = _generate_preset_transform("beautiful", chaotic_layout, sample_metadata, score)
     order = {category: index for index, category in enumerate(_CATEGORY_COLOR_ORDER)}
+    # Phone is in the dock and on page 1: it is fixed, so it stays in both places.
+    fixed = chaotic_layout.fixed_ids()
+    assert "com.apple.mobilephone" in fixed
+    assert payload["proposed_layout"]["dock"] == payload["current_layout"]["dock"]
 
     seen_categories = []
     for page in payload["proposed_layout"]["pages"]:
         assert len(page) <= 24
         for item in page:
-            if item["type"] != "app":
+            if item["type"] != "app" or item["app"]["bundle_id"] in fixed:
                 continue
             category = item["app"]["category"]
             if category != "Other":

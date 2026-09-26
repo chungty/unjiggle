@@ -525,12 +525,14 @@ def test_stay_mode_page_one_makes_room_on_later_pages():
     after = preview_operations(layout, ops)
     first = [i.app.bundle_id for i in after.pages[0] if i.is_app]
     placed = [b for b in wanted if b in first]
-    # Page 1 fills up to 24 slots: 4 small widgets use 16, and 8 apps fit. What does
-    # not fit is reported.
+    # Page 1 fills up to 24 slots: 4 small widgets use 16, and its 2 apps use 2. They
+    # are also on a later page, so they are fixed and stay. 6 apps fit. What does not
+    # fit is reported.
+    assert set(page_one_now) <= layout.fixed_ids()
     assert stylist.page_slots(after.pages[0]) == 24
-    assert len(placed) == 8
-    assert len(report.page_one_overflow) == 14
-    assert not set(page_one_now) & set(first)  # the apps that were there moved on
+    assert len(placed) == 6
+    assert len(report.page_one_overflow) == 16
+    assert set(page_one_now) <= set(first)
 
 
 def test_stay_mode_page_one_on_a_full_single_page_phone_changes_nothing_it_cannot_do():
@@ -1096,7 +1098,7 @@ def test_json_apply_writes_and_verifies_a_full_restyle(monkeypatch, sample_metad
     assert result.exit_code == 0, result.output
     assert json.loads(result.output)["changed"] is True
     written = writes[0]
-    folder_items = [item for page in written[1:] for item in page if item.get("iconType") == "folder"]
+    folder_items = [item for page in written[1:] for item in page if item.get("listType") == "folder"]
     members = [app for folder in folder_items for app in folder["iconLists"][0]]
     assert members and all(app["displayName"] == _label(app["bundleIdentifier"]) for app in members)
 
@@ -1219,4 +1221,58 @@ def test_hiding_a_folder_with_fixed_icons_warns_that_they_stay():
 def test_the_expansion_check_rejects_a_step_that_names_a_pinned_icon():
     layout, _metadata = _pinned_phone()
     op = stylist.LayoutOperation("move_to_page", ["com.web.clip"], target_page=1)
-    assert stylist.expansion_problem(layout, [op]) == "names an icon that is not an App Store app"
+    assert stylist.expansion_problem(layout, [op]) == "names a fixed icon"
+
+
+# --- apps with more than one icon -----------------------------------------------------------
+
+
+def _two_icon_phone():
+    """_pinned_phone() with a second icon (a UUID displayIdentifier) of com.pin.app02 on
+    page 1, next to the widget. Its first icon is in the Arcade folder."""
+    layout, metadata = _pinned_phone()
+    raw = [list(page) for page in layout.raw]
+    second = {"bundleIdentifier": "com.pin.app02", "displayIdentifier": "UUID-02", "iconType": "app", "iconLists": []}
+    raw[1] = raw[1][:2] + [second] + raw[1][2:]
+    return device.parse_layout_state(raw), metadata
+
+
+def test_an_app_with_two_icons_is_fixed_and_gets_no_handle():
+    layout, metadata = _two_icon_phone()
+    handles = stylist.build_handles(layout)
+    assert "com.pin.app02" not in handles.by_bundle_id
+    # It uses up a number (a2, at its first icon), as the pinned icons do (a1, a5).
+    assert handles.by_bundle_id["com.pin.app00"] == "a3"
+    assert handles.by_bundle_id["com.pin.app03"] == "a6"
+    assert handles.lookup("a2") is None
+    context = stylist.build_plan_context(layout, metadata, handles)
+    assert "PAGE 1 NOW: widgets use 8 of 24 slots (1 medium), 2 fixed icons, a3 " in context
+    assert "\nPAGE 1 ROOM FOR APPS: 14 of 24 slots\n" in context
+    assert '"Arcade" p2 (1, 2 fixed)' in context
+    assert "\nFIXED ICONS: 3 loose, 2 in folders\n" in context
+    assert "more than one icon on the home screen is fixed too" in " ".join(stylist.INTENT_SYSTEM_PROMPT.split())
+
+
+@pytest.mark.parametrize("mode", ["stay", "folders", "app_library"])
+def test_a_plan_keeps_both_icons_of_an_app_in_their_places(mode):
+    layout, metadata = _two_icon_phone()
+    h = stylist.build_handles(layout).by_bundle_id.__getitem__
+    plan = _stay_plan(page_one=[h(f"com.pin.app{i:02d}") for i in range(8, 12)],
+                      app_library={"groups": ["Arcade"], "apps": []}, unplaced=mode)
+    ops, report = check_expansion(layout, metadata, plan)
+    assert "com.pin.app02" not in {b for op in ops for b in op.bundle_ids}
+    after = preview_operations(layout, ops)
+    assert after.pages[0][2].app.bundle_id == "com.pin.app02"
+    arcade = [i.folder for page in after.pages for i in page if i.is_folder and i.folder.display_name == "Arcade"]
+    assert "com.pin.app02" in [a.bundle_id for p in arcade[0].pages for a in p]
+    assert report.copies_kept == ["com.pin.app02"]
+    warnings = stylist.plan_warnings(report, stylist.build_handles(layout),
+                                     stylist.context_names(layout, metadata, stylist.build_handles(layout)))
+    kept = [w for w in warnings if w["kind"] == "fixed_kept" and w["bundle_ids"] == ["com.pin.app02"]]
+    assert len(kept) == 1 and "more than one icon on the home screen" in kept[0]["message"]
+
+
+def test_the_expansion_check_rejects_a_step_that_names_an_app_with_two_icons():
+    layout, _metadata = _two_icon_phone()
+    op = stylist.LayoutOperation("move_to_page", ["com.pin.app02"], target_page=1)
+    assert stylist.expansion_problem(layout, [op]) == "names a fixed icon"

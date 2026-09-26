@@ -13,10 +13,12 @@ from collections import Counter
 from typing import Any
 
 from unjiggle.analyzer import (
+    MAX_PAGES,
     PAGE_SLOTS,
     LayoutOperation,
     add_to_folder_pages,
     first_live_index,
+    folder_page_ids,
     item_slots,
     place_new_folder,
     rebuild_room,
@@ -74,18 +76,25 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
     and stays where it is. A raw page with no entry that the parser keeps has no page
     index, so target_page and folder placement skip it.
 
-    An operation does not act on a pinned icon (an entry with no bundleIdentifier,
-    device.is_pinned_entry): its ID is taken out of each operation first, as in the
-    preview. compact_to_single_page and rebuild_pages keep the widgets, the pinned
-    icons, the folders that hold them and the entries that the parser drops (see
+    An operation does not act on a fixed icon: a pinned icon (an entry with no
+    bundleIdentifier, device.is_pinned_entry) or an app with more than one icon (see
+    HomeScreenLayout.fixed_ids()). Its ID is taken out of each operation first, as in
+    the preview, and an ID that an operation names twice counts once.
+    compact_to_single_page and rebuild_pages keep the widgets, the fixed icons, the
+    folders that hold them and the entries that the parser drops (see
     analyzer.rebuilt_pages).
 
     The final cleanup removes only folders that have no entries left, in the dock
-    and on the pages, and then empty pages. check_write() compares the result with
-    the preview before anything is written.
+    and on the pages, then the empty pages of the other folders, and then empty
+    pages. check_write() compares the result with the preview before anything is
+    written.
     """
     raw = copy.deepcopy(layout.raw)
-    pinned = _raw_pinned_ids(raw)
+    fixed = _raw_fixed_ids(raw)
+
+    def stays(item: Any) -> list:
+        return _raw_stays_in_rebuild(item, fixed)
+
     # An app that an earlier operation took off the home screen (compact_to_single_page
     # or rebuild_pages) can come back in a later one (create_folder). It comes back as
     # the item it was in the original state, with all of its fields.
@@ -103,7 +112,7 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
         return [page for index, page in enumerate(_get_pages(raw)) if index not in unparsed]
 
     for op in operations:
-        ids = [b for b in op.bundle_ids if b not in pinned]
+        ids = [b for b in dict.fromkeys(op.bundle_ids) if b not in fixed]
         if op.action in ("move_to_app_library", "delete"):
             _raw_remove_apps(raw, ids)
             # For dict-format raw (legacy), track ignored apps
@@ -140,11 +149,8 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                 if extracted:
                     folder_pages: list[list] = []
                     add_to_folder_pages(folder_pages, extracted)
-                    folder_dict = {
-                        "displayName": op.folder_name,
-                        "iconLists": folder_pages,
-                        "iconType": "folder",
-                    }
+                    # The keys of a folder that the phone writes (_new_folder).
+                    folder_dict = _new_folder(op.folder_name, folder_pages)
                     pages = parsed_pages()
                     count = len(pages)
                     place_new_folder(pages, folder_dict, _raw_item_slots, anchor, op.target_page)
@@ -169,7 +175,7 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                     raw = snapshot
 
         elif op.action in ("compact_to_single_page", "rebuild_pages"):
-            # The rule of the preview: page 1 keeps its widgets and pinned icons, and
+            # The rule of the preview: page 1 keeps its widgets and fixed icons, and
             # a compact whose apps do not fit in the room that they leave is skipped.
             # Here, page 1 is the first raw page with an item that takes a slot. The
             # entries of the other raw pages, those that the parser drops included,
@@ -177,26 +183,42 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
             all_pages = _get_pages(raw)
             index = first_live_index(all_pages, _raw_item_slots)
             first = [(item, _raw_item_slots(item) > 0) for item in all_pages[index]] if index is not None else []
-            if op.action == "rebuild_pages" or len(ids) <= rebuild_room(first, _raw_stays_in_rebuild, _raw_item_slots):
+            if op.action == "rebuild_pages" or len(ids) <= rebuild_room(first, stays, _raw_item_slots):
                 extracted = _raw_extract_apps(raw, ids, originals)
                 later = [item for number, page in enumerate(all_pages) if number != index for item in page]
-                _set_pages(raw, rebuilt_pages(first, extracted, later, _raw_stays_in_rebuild, _raw_item_slots))
+                _set_pages(raw, rebuilt_pages(first, extracted, later, stays, _raw_item_slots))
                 unparsed = {
                     number for number, page in enumerate(_get_pages(raw))
                     if not any(_parse_item(item) for item in page)
                 }
 
-    # Clean up folders the operations emptied, then empty pages, as the preview does.
+    # Clean up folders the operations emptied, then the empty pages of the other
+    # folders, then empty pages, as the preview does.
     dock = _get_dock(raw)
-    dock[:] = [item for item in dock if not _raw_is_empty_folder(item)]
-    pages = [
-        [item for item in page if not _raw_is_empty_folder(item)]
-        for page in _get_pages(raw)
-    ]
+    dock[:] = _without_empty_folders(dock)
+    pages = [_without_empty_folders(page) for page in _get_pages(raw)]
     cleaned = [page for page in pages if page]
     _set_pages(raw, cleaned)
 
     return raw
+
+
+def _without_empty_folders(container: list) -> list:
+    """The container without the folders that have no entries, and with no empty
+    page in the other folders. A folder page is empty only when it holds no entry
+    at all: an entry that the parser drops keeps its page."""
+    kept = [item for item in container if not _raw_is_empty_folder(item)]
+    for item in kept:
+        if is_folder_entry(item) and isinstance(item.get("iconLists"), list):
+            item["iconLists"] = [page for page in item["iconLists"] if page]
+    return kept
+
+
+def _new_folder(name: str, pages: list[list]) -> dict:
+    """A new folder entry, with the keys that the phone gives a folder in its icon
+    state (the iOS 26 list and the older dict): displayName, iconLists and
+    listType "folder"."""
+    return {"displayName": name, "iconLists": pages, "listType": "folder"}
 
 
 def check_write(layout: HomeScreenLayout, operations: list[LayoutOperation]):
@@ -209,8 +231,12 @@ def check_write(layout: HomeScreenLayout, operations: list[LayoutOperation]):
 
     - The raw state does not read back as the preview.
     - The raw state lost an entry (an app, a widget or another icon) that no
-      operation took off the home screen, or any widget or icon that is not an App
-      Store app. See lost_entries().
+      operation took off the home screen, any widget or icon that is not an App
+      Store app, any icon of an app with more than one icon, or a dock entry that no
+      operation names. See lost_entries().
+    - The raw state holds an entry more often than before (see doubled_entries()).
+    - The raw state has more pages than an iPhone shows (analyzer.MAX_PAGES), and
+      more than it had before.
     """
     from unjiggle.analyzer import preview_operations
     from unjiggle.device import parse_layout_state
@@ -221,9 +247,18 @@ def check_write(layout: HomeScreenLayout, operations: list[LayoutOperation]):
         return raw, preview, "the written layout would differ from the preview"
     lost = lost_entries(layout.raw, raw, operations)
     if lost:
-        shown = ", ".join(lost[:4]) + (f" and {len(lost) - 4} more" if len(lost) > 4 else "")
-        return raw, preview, f"the write would remove {shown}, which no operation names"
+        return raw, preview, f"the write would remove {_listed(lost)}, which no operation names"
+    doubled = doubled_entries(layout.raw, raw)
+    if doubled:
+        return raw, preview, f"the write would put {_listed(doubled)} on the home screen more than once"
+    pages = len(_get_pages(raw))
+    if pages > max(MAX_PAGES, len(_get_pages(layout.raw))):
+        return raw, preview, f"the written layout would have {pages} pages, and an iPhone shows at most {MAX_PAGES}"
     return raw, preview, None
+
+
+def _listed(labels: list[str]) -> str:
+    return ", ".join(labels[:4]) + (f" and {len(labels) - 4} more" if len(labels) > 4 else "")
 
 
 def _signature(layout: HomeScreenLayout) -> str:
@@ -232,8 +267,7 @@ def _signature(layout: HomeScreenLayout) -> str:
         if item.is_app:
             return item.app.bundle_id
         if item.is_folder:
-            return {"folder": item.folder.display_name,
-                    "apps": [[app.bundle_id for app in page] for page in item.folder.pages]}
+            return {"folder": item.folder.display_name, "apps": folder_page_ids(item.folder)}
         return {"widget": item.widget.container_bundle_id, "size": item.widget.grid_size.value}
 
     return json.dumps({
@@ -258,11 +292,15 @@ def raw_state_matches(layout: HomeScreenLayout) -> bool:
 
 
 def _entry_key(item: Any) -> str:
-    """"app:<bundle ID>" for an App Store app entry. Any other entry (a widget, a pinned
-    icon, an entry that the parser drops) is "entry:" and its displayIdentifier, or
-    its JSON when it has none."""
+    """"app:<bundle ID>" for an App Store app entry, and "app:<bundle ID>#<displayIdentifier>"
+    when the entry's displayIdentifier is not its bundle ID (such as the UUID of a
+    second icon of an app on iOS 26). Any other entry (a widget, a pinned icon, an
+    entry that the parser drops) is "entry:" and its displayIdentifier, or its JSON
+    when it has none."""
     if is_app_store_entry(item):
-        return f"app:{entry_app_id(item)}"
+        app_id = entry_app_id(item)
+        display = item.get("displayIdentifier") if isinstance(item, dict) else None
+        return f"app:{app_id}#{display}" if display and display != app_id else f"app:{app_id}"
     if isinstance(item, dict) and item.get("displayIdentifier"):
         return f"entry:{item['displayIdentifier']}"
     return "entry:" + json.dumps(item, sort_keys=True, default=str)
@@ -302,38 +340,61 @@ def lost_entries(before, after, operations: list[LayoutOperation]) -> list[str]:
     """Entries of the raw state ``before`` that ``after`` lost, and that no operation
     took off the home screen. An empty list when nothing was lost.
 
-    An entry that is not an App Store app (a widget, a Smart Stack, a pinned icon or
-    an entry that the parser drops) can never leave, so each one must still be there,
-    as often as before, after any operations. For App Store apps: delete and
-    move_to_app_library take the apps that they name off the home screen. An app that
-    another operation names must still be there at least once (a copy in the dock and
-    one on a page can become one). compact_to_single_page and rebuild_pages take the
-    apps that they do not list off the pages by design, so after them only the apps
-    in the dock are checked.
+    - An entry that is not an App Store app (a widget, a Smart Stack, a pinned icon or
+      an entry that the parser drops) can never leave, so each one must still be
+      there, as often as before, after any operations.
+    - Each icon of an app with more than one icon is fixed in the same way. The key of
+      an app entry holds its displayIdentifier when that is not the bundle ID, so the
+      second icon of an app is a different entry from the first.
+    - For the other App Store apps: delete and move_to_app_library take the apps that
+      they name off the home screen. compact_to_single_page and rebuild_pages take
+      the apps that they do not list off the pages by design. Every other app must
+      still be there.
+    - Each dock entry must still be in the dock, unless an operation names its app.
     """
+    fixed = _raw_fixed_ids(before)
     removed = {
-        f"app:{bundle_id}" for op in operations
+        bundle_id for op in operations
         if op.action in ("delete", "move_to_app_library") for bundle_id in op.bundle_ids
-    }
-    named = {f"app:{bundle_id}" for op in operations for bundle_id in op.bundle_ids}
+    } - fixed
+    named = {bundle_id for op in operations for bundle_id in op.bundle_ids} - fixed
     rebuilt = any(op.action in ("compact_to_single_page", "rebuild_pages") for op in operations)
-    labels = {_entry_key(entry): _entry_label(entry) for entry in _entries(_raw_dock_and_pages(before))}
+    entries = _entries(_raw_dock_and_pages(before))
+    labels = {_entry_key(entry): _entry_label(entry) for entry in entries}
+    apps = {_entry_key(entry): entry_app_id(entry) for entry in entries if is_app_store_entry(entry)}
     before_all = Counter(_entry_keys(_raw_dock_and_pages(before)))
     before_dock = Counter(_entry_keys([_get_dock(before)]))
     after_all = Counter(_entry_keys(_raw_dock_and_pages(after)))
+    after_dock = Counter(_entry_keys([_get_dock(after)]))
     lost = []
     for key, count in before_all.items():
-        if key in removed:
+        app_id = apps.get(key)
+        if app_id in removed:
             continue
-        if not key.startswith("app:"):
+        if app_id is None or app_id in fixed:
             need = count
         elif rebuilt:
-            need = 0 if key in named else before_dock.get(key, 0)
+            need = 0 if app_id in named else before_dock.get(key, 0)
         else:
-            need = 1 if key in named else count
+            need = count
         if after_all.get(key, 0) < need:
             lost.append(labels[key])
+    for key, count in before_dock.items():
+        if apps.get(key) in named or after_dock.get(key, 0) >= count:
+            continue
+        if labels[key] not in lost:
+            lost.append(f"{labels[key]} (from the dock)")
     return lost
+
+
+def doubled_entries(before, after) -> list[str]:
+    """Entries that ``after`` holds more often than ``before`` (an app at least once),
+    such as one app entry written in two places. An empty list when there is none."""
+    before_all = Counter(_entry_keys(_raw_dock_and_pages(before)))
+    after_entries = _entries(_raw_dock_and_pages(after))
+    after_all = Counter(_entry_key(entry) for entry in after_entries)
+    labels = {_entry_key(entry): _entry_label(entry) for entry in after_entries}
+    return [labels[key] for key, count in after_all.items() if count > max(before_all.get(key, 0), 1)]
 
 
 def compact_to_single_page(
@@ -345,18 +406,18 @@ def compact_to_single_page(
 
     This is the public primitive behind the one-page preset: dock apps stay in the
     dock, the archived apps go to the App Library, and the first kept apps that fit
-    stay visible on page 1, with page 1's widgets and pinned icons. The other App
-    Store apps leave the home screen. The widgets of other pages, the pinned icons and
+    stay visible on page 1, with page 1's widgets and fixed icons. The other App
+    Store apps leave the home screen. The widgets of other pages, the fixed icons and
     the folders that hold them stay, from page 2 on (see analyzer.rebuilt_pages).
     """
+    fixed = _raw_fixed_ids(layout.raw)
     pages = _get_pages(layout.raw)
     index = first_live_index(pages, _raw_item_slots)
     first = [(item, _raw_item_slots(item) > 0) for item in pages[index]] if index is not None else []
-    room = max(rebuild_room(first, _raw_stays_in_rebuild, _raw_item_slots), 0)
-    pinned = _raw_pinned_ids(layout.raw)
+    room = max(rebuild_room(first, lambda item: _raw_stays_in_rebuild(item, fixed), _raw_item_slots), 0)
     dock = {entry_app_id(entry) for entry in _entries([_get_dock(layout.raw)]) if is_app_store_entry(entry)}
-    keep = [b for b in dict.fromkeys(keep_visible_bundle_ids) if b not in pinned][:room]
-    archive = [b for b in dict.fromkeys(archive_bundle_ids) if b not in keep and b not in dock]
+    keep = [b for b in dict.fromkeys(keep_visible_bundle_ids) if b not in fixed and b not in dock][:room]
+    archive = [b for b in dict.fromkeys(archive_bundle_ids) if b not in keep and b not in dock and b not in fixed]
     operations = [LayoutOperation(action="move_to_app_library", bundle_ids=archive)] if archive else []
     operations.append(LayoutOperation(action="compact_to_single_page", bundle_ids=keep))
     return apply_operations(layout, operations)
@@ -379,34 +440,41 @@ def _raw_pinned_ids(raw) -> set[str]:
     return pinned - apps
 
 
-def _raw_stays_in_rebuild(item: Any) -> list:
+def _raw_fixed_ids(raw) -> set[str]:
+    """The IDs that no operation acts on in a raw state, as HomeScreenLayout.fixed_ids()
+    gives them for the parsed layout: the pinned icons, and the IDs of the App Store
+    apps that have more than one entry on the home screen."""
+    counts = Counter(
+        entry_app_id(entry) for entry in _entries(_raw_dock_and_pages(raw)) if is_app_store_entry(entry)
+    )
+    return _raw_pinned_ids(raw) | {app_id for app_id, count in counts.items() if count > 1}
+
+
+def _raw_stays_in_rebuild(item: Any, fixed: set[str] | frozenset = frozenset()) -> list:
     """What stays of a raw page entry when compact_to_single_page or rebuild_pages
     replaces the pages, as analyzer.stays_in_rebuild gives it for a parsed item.
+    ``fixed`` holds the IDs of the apps that no operation acts on (_raw_fixed_ids()).
 
-    A widget, a Smart Stack, a pinned icon and an entry that the parser drops stay.
-    A folder keeps only its entries that are not App Store apps. As in the preview, it
-    keeps only the folder pages with a pinned icon: the entries that the parser drops
-    from its other pages join the page with a pinned icon before them (or the first
-    one). A folder with no pinned icon leaves; the entries of it that the parser drops
-    stay, out of the folder. An App Store app leaves.
+    A widget, a Smart Stack, a fixed icon and an entry that the parser drops stay.
+    An App Store app that is not fixed leaves. A folder keeps its entries that stay,
+    on their own folder pages: a page that has nothing left leaves, and no page gets
+    more entries than it had. The folder stays when a fixed icon stays in it, as in
+    the preview. The preview does not show a folder page with only entries that the
+    parser drops, and the checks leave out empty folder pages (see
+    analyzer.folder_page_ids). A folder with no fixed icon leaves; the entries of it
+    that the parser drops stay, out of the folder.
     """
+    def keeps(entry: Any) -> bool:
+        return not is_app_store_entry(entry) or entry_app_id(entry) in fixed
+
     if is_app_store_entry(item):
-        return []
+        return [item] if keeps(item) else []
     if is_folder_entry(item) or _raw_is_empty_folder(item):
-        pages: list[list] = []
-        waiting: list = []
-        for page in item.get("iconLists") or []:
-            rest = [entry for entry in page if not is_app_store_entry(entry)]
-            if any(is_pinned_entry(entry) for entry in rest):
-                pages.append(waiting + rest)
-                waiting = []
-            elif pages:
-                pages[-1].extend(rest)
-            else:
-                waiting.extend(rest)
-        if pages:
+        pages = [[entry for entry in page if keeps(entry)] for page in item.get("iconLists") or []]
+        pages = [page for page in pages if page]
+        if any(entry_app_id(entry) for page in pages for entry in page):
             return [{**item, "iconLists": pages}]
-        return waiting
+        return [entry for page in pages for entry in page]
     return [item]
 
 
@@ -418,14 +486,26 @@ def _raw_is_folder(item: Any) -> bool:
 
 def _raw_is_empty_folder(item: Any) -> bool:
     """A folder that the operations emptied: no entries of any kind are left in it.
-    An entry that the parser does not show still keeps its folder."""
+    An entry that the parser does not show still keeps its folder.
+
+    A folder has listType (or iconType) "folder". A folder with no type (an older
+    state) is a folder only when its iconLists holds at least one folder page, and
+    when it has no identifier, no iconType, no gridSize and no elements: an entry
+    such as {"iconType": "custom", "gridSize": "small", "iconLists": []} is not a
+    folder, so the cleanup keeps it and lost_entries() counts it."""
     if not isinstance(item, dict) or is_widget_entry(item) or entry_app_id(item):
         return False
+    lists = item.get("iconLists")
     typed = item.get("listType") == "folder" or item.get("iconType") == "folder"
-    untyped = "iconLists" in item and not (item.get("bundleIdentifier") or item.get("displayIdentifier"))
+    untyped = (
+        isinstance(lists, list) and bool(lists)
+        and all(isinstance(page, list) for page in lists)
+        and not any(item.get(key) for key in ("bundleIdentifier", "displayIdentifier", "iconType", "elementType"))
+        and "gridSize" not in item and "elements" not in item
+    )
     if not (typed or untyped):
         return False
-    return not any(item.get("iconLists") or [])
+    return not any(lists or [])
 
 
 def _raw_is_widget(item: Any) -> bool:

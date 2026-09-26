@@ -2,6 +2,7 @@
 
 
 from unjiggle.analyzer import LayoutOperation
+from unjiggle.device import is_folder_entry
 from unjiggle.layout_engine import apply_operations, compact_to_single_page
 from unjiggle.models import HomeScreenLayout
 
@@ -478,7 +479,10 @@ class TestWritePathMatchesPreview:
             LayoutOperation(action="move_to_folder", bundle_ids=apps[21:], folder_name="Old"),
         ]
         result = apply_operations(layout, ops)
-        folders = {item["displayName"]: item for item in result[1] if item.get("iconType") == "folder"}
+        folders = {item["displayName"]: item for item in result[1] if is_folder_entry(item)}
+        # A new folder has the keys that the phone gives a folder.
+        assert set(folders["New"]) == {"displayName", "iconLists", "listType"}
+        assert folders["New"]["listType"] == "folder"
 
         # A new folder: pages of 9. An existing folder: the last page fills to 9 first.
         assert [len(p) for p in folders["New"]["iconLists"]] == [9, 2]
@@ -885,8 +889,8 @@ class TestRebuildsKeepWidgetsAndPinnedIcons:
         # Page 1: the app in the place of com.p1.a, and the web clip in its place.
         assert written[1] == [_entry("com.p4.a"), web]
         # Page 2: the web clip of page 3, the folder with what is not an App Store app
-        # (on one page: the page with the pinned icon), and the small widget of page 4.
-        folder = {"displayName": "Mixed", "listType": "folder", "iconLists": [[web, {"displayIdentifier": "com.f.pin"}]]}
+        # (each on its own folder page, as before), and the small widget of page 4.
+        folder = {"displayName": "Mixed", "listType": "folder", "iconLists": [[web], [{"displayIdentifier": "com.f.pin"}]]}
         assert written[2] == [web, folder, raw[4][0]]
         assert len(written) == 3
 
@@ -928,3 +932,184 @@ def _entry_like(raw, bundle_id):
             if isinstance(item, dict) and item.get("bundleIdentifier") == bundle_id:
                 return item
     raise KeyError(bundle_id)
+
+
+def _second_icon(bundle_id, uuid):
+    """The second icon of an app on iOS 26: an app entry with a UUID displayIdentifier."""
+    return {"bundleIdentifier": bundle_id, "displayIdentifier": uuid, "iconType": "app", "iconLists": []}
+
+
+def _two_icon_state():
+    """_ios26_state() with a second icon of com.x.a03 on page 1 (next to the widgets),
+    and of com.y.b0 in the dock."""
+    raw = _ios26_state()
+    raw[1] = raw[1][:3] + [_second_icon("com.x.a03", "UUID-A03")] + raw[1][3:]
+    raw[0].append(_second_icon("com.y.b0", "UUID-B0"))
+    return raw
+
+
+class TestAppsWithMoreThanOneIcon:
+    """An operation names an app by its ID, so it cannot tell two icons of one app
+    apart. Each icon of such an app is fixed: no operation moves or removes it, and a
+    rebuild keeps it in its place."""
+
+    _check = staticmethod(TestRealIconStateShapes._check)
+
+    def test_the_icons_of_an_app_with_two_icons_are_fixed(self):
+        from unjiggle.device import parse_layout_state
+        from unjiggle.layout_engine import _raw_fixed_ids
+
+        raw = _two_icon_state()
+        layout = parse_layout_state(raw)
+        assert layout.copied_ids() == {"com.x.a03", "com.y.b0"}
+        assert layout.fixed_ids() == layout.pinned_ids() | {"com.x.a03", "com.y.b0"}
+        assert _raw_fixed_ids(raw) == layout.fixed_ids()
+
+    def test_no_operation_moves_or_removes_an_icon_of_it(self):
+        raw = _two_icon_state()
+        for op in (
+            LayoutOperation(action="move_to_app_library", bundle_ids=["com.x.a03", "com.y.b0"]),
+            LayoutOperation(action="delete", bundle_ids=["com.x.a03"], gratitude="Bye."),
+            LayoutOperation(action="move_to_page", bundle_ids=["com.x.a03", "com.y.b0"], target_page=2),
+            LayoutOperation(action="create_folder", bundle_ids=["com.x.a03", "com.y.b0"], folder_name="Both"),
+            LayoutOperation(action="move_to_folder", bundle_ids=["com.x.a03"], folder_name="Pictures"),
+        ):
+            _layout, written = self._check(raw, [op])
+            assert written == raw, op.action
+
+    def test_a_rebuild_keeps_each_icon_in_its_place(self):
+        raw = _two_icon_state()
+        apps = [f"com.x.a{i:02d}" for i in range(20)] + ["com.y.b0", "com.y.b1"]
+        for action in ("rebuild_pages", "compact_to_single_page"):
+            op = LayoutOperation(action=action, bundle_ids=apps[:5])
+            _layout, written = self._check(raw, [op])
+            assert written[0] == raw[0]
+            assert written[1][:4] == raw[1][:4]
+            assert _second_icon("com.x.a03", "UUID-A03") in written[1]
+            assert raw[2][5] == {"bundleIdentifier": "com.x.a03", "displayIdentifier": "com.x.a03", "displayName": "a03"}
+            assert raw[2][5] in [item for page in written[2:] for item in page]
+
+    def test_a_write_that_swaps_a_second_icon_for_a_copy_of_the_first_is_stopped(self):
+        from unjiggle.layout_engine import lost_entries
+
+        before = _two_icon_state()
+        after = [list(page) for page in before]
+        after[1][3] = before[2][5]  # the first icon of com.x.a03, from page 2
+        assert lost_entries(before, after, []) == ["com.x.a03"]
+
+
+class TestWriteChecks:
+    def test_an_operation_that_names_an_app_twice_places_it_once(self):
+        raw = _ios26_state()
+        op = LayoutOperation(action="rebuild_pages", bundle_ids=["com.y.b0", "com.x.a00", "com.y.b0"])
+        _layout, written = TestRealIconStateShapes._check(raw, [op])
+        entries = [item for page in written for item in page if isinstance(item, dict)]
+        assert sum(1 for item in entries if item.get("bundleIdentifier") == "com.y.b0") == 1
+
+    def test_a_write_that_holds_an_entry_twice_is_stopped(self):
+        from unjiggle import layout_engine
+
+        raw = _ios26_state()
+        assert layout_engine.doubled_entries(raw, raw) == []
+        doubled = [list(page) for page in raw]
+        doubled[3].append(raw[3][0])
+        assert layout_engine.doubled_entries(raw, doubled) == ["com.y.b0"]
+
+    def test_check_write_stops_a_write_that_holds_an_entry_twice(self, monkeypatch):
+        from unjiggle import layout_engine
+        from unjiggle.device import parse_layout_state
+
+        raw = _ios26_state()
+        clip = {"iconType": "custom", "displayName": "Web clip"}  # the parser does not show it
+        raw[3].append(clip)
+        layout = parse_layout_state(raw)
+        real = layout_engine.apply_operations
+
+        def doubling(layout, ops):
+            written = real(layout, ops)
+            written[3].append(clip)
+            return written
+
+        monkeypatch.setattr(layout_engine, "apply_operations", doubling)
+        op = LayoutOperation(action="rename_folder", bundle_ids=[], folder_name="Photos", old_name="Pictures")
+        assert layout_engine.check_write(layout, [op])[2] == \
+            "the write would put Web clip on the home screen more than once"
+
+    def test_a_dock_entry_that_no_operation_names_must_stay_in_the_dock(self):
+        from unjiggle.layout_engine import lost_entries
+
+        before = _ios26_state()
+        after = [[], *before[1:3], before[3] + before[0]]
+        assert lost_entries(before, after, []) == ["com.apple.mobilesafari (from the dock)"]
+        named = LayoutOperation(action="move_to_page", bundle_ids=["com.apple.mobilesafari"], target_page=2)
+        assert lost_entries(before, after, [named]) == []
+
+    def test_a_write_with_more_pages_than_an_iphone_shows_is_stopped(self):
+        from unjiggle.device import parse_layout_state
+        from unjiggle.layout_engine import check_write
+
+        apps = [f"com.many.app{i:03d}" for i in range(15 * 24 + 1)]
+        raw = [[], [_widget("com.w.far", "small")],
+               [{"displayName": f"F{i}", "listType": "folder", "iconLists": [[_entry(b) for b in apps[i * 9:i * 9 + 9]]]}
+                for i in range(len(apps) // 9 + 1)]]
+        layout = parse_layout_state(raw)
+        _written, _preview, problem = check_write(layout, [LayoutOperation(action="rebuild_pages", bundle_ids=apps)])
+        # Page 1: the widget (4 slots) and 20 apps. Then 341 apps on 15 new pages.
+        assert problem == "the written layout would have 16 pages, and an iPhone shows at most 15"
+
+
+class TestFolderPagesAndShapes:
+    _check = staticmethod(TestRealIconStateShapes._check)
+
+    def test_a_folder_page_that_the_operations_empty_is_removed(self):
+        from unjiggle.analyzer import preview_operations
+        from unjiggle.device import parse_layout_state
+
+        apps = [f"com.g.app{i}" for i in range(9)]
+        pins = [{"displayIdentifier": f"com.pin.{i}", "displayName": f"Pin {i}"} for i in range(2)]
+        raw = [[], [_entry("com.a"), {"displayName": "G", "listType": "folder",
+                                      "iconLists": [[_entry(b) for b in apps], pins]}]]
+        op = LayoutOperation(action="move_to_app_library", bundle_ids=apps)
+        layout, written = self._check(raw, [op])
+        assert written[1][1]["iconLists"] == [pins]
+        folder = preview_operations(layout, [op]).pages[0][1].folder
+        assert [[app.bundle_id for app in page] for page in folder.pages] == [["com.pin.0", "com.pin.1"]]
+        assert parse_layout_state(written).pages[0][1].folder.pages == folder.pages
+
+    def test_a_folder_page_with_only_entries_that_the_parser_drops_stays(self):
+        odd = {"iconType": "custom", "displayIdentifier": "ODD-1"}
+        raw = [[], [_entry("com.a"), {"displayName": "G", "listType": "folder",
+                                      "iconLists": [[_entry("com.g.one")], [odd]]}, _entry("com.b")]]
+        op = LayoutOperation(action="move_to_page", bundle_ids=["com.b"], target_page=0)
+        _layout, written = self._check(raw, [op])
+        assert written[1][1]["iconLists"] == [[_entry("com.g.one")], [odd]]
+
+    def test_a_rebuild_keeps_the_folder_pages_and_adds_no_entry_to_them(self):
+        odd = [{"displayIdentifier": f"ODD-{k}", "iconType": "custom"} for k in range(5)]
+        pins = [{"displayIdentifier": f"com.pin.{i}", "displayName": f"Pin {i}"} for i in range(9)]
+        raw = [[], [_entry("com.a0"), _entry("com.a1"),
+                    {"displayName": "F", "listType": "folder", "iconLists": [odd + [_entry("com.f.one")], pins]}]]
+        op = LayoutOperation(action="rebuild_pages", bundle_ids=["com.a0", "com.a1"])
+        _layout, written = self._check(raw, [op])
+        folder = next(item for page in written[1:] for item in page if item.get("displayName") == "F")
+        assert folder["iconLists"] == [odd, pins]
+
+    def test_an_entry_with_an_empty_icon_list_is_not_an_empty_folder(self):
+        from unjiggle.layout_engine import lost_entries
+
+        odd = {"iconType": "custom", "gridSize": "small", "iconLists": []}
+        raw = [[_entry("com.dock")], [odd, _entry("com.a"), _entry("com.b")],
+               [_entry("com.c"), {"displayName": "G", "listType": "folder", "iconLists": [[_entry("com.g")]]}]]
+        op = LayoutOperation(action="rename_folder", bundle_ids=[], folder_name="H", old_name="G")
+        _layout, written = self._check(raw, [op])
+        assert written[1][0] == odd
+        assert lost_entries(raw, [raw[0], raw[1][1:], raw[2]], [op]) == ["an icon"]
+
+    def test_a_new_folder_has_the_keys_of_the_folders_that_the_phone_writes(self):
+        raw = _ios26_state()
+        op = LayoutOperation(action="create_folder", bundle_ids=["com.x.a00", "com.x.a01"], folder_name="New")
+        _layout, written = self._check(raw, [op])
+        new = next(item for page in written[1:] for item in page if item.get("displayName") == "New")
+        existing = next(item for item in raw[2] if item.get("displayName") == "Pictures")
+        assert set(new) == set(existing) == {"displayName", "iconLists", "listType"}
+        assert new["listType"] == "folder"

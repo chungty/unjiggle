@@ -337,6 +337,28 @@ class TestPinnedIcons:
         preview = preview_operations(layout, ops)
         assert preview.all_bundle_ids == ["com.dock", "com.a", "com.web.clip", "com.old.game"]
 
+    def test_the_icons_of_an_app_with_two_icons_are_fixed(self):
+        from unjiggle.analyzer import _build_context
+        from unjiggle.device import parse_layout_state
+        from unjiggle.scoring import compute_score
+
+        raw = _pinned_layout().raw
+        raw[1].insert(0, {"bundleIdentifier": "com.b", "displayIdentifier": "UUID-B", "iconType": "app"})
+        layout = parse_layout_state(raw)
+        metadata = {"com.b": {"name": "Bee", "super_category": "Productivity"}}
+        context = _build_context(layout, metadata, compute_score(layout, metadata))
+        assert context.count("com.b (Bee) [Productivity]") == 2
+        assert all(line.endswith(" FIXED") for line in context.splitlines() if "com.b (Bee)" in line)
+        data = {
+            "observations": [{
+                "track": "cleanup", "title": "Two", "narrative": "Two icons.",
+                "operations": [{"action": "move_to_app_library", "bundle_ids": ["com.b", "com.a"]}],
+            }],
+            "personality": "Test", "archetype": "Test",
+        }
+        ops = _parse_result(data, layout).observations[0].operations
+        assert [(op.action, op.bundle_ids) for op in ops] == [("move_to_app_library", ["com.a"])]
+
     def test_the_operation_contract_says_that_widgets_and_fixed_icons_stay(self):
         from unjiggle.analyzer import OPERATION_SCHEMA, SYSTEM_PROMPT
 
@@ -344,4 +366,5 @@ class TestPinnedIcons:
         assert "Page 1 keeps its widgets and FIXED icons in their places" in actions
         assert "Apps and folders not listed leave the home screen" in actions
         assert "widgets not listed leave" not in actions
-        assert "no operation moves or removes it, and widgets stay too" in SYSTEM_PROMPT
+        assert "one of two or more icons of the same app" in SYSTEM_PROMPT
+        assert "No operation moves or removes a FIXED icon, and widgets stay too" in " ".join(SYSTEM_PROMPT.split())

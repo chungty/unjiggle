@@ -1,14 +1,18 @@
-"""Every write keeps the widgets, the pinned icons and the apps.
+"""Every write keeps the widgets, the fixed icons and the apps.
 
 A pinned icon has no bundleIdentifier: it is not an App Store app (such as a web
-shortcut or an App Clip), so the App Library cannot hold it. For each preset and for
-representative AI Stylist plans, the tests write the operations to the raw icon state
-and count what the written state holds:
+shortcut or an App Clip), so the App Library cannot hold it. An app with more than one
+icon (such as a second icon with a UUID displayIdentifier on iOS 26) is fixed too. For
+each preset and for representative AI Stylist plans, the tests write the operations to
+the raw icon state and count what the written state holds:
 
 - the widgets and Smart Stacks: the same, and page 1's stay on page 1;
 - the pinned icons: the same;
-- the App Store apps: the same, less the apps that an operation deletes or sends to
-  the App Library;
+- the App Store app entries, each by its bundle ID and displayIdentifier: the same,
+  less the apps that an operation deletes or sends to the App Library;
+- the dock: the same;
+- the grid: no page over 24 slots, each folder page with 1 to 9 entries, and each
+  folder with the keys of the folders that the phone wrote;
 - the written state reads back as the preview.
 
 The phones are synthetic. To run the same checks on a real icon state backup, set
@@ -35,7 +39,7 @@ from unjiggle.device import (
     is_widget_entry,
     parse_layout_state,
 )
-from unjiggle.layout_engine import check_write
+from unjiggle.layout_engine import _raw_item_slots, check_write
 
 PRESETS = ("focus", "relax", "minimal", "beautiful")
 CATEGORIES = ["Productivity", "Utilities", "System", "Finance", "Education", "Social",
@@ -56,9 +60,17 @@ def _containers(raw) -> list[list]:
     return raw if isinstance(raw, list) else [raw.get("buttonBar", []), *raw.get("iconLists", [])]
 
 
+def app_key(item) -> tuple[str, str]:
+    """An App Store app entry by (bundle ID, displayIdentifier). The second icon of an
+    app on iOS 26 has a UUID displayIdentifier, so it is a different entry."""
+    app_id = entry_app_id(item)
+    display = item.get("displayIdentifier") if isinstance(item, dict) else None
+    return app_id, display or app_id
+
+
 def census(raw) -> dict:
-    """What a raw icon state holds: widget keys, pinned icon keys, App Store app IDs
-    (with their copies), folders, and the widgets of page 1."""
+    """What a raw icon state holds: widget keys, pinned icon keys, App Store app entries
+    by app_key() (with their copies), folders, the widgets of page 1, and the dock."""
     widgets: Counter = Counter()
     pinned: Counter = Counter()
     apps: Counter = Counter()
@@ -68,7 +80,7 @@ def census(raw) -> dict:
         if is_widget_entry(item):
             widgets[json.dumps(item, sort_keys=True, default=str)] += 1
         elif is_app_store_entry(item):
-            apps[entry_app_id(item)] += 1
+            apps[app_key(item)] += 1
         else:
             pinned[json.dumps(item, sort_keys=True, default=str)] += 1
 
@@ -90,7 +102,36 @@ def census(raw) -> dict:
         "apps": apps,
         "folders": folders,
         "page_one_widgets": [json.dumps(i, sort_keys=True) for i in first if is_widget_entry(i)],
+        "dock": json.dumps(_containers(raw)[0], sort_keys=True, default=str),
     }
+
+
+def _folders(raw) -> list[dict]:
+    return [item for container in _containers(raw) for item in container if is_folder_entry(item)]
+
+
+def grid_problems(before, after) -> list[str]:
+    """What an iPhone cannot show in the written state ``after``: a page over 24 slots,
+    a folder page with no entry or more than 9, a widget in a folder, or a folder with
+    keys that no folder of ``before`` has (the phone writes displayName, iconLists and
+    listType)."""
+    shapes = {frozenset(folder) for folder in _folders(before)} or {
+        frozenset({"displayName", "iconLists", "listType"})}
+    problems = []
+    for number, page in enumerate(_containers(after)[1:], start=1):
+        slots = sum(_raw_item_slots(item) for item in page)
+        if slots > 24:
+            problems.append(f"page {number} uses {slots} slots")
+    for folder in _folders(after):
+        name = folder.get("displayName")
+        if frozenset(folder) not in shapes:
+            problems.append(f"folder {name} has the keys {sorted(folder)}")
+        for folder_page in folder.get("iconLists") or []:
+            if not 1 <= len(folder_page) <= 9:
+                problems.append(f"folder {name} has a page of {len(folder_page)} entries")
+            if any(is_widget_entry(member) for member in folder_page):
+                problems.append(f"folder {name} holds a widget")
+    return problems
 
 
 def _with_pages(raw, pages):
@@ -100,11 +141,13 @@ def _with_pages(raw, pages):
 
 
 def check_preserved(layout, operations, exact_apps: bool = False, rebuild_drops: bool = False):
-    """Write the operations and check the census. Returns the written raw state.
+    """Write the operations and check the census and the grid. Returns the written raw
+    state.
 
-    exact_apps: each app keeps all of its copies. rebuild_drops: a rebuild may take
-    apps that it does not list off the home screen (the presets and the AI Stylist
-    name each such app in an App Library move or a delete).
+    exact_apps: each app entry stays, as often as before. rebuild_drops: a rebuild may
+    take apps that it does not list off the home screen (the presets and the AI
+    Stylist name each such app in an App Library move or a delete). An operation that
+    names a fixed icon does not act on it, so each fixed icon always stays.
     """
     written, shown, problem = check_write(layout, operations)
     assert problem is None, problem
@@ -115,11 +158,20 @@ def check_preserved(layout, operations, exact_apps: bool = False, rebuild_drops:
     assert after["widgets"] == before["widgets"], "a widget or a Smart Stack is lost"
     assert after["pinned"] == before["pinned"], "an icon that is not an App Store app is lost"
     assert after["page_one_widgets"] == before["page_one_widgets"], "page 1 widgets moved"
+    assert after["dock"] == before["dock"], "the dock changed"
+    assert not grid_problems(layout.raw, written), grid_problems(layout.raw, written)
+    fixed = layout.fixed_ids()
     removed = {b for op in operations if op.action in ("delete", "move_to_app_library") for b in op.bundle_ids}
+    removed -= fixed
+    kept = {key for key in before["apps"] if key[0] not in removed}
+    assert all(after["apps"][key] == count for key, count in before["apps"].items() if key[0] in fixed), \
+        "an icon of an app with more than one icon is lost or doubled"
+    assert all(count <= max(before["apps"].get(key, 0), 1) for key, count in after["apps"].items()), \
+        "an app entry is written twice"
     if rebuild_drops:
-        assert set(after["apps"]) <= set(before["apps"]) - removed, "an app is invented"
+        assert set(after["apps"]) <= kept, "an app is invented"
     else:
-        assert set(after["apps"]) == set(before["apps"]) - removed, "an app is lost or invented"
+        assert set(after["apps"]) == kept, "an app is lost or invented"
     if exact_apps:
         assert after["apps"] == before["apps"], "the copies of an app changed"
     return written
@@ -210,7 +262,9 @@ def legacy_phone():
         [{"iconType": "widget", "containerBundleIdentifier": "com.w.cal", "gridSize": "medium"}] + apps[:6],
         [{"displayName": "Old", "listType": "folder", "iconLists": [[apps[6], _pin("com.old.shortcut"), apps[7]]]}]
         + apps[8:24] + [_pin("com.old.clip")],
-        [{"iconType": "widget", "containerBundleIdentifier": "com.w.news", "gridSize": "large"}] + apps[24:40],
+        # A large widget (16 slots) and 8 apps fill the page.
+        [{"iconType": "widget", "containerBundleIdentifier": "com.w.news", "gridSize": "large"}] + apps[24:32],
+        apps[32:40],
     ]
     raw = {"buttonBar": ["com.legacy.dock"], "iconLists": pages, "ignored": ["com.hidden"]}
     return parse_layout_state(raw), _metadata(apps, 2)
@@ -238,11 +292,28 @@ def full_widget_page_phone():
     return parse_layout_state([[_app("com.full.dock")], *pages]), _metadata(apps, 4)
 
 
+def dock_duplicates_phone():
+    """Apps with two icons: a dock app that is also on page 2, an app of a dock folder
+    that is also on page 2, and a page 3 folder app with a second icon (a UUID
+    displayIdentifier) on page 1, next to a widget."""
+    apps = [f"com.dup.app{i:02d}" for i in range(40)]
+    docked = [f"com.dup.dock{i}" for i in range(1, 6)]
+    dock = [_app(docked[0]), _app(docked[1]), _folder("DockF", [[_app(docked[2]), _app(docked[3])]]), _app(docked[4])]
+    second = {"displayIdentifier": "UUID-9", "iconLists": [], "iconType": "app", "bundleIdentifier": apps[30]}
+    pages = [
+        [_widget("com.w.cal", "medium"), second] + [_app(b) for b in apps[:10]],
+        [_app(docked[0]), _app(docked[2])] + [_app(b) for b in apps[10:30]],
+        [_folder("Misc", [[_app(b) for b in apps[30:36]]])] + [_app(b) for b in apps[36:]],
+    ]
+    return parse_layout_state([dock, *pages]), _metadata(apps + docked, 5)
+
+
 PHONES = {
     "owner-shaped": owner_shaped_phone,
     "legacy": legacy_phone,
     "widgets-after-apps": widgets_after_apps_phone,
     "full-widget-page": full_widget_page_phone,
+    "dock-duplicates": dock_duplicates_phone,
 }
 
 
@@ -253,7 +324,21 @@ def test_the_owner_shaped_phone_has_the_shapes_of_the_real_one():
     assert sum(counts["pinned"].values()) == 19
     assert counts["folders"] == 14
     assert len(layout.pinned_ids()) == 19
+    assert layout.copied_ids() == {"com.owner.app000", "com.owner.app001"}
     assert all(len(page) <= 24 for page in layout.raw[1:])
+
+
+@pytest.mark.parametrize("phone", PHONES)
+def test_each_synthetic_phone_is_a_grid_that_an_iphone_can_show(phone):
+    layout, _metadata = PHONES[phone]()
+    assert not grid_problems(layout.raw, layout.raw)
+
+
+def test_the_census_tells_the_second_icon_of_an_app_apart():
+    layout, _metadata = owner_shaped_phone()
+    apps = census(layout.raw)["apps"]
+    assert apps[("com.owner.app000", "UUID-1")] == 1
+    assert apps[("com.owner.app000", "com.owner.app000")] == 1
 
 
 # --- presets -------------------------------------------------------------------------------
@@ -264,24 +349,38 @@ def test_the_owner_shaped_phone_has_the_shapes_of_the_real_one():
 def test_every_preset_keeps_widgets_pinned_icons_and_apps(phone, preset):
     layout, metadata = PHONES[phone]()
     operations = cli._PRESET_BUILDERS[preset](layout, metadata)
-    assert not {b for op in operations for b in op.bundle_ids} & layout.pinned_ids()
+    named = [b for op in operations for b in op.bundle_ids]
+    assert not set(named) & (layout.fixed_ids() | stylist.dock_bundle_ids(layout))
+    assert all(len(op.bundle_ids) == len(set(op.bundle_ids)) for op in operations)
     # focus, relax and beautiful remove no app, and keep each copy of an app.
     check_preserved(layout, operations, exact_apps=preset != "minimal")
+
+
+@pytest.mark.parametrize("preset", PRESETS)
+def test_every_preset_keeps_the_second_icon_of_an_app_in_its_place(preset):
+    layout, metadata = owner_shaped_phone()
+    written = check_preserved(layout, cli._PRESET_BUILDERS[preset](layout, metadata),
+                              exact_apps=preset != "minimal")
+    assert written[1][4:6] == layout.raw[1][4:6]
+    assert [entry["displayIdentifier"] for entry in written[1][4:6]] == ["UUID-1", "UUID-2"]
 
 
 def test_the_minimal_preset_fills_only_the_room_beside_the_widgets():
     layout, metadata = owner_shaped_phone()
     operations = cli._build_minimal_preset_operations(layout, metadata)
     compact = [op for op in operations if op.action == "compact_to_single_page"]
-    assert len(compact) == 1 and len(compact[0].bundle_ids) == 4
+    # The widgets use 20 slots and the two second icons (fixed) 2: 2 apps fit.
+    assert len(compact) == 1 and len(compact[0].bundle_ids) == 2
     written = check_preserved(layout, operations)
     after = parse_layout_state(written)
     first = after.pages[0]
     assert [item.is_widget for item in first] == [True] * 4 + [False] * 4
-    # Page 2 holds the pinned icons and the folders that hold them.
+    assert [item.app.bundle_id for item in first[4:6]] == ["com.owner.app000", "com.owner.app001"]
+    # Page 2 holds the fixed icons and the folders that hold them.
+    fixed = layout.fixed_ids()
     kept = [item for page in after.pages[1:] for item in page]
     assert {item.folder.display_name for item in kept if item.is_folder} == {"Flow", "Books", "Games Archive"}
-    assert all(app.pinned for item in kept if item.is_folder for page in item.folder.pages for app in page)
+    assert all(app.bundle_id in fixed for item in kept if item.is_folder for page in item.folder.pages for app in page)
 
 
 def test_the_beautiful_preset_keeps_page_one_widgets_and_puts_pinned_icons_last():
@@ -334,7 +433,7 @@ def check_plan(layout, metadata, plan):
     handles = stylist.build_handles(layout)
     ops, report = stylist.expand_plan(plan, layout, metadata, handles)
     assert report.rejected is None, report.rejected
-    assert not {b for op in ops for b in op.bundle_ids} & layout.pinned_ids()
+    assert not {b for op in ops for b in op.bundle_ids} & layout.fixed_ids()
     check_preserved(layout, ops)
     return ops, report
 
@@ -378,16 +477,18 @@ def test_a_new_layout_puts_apps_back_in_a_folder_that_keeps_its_pinned_icons():
     assert sorted(app.pinned for page in games[0].pages for app in page) == [False] * 3 + [True] * 10
 
 
-def test_a_minimal_plan_warns_that_the_pinned_icons_stay():
+def test_a_minimal_plan_warns_that_the_fixed_icons_stay():
     layout, metadata = owner_shaped_phone()
     handles = stylist.build_handles(layout)
     plan = representative_plans(layout, metadata)["minimal"]
     _ops, report = check_plan(layout, metadata, plan)
     warnings = stylist.plan_warnings(report, handles, stylist.context_names(layout, metadata, handles))
     kept = [w for w in warnings if w["kind"] == "fixed_kept"]
-    assert len(kept) == 1 and len(kept[0]["bundle_ids"]) == 19
+    assert len(kept) == 2 and len(kept[0]["bundle_ids"]) == 19
     assert kept[0]["message"].startswith("Kept on the home screen: ")
     assert kept[0]["message"].endswith("so the App Library cannot hold them.")
+    assert kept[1]["bundle_ids"] == ["com.owner.app000", "com.owner.app001"]
+    assert "more than one icon on the home screen" in kept[1]["message"]
 
 
 def test_analysis_operations_that_name_pinned_icons_keep_them():

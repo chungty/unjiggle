@@ -79,11 +79,11 @@ which one is thriving, and that the built-in Weather app now does what they were
 observation. Write the personality as someone who knows this person, not as a report.
 
 Use bundle IDs exactly as they appear in the layout; operations that name any other ID are \
-dropped. A FIXED icon is not an App Store app, such as a web shortcut or an App Clip. The \
-App Library cannot hold it, so no operation moves or removes it, and widgets stay too. Use \
-compact_to_single_page or rebuild_pages only when an observation calls for rebuilding the \
-whole home screen, such as a one-page layout or a full reordering where app order matters, \
-because both remove every app and folder you leave out.
+dropped. A FIXED icon is not an App Store app, such as a web shortcut or an App Clip, or \
+it is one of two or more icons of the same app. No operation moves or removes a FIXED icon, \
+and widgets stay too. Use compact_to_single_page or rebuild_pages only when an observation \
+calls for rebuilding the whole home screen, such as a one-page layout or a full reordering \
+where app order matters, because both remove every app and folder you leave out.
 
 Cleanup follows the Marie Kondo principle. Apps that are truly abandoned, outdated, or \
 superseded get delete: they deserve a proper goodbye, not a junk drawer. Apps that might \
@@ -243,19 +243,26 @@ def _build_context(layout: HomeScreenLayout, metadata: dict[str, dict], score: S
     lines.append("")
 
     # Pages. Folder members are listed with their bundle IDs so operations can name them.
-    # A pinned icon is marked FIXED: no operation acts on it.
+    # A pinned icon and each icon of an app that is on the home screen more than once
+    # are marked FIXED: no operation acts on them (HomeScreenLayout.fixed_ids()).
     pinned = layout.pinned_ids()
+    copied = layout.copied_ids() - pinned
+
+    def line(bundle_id: str, indent: str) -> str:
+        text = _app_line(bundle_id, metadata, indent, bundle_id in pinned)
+        return f"{text} FIXED" if bundle_id in copied else text
+
     for i, page in enumerate(layout.pages):
         lines.append(f"PAGE {i + 1}:")
         for item in page:
             if item.is_app:
-                lines.append(_app_line(item.app.bundle_id, metadata, "  ", item.app.bundle_id in pinned))
+                lines.append(line(item.app.bundle_id, "  "))
             elif item.is_folder:
                 app_count = sum(len(p) for p in item.folder.pages)
                 lines.append(f"  [FOLDER \"{item.folder.display_name}\"] ({app_count} apps):")
                 for fp in item.folder.pages:
                     for a in fp:
-                        lines.append(_app_line(a.bundle_id, metadata, "    ", a.bundle_id in pinned))
+                        lines.append(line(a.bundle_id, "    "))
             elif item.is_widget:
                 lines.append(f"  [WIDGET {item.widget.container_bundle_id} size:{item.widget.grid_size.value}]")
         lines.append("")
@@ -351,9 +358,9 @@ def _parse_operations(ops_data: list[dict], valid_bundle_ids: set[str]) -> list[
 
 
 def _parse_result(data: dict, layout: HomeScreenLayout) -> AnalysisResult:
-    """Parse and validate the LLM's structured output. Operations cannot name a pinned
-    icon (models.AppItem.pinned)."""
-    valid_bundle_ids = set(layout.all_bundle_ids) - layout.pinned_ids()
+    """Parse and validate the LLM's structured output. Operations cannot name a fixed
+    icon (HomeScreenLayout.fixed_ids())."""
+    valid_bundle_ids = set(layout.all_bundle_ids) - layout.fixed_ids()
 
     observations = []
     for i, obs_data in enumerate(data.get("observations", [])):
@@ -410,15 +417,20 @@ def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperati
     layout_engine.apply_operations also keeps them until every operation has run,
     so page indexes and free slots here match the write path at each step.
 
-    An operation does not act on a pinned icon (models.AppItem.pinned): the IDs in
-    layout.pinned_ids() are taken out of each operation first, as in the write path.
+    An operation does not act on a fixed icon: a pinned icon (models.AppItem.pinned)
+    or an app with more than one icon. The IDs in layout.fixed_ids() are taken out of
+    each operation first, as in the write path. An ID that an operation names twice
+    counts once.
     """
     import copy
     preview = copy.deepcopy(layout)
-    pinned = layout.pinned_ids()
+    fixed = layout.fixed_ids()
+
+    def stays(item) -> list:
+        return stays_in_rebuild(item, fixed)
 
     for op in operations:
-        ids = [b for b in op.bundle_ids if b not in pinned]
+        ids = [b for b in dict.fromkeys(op.bundle_ids) if b not in fixed]
         if op.action in ("move_to_app_library", "delete"):
             # Same as layout_engine.apply_operations: both take the icons off the
             # home screen, and only move_to_app_library records them as ignored.
@@ -478,31 +490,32 @@ def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperati
                     preview = snapshot
 
         elif op.action in ("compact_to_single_page", "rebuild_pages"):
-            # Page 1 keeps its widgets and pinned icons. A compact whose apps do not
+            # Page 1 keeps its widgets and fixed icons. A compact whose apps do not
             # fit in the room that they leave is skipped. See rebuilt_pages().
             index = first_live_index(preview.pages, item_slots)
             first = [(item, item_slots(item) > 0) for item in preview.pages[index]] if index is not None else []
-            if op.action == "rebuild_pages" or len(ids) <= rebuild_room(first, stays_in_rebuild, item_slots):
+            if op.action == "rebuild_pages" or len(ids) <= rebuild_room(first, stays, item_slots):
                 apps = _extract_apps_from_layout(preview, ids)
                 later = [item for number, page in enumerate(preview.pages) if number != index for item in page]
-                preview.pages = rebuilt_pages(first, apps, later, stays_in_rebuild, item_slots)
+                preview.pages = rebuilt_pages(first, apps, later, stays, item_slots)
 
     return preview
 
 
-def stays_in_rebuild(item) -> list:
+def stays_in_rebuild(item, fixed: set[str] | frozenset = frozenset()) -> list:
     """What stays of a page item when compact_to_single_page or rebuild_pages replaces
-    the pages: [item] for a widget, a Smart Stack or a pinned icon (AppItem.pinned),
-    a folder with only its pinned icons (folder pages with none are left out), or []
+    the pages: [item] for a widget, a Smart Stack or a fixed icon (a pinned icon,
+    AppItem.pinned, or an app whose ID is in ``fixed``: HomeScreenLayout.fixed_ids()),
+    a folder with only its fixed icons (folder pages with none are left out), or []
     for an item that leaves. An App Store app that the operation does not list leaves
-    the home screen, and so does a folder with no pinned icon.
+    the home screen, and so does a folder with no fixed icon.
     layout_engine._raw_stays_in_rebuild gives the same for the raw icon state."""
     from unjiggle.models import FolderItem, LayoutItem
 
-    if item.is_widget or (item.is_app and item.app.pinned):
+    if item.is_widget or (item.is_app and (item.app.pinned or item.app.bundle_id in fixed)):
         return [item]
     if item.is_folder:
-        pages = [[app for app in page if app.pinned] for page in item.folder.pages]
+        pages = [[app for app in page if app.pinned or app.bundle_id in fixed] for page in item.folder.pages]
         pages = [page for page in pages if page]
         if pages:
             return [LayoutItem(folder=FolderItem(display_name=item.folder.display_name, pages=pages))]
@@ -535,8 +548,9 @@ def rebuilt_pages(first: list[tuple], apps: list, later: list, stays, slots_of) 
     Page 1 keeps the items that stay in their places, and each other page 1 item that
     took a slot gives its place to the next app. The other apps follow on page 1
     while it has room, and then on new pages of 24 slots. What stays of the other
-    pages (widgets, pinned icons, and folders with pinned icons) comes after the apps,
-    from page 2 on. Empty pages are left out.
+    pages (widgets, fixed icons, and folders with fixed icons) comes after the apps,
+    from page 2 on. Empty pages are left out. layout_engine.check_write stops a write
+    with more pages than an iPhone shows (MAX_PAGES).
     """
     queue = list(apps)
     page_one: list = []
@@ -567,6 +581,11 @@ def _fill_pages(pages: list[list], items: list, slots_of) -> None:
 # A home screen page has 24 icon slots. An app or a folder takes one slot, and a
 # widget takes the slots of its size.
 PAGE_SLOTS = 24
+
+# An iPhone shows at most 15 home screen pages. A write must not make more, because
+# the phone could drop the pages after page 15, with the widgets and the fixed icons
+# on them (a rebuild puts those after the apps).
+MAX_PAGES = 15
 
 
 def item_slots(item) -> int:
@@ -653,14 +672,26 @@ def add_to_folder_pages(pages: list[list], items: list) -> None:
 
 
 def drop_empty_folders_and_pages(layout: HomeScreenLayout) -> None:
-    """Remove folders with no apps from the dock and the pages, then pages with no
-    items (in place). layout_engine.apply_operations cleans up the same way."""
+    """Remove folders with no apps from the dock and the pages, then the empty pages
+    of the other folders, then pages with no items (in place).
+    layout_engine.apply_operations cleans up the same way. A folder page with only
+    entries that the parser drops is empty here and stays in the raw state, so the
+    checks that compare the two leave out empty folder pages (folder_page_ids())."""
     for page in [layout.dock, *layout.pages]:
         page[:] = [
             item for item in page
             if not (item.is_folder and sum(len(fp) for fp in item.folder.pages) == 0)
         ]
+        for item in page:
+            if item.is_folder:
+                item.folder.pages = [folder_page for folder_page in item.folder.pages if folder_page]
     layout.pages = [p for p in layout.pages if p]
+
+
+def folder_page_ids(folder) -> list[list[str]]:
+    """The app IDs of each folder page that has an app, for the checks that compare a
+    written state with its preview."""
+    return [[app.bundle_id for app in page] for page in folder.pages if page]
 
 
 def _remove_apps_from_layout(layout: HomeScreenLayout, bundle_ids: set[str]) -> None:

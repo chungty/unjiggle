@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json as _json
 import sys
-from collections import Counter
 from datetime import datetime
 from pathlib import Path
 
@@ -1399,18 +1398,27 @@ def _get_app_name(bundle_id: str, metadata: dict) -> str:
 
 
 def _collect_all_apps_with_positions(layout, metadata: dict) -> list[dict]:
-    """Build a list of all non-dock apps with their current page, category, name.
+    """Build a list of the apps on the pages that a preset can move, with their
+    current page, category and name. Each app is in the list once.
 
-    Pinned icons (models.AppItem.pinned) are left out: no preset moves or removes
-    them, and a rebuild keeps them (see analyzer.rebuilt_pages).
+    Left out: the fixed icons (HomeScreenLayout.fixed_ids(): the pinned icons, and
+    the apps with more than one icon), which no operation moves or removes and a
+    rebuild keeps (see analyzer.rebuilt_pages), and the dock apps, also the ones in
+    a dock folder (stylist.dock_bundle_ids): an operation that names an app takes it
+    out of the dock.
     """
+    from unjiggle.stylist import dock_bundle_ids
+
+    skip = layout.fixed_ids() | dock_bundle_ids(layout)
+    seen: set[str] = set()
     apps = []
     for page_idx, page in enumerate(layout.pages):
         for item in page:
-            if item.is_app and item.app.pinned:
+            if item.is_app and (item.app.bundle_id in skip or item.app.bundle_id in seen):
                 continue
             if item.is_app:
                 bid = item.app.bundle_id
+                seen.add(bid)
                 apps.append({
                     "bundle_id": bid,
                     "name": _get_app_name(bid, metadata),
@@ -1420,9 +1428,10 @@ def _collect_all_apps_with_positions(layout, metadata: dict) -> list[dict]:
             elif item.is_folder:
                 for fpage in item.folder.pages:
                     for app in fpage:
-                        if app.pinned:
+                        if app.bundle_id in skip or app.bundle_id in seen:
                             continue
                         bid = app.bundle_id
+                        seen.add(bid)
                         apps.append({
                             "bundle_id": bid,
                             "name": _get_app_name(bid, metadata),
@@ -1465,7 +1474,12 @@ def _layout_app_locations(layout, metadata: dict) -> dict[str, dict]:
 
 
 def _layout_signature(layout) -> str:
-    """Stable signature for comparing predicted and realized layouts."""
+    """Stable signature for comparing predicted and realized layouts. A folder page
+    with no app is left out (analyzer.folder_page_ids): the cleanup removes empty
+    folder pages from the preview, and a folder page with only entries that the
+    parser drops stays in the written state."""
+    from unjiggle.analyzer import folder_page_ids
+
     dock = []
     for item in layout.dock:
         if item.is_app:
@@ -1473,7 +1487,7 @@ def _layout_signature(layout) -> str:
         elif item.is_folder:
             dock.append({
                 "folder": item.folder.display_name,
-                "apps": [[app.bundle_id for app in page] for page in item.folder.pages],
+                "apps": folder_page_ids(item.folder),
             })
         elif item.is_widget:
             dock.append({
@@ -1490,7 +1504,7 @@ def _layout_signature(layout) -> str:
             elif item.is_folder:
                 page_items.append({
                     "folder": item.folder.display_name,
-                    "apps": [[app.bundle_id for app in folder_page] for folder_page in item.folder.pages],
+                    "apps": folder_page_ids(item.folder),
                 })
             elif item.is_widget:
                 page_items.append({
@@ -1759,57 +1773,37 @@ def _build_minimal_one_page_plan(layout, metadata: dict) -> tuple[list[str], lis
     """Return (keep_visible_bundle_ids, archive_bundle_ids) for the minimal preset.
 
     Keeps the most important apps visible on a single physical page, in the slots
-    that page 1's widgets and pinned icons leave free: a rebuild keeps those on page
+    that page 1's widgets and fixed icons leave free: a rebuild keeps those on page
     1 (analyzer.rebuilt_pages). Everything else gets archived so previews and writes
-    stay truthful. Pinned icons cannot go to the App Library, so they stay.
+    stay truthful. The fixed icons (pinned icons, and apps with more than one icon)
+    and the dock apps are in neither list (see _collect_all_apps_with_positions), so
+    they stay.
     """
     from unjiggle.analyzer import first_live_index, item_slots, rebuild_room, stays_in_rebuild
 
     all_apps = _collect_all_apps_with_positions(layout, metadata)
+    fixed = layout.fixed_ids()
     index = first_live_index(layout.pages, item_slots)
     first = [(item, item_slots(item) > 0) for item in layout.pages[index]] if index is not None else []
-    max_visible = max(rebuild_room(first, stays_in_rebuild, item_slots), 0)
-
-    dock_bids = set()
-    for item in layout.dock:
-        if item.is_app:
-            dock_bids.add(item.app.bundle_id)
+    max_visible = max(rebuild_room(first, lambda item: stays_in_rebuild(item, fixed), item_slots), 0)
 
     priority_apps = [a for a in all_apps if a["category"] in _MINIMAL_KEEP_CATS]
-    keep_visible = []
-    seen = set()
-    for app in priority_apps + all_apps:
-        bid = app["bundle_id"]
-        if len(keep_visible) >= max_visible:
-            break
-        if bid in seen or bid in dock_bids:
-            continue
-        keep_visible.append(bid)
-        seen.add(bid)
-
-    archive_bids = []
-    archived_seen = set()
-    for app in all_apps:
-        bid = app["bundle_id"]
-        if bid in dock_bids or bid in keep_visible or bid in archived_seen:
-            continue
-        archive_bids.append(bid)
-        archived_seen.add(bid)
+    keep_visible = list(dict.fromkeys(app["bundle_id"] for app in priority_apps + all_apps))[:max_visible]
+    kept = set(keep_visible)
+    archive_bids = [app["bundle_id"] for app in all_apps if app["bundle_id"] not in kept]
 
     return keep_visible, archive_bids
 
 
 def _build_weighted_page_operations(layout, metadata: dict, front_cats: set[str], later_cats: set[str]) -> list:
     """move_to_page steps by category. An app that is on the home screen more than
-    once does not move: a move takes every copy of an app and places one."""
+    once does not move (it is a fixed icon, see _collect_all_apps_with_positions):
+    a move takes every copy of an app and places one."""
     from unjiggle.analyzer import LayoutOperation
 
     all_apps = _collect_all_apps_with_positions(layout, metadata)
-    copies = Counter(layout.all_bundle_ids)
     operations = []
     for app in all_apps:
-        if copies[app["bundle_id"]] > 1:
-            continue
         cat = app["category"]
         if cat in front_cats and app["from_page"] != 1:
             operations.append(LayoutOperation(
@@ -1864,7 +1858,7 @@ def _build_beautiful_preset_operations(layout, metadata: dict) -> list:
     ))
     return [LayoutOperation(
         action="rebuild_pages",
-        bundle_ids=[app["bundle_id"] for app in sorted_apps],
+        bundle_ids=list(dict.fromkeys(app["bundle_id"] for app in sorted_apps)),
     )]
 
 
