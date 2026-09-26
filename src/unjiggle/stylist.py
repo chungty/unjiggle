@@ -429,11 +429,19 @@ class PlanReport:
 
     unknown_ids: list[str] = field(default_factory=list)
     unknown_groups: list[str] = field(default_factory=list)
+    # Deletes left out: the gratitude line names a different app, or there is no line.
     dropped_deletes: list[str] = field(default_factory=list)
+    deletes_without_line: list[str] = field(default_factory=list)
     page_one_overflow: list[str] = field(default_factory=list)
+    # True when page_one had more than 24 apps in a new layout. Then the apps in
+    # page_one_overflow go to the pages after page 1. In stay mode they stay.
+    page_one_rebuilt: bool = False
     not_moved: list[str] = field(default_factory=list)
     dropped_operations: list[str] = field(default_factory=list)
+    # Steps left out: ``dropped`` gave a different result all at once and one at a
+    # time, and ``overfull`` would fill a page past its slots.
     dropped: list[LayoutOperation] = field(default_factory=list)
+    overfull: list[LayoutOperation] = field(default_factory=list)
     rejected: str | None = None
     note: str = ""
 
@@ -604,7 +612,9 @@ def expand_plan(
                 short_name(bundle_id, metadata, names),
                 _full_name(bundle_id, metadata, names),
             ]
-            if line and gratitude_names_app(line, gratitude_names(bundle_id, app_names)):
+            if not line:
+                report.deletes_without_line.append(handles.by_bundle_id[bundle_id])
+            elif gratitude_names_app(line, gratitude_names(bundle_id, app_names)):
                 dest[bundle_id] = ("delete", "")
                 gratitude[bundle_id] = line
             else:
@@ -704,6 +714,7 @@ def expand_plan(
             else:
                 # 24 apps per page. The folders follow on the first page with room.
                 report.page_one_overflow += [handles.by_bundle_id[b] for b in page1[PAGE_SLOTS:]]
+                report.page_one_rebuilt = True
                 candidates.append(LayoutOperation("rebuild_pages", page1))
             candidates += [
                 LayoutOperation("create_folder", members[key], folder_name=folder_title[key])
@@ -969,11 +980,13 @@ class _Sequence:
         for op in ops:
             state = preview_operations(state, [op])
         together = preview_operations(self.layout, self.ops + list(ops))
-        if _layout_key(together) != _layout_key(state) or any(
-            page_slots(page) > self.slot_limit for page in together.pages
-        ):
+        if _layout_key(together) != _layout_key(state):
             self.report.dropped_operations += [_describe(op) for op in ops]
             self.report.dropped += ops
+            return False
+        if any(page_slots(page) > self.slot_limit for page in together.pages):
+            self.report.dropped_operations += [_describe(op) for op in ops]
+            self.report.overfull += ops
             return False
         self.ops += ops
         self._one_at_a_time = state
@@ -1120,7 +1133,7 @@ def plan_warnings(report: PlanReport, handles: AppHandles, names: dict[str, str]
 
     Each warning has a kind, a message and the bundle IDs that it is about. Kinds:
     stylist_note (the plan's note), plan_rejected, page_one_overflow, not_moved,
-    dropped_delete and dropped_step.
+    dropped_delete and dropped_step. The message gives the reason.
     """
     def bundle_ids(short_ids: list[str]) -> list[str]:
         return list(dict.fromkeys(handles.by_handle[h] for h in short_ids if h in handles.by_handle))
@@ -1138,23 +1151,31 @@ def plan_warnings(report: PlanReport, handles: AppHandles, names: dict[str, str]
         return warnings
     apps = bundle_ids(report.page_one_overflow)
     if apps:
-        add("page_one_overflow", f"No room on page 1 for {_app_list(apps, names)}. "
-            "They stay where they are.", apps)
+        where = "They go to the pages after page 1." if report.page_one_rebuilt \
+            else "They stay where they are."
+        add("page_one_overflow", f"No room on page 1 for {_app_list(apps, names)}. {where}", apps)
     apps = bundle_ids(report.not_moved)
     if apps:
         add("not_moved", f"No free slot on a later page for {_app_list(apps, names)}. "
             "They stay on page 1.", apps)
+    apps = bundle_ids(report.deletes_without_line)
+    if apps:
+        add("dropped_delete", f"Not deleted: {_app_list(apps, names)}. The plan gave no "
+            "goodbye line for them.", apps)
     apps = bundle_ids(report.dropped_deletes)
     if apps:
         add("dropped_delete", f"Not deleted: {_app_list(apps, names)}. The goodbye line "
             "was about a different app.", apps)
     seen: set[str] = set()
-    for op in report.dropped:
-        text = _step_text(op, names)
-        if text not in seen:
-            seen.add(text)
-            add("dropped_step", f"Left out: {text}. This step gave a different result in "
-                "the preview and on the phone.", list(op.bundle_ids))
+    for dropped, reason in (
+        (report.dropped, "This step gave a different result when the steps run one at a time."),
+        (report.overfull, "This step would fill a page past its 24 slots."),
+    ):
+        for op in dropped:
+            text = _step_text(op, names)
+            if text not in seen:
+                seen.add(text)
+                add("dropped_step", f"Left out: {text}. {reason}", list(op.bundle_ids))
     return warnings
 
 

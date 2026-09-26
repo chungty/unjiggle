@@ -615,6 +615,15 @@ def test_a_new_layout_never_hides_an_app_that_the_plan_names_for_page_one(count)
     assert [x for page in pages for x in page if x.endswith(" folder")] == [f"{g} folder" for g in GENRES[:8]]
     assert len(pages[0]) == 24
     assert report.page_one_overflow == [handles.by_bundle_id[b] for b in daily[24:]]
+    # The warning says where those apps go: in a new layout they move on.
+    warnings = stylist.plan_warnings(report, handles, stylist.context_names(layout, metadata, handles))
+    overflow = [w for w in warnings if w["kind"] == "page_one_overflow"]
+    if count > 24:
+        assert overflow[0]["bundle_ids"] == daily[24:]
+        assert overflow[0]["message"].endswith("They go to the pages after page 1.")
+        assert all(b in [x for page in pages[1:] for x in page] for b in daily[24:])
+    else:
+        assert overflow == []
     # Daily apps that the plan does not name follow the unplaced rule.
     assert archived == {b for b in handles.bundle_ids() if metadata[b]["genre"] == "Daily"} - set(daily)
 
@@ -875,9 +884,50 @@ def test_plan_warnings_report_a_rejected_plan_and_a_dropped_step():
     assert warnings == [{
         "kind": "dropped_step",
         "message": f'Left out: a new folder "Trips" with {names["com.example.wd20"]}. This step gave '
-                   "a different result in the preview and on the phone.",
+                   "a different result when the steps run one at a time.",
         "bundle_ids": ["com.example.wd20"],
     }]
+
+
+def test_plan_warnings_give_the_reason_for_each_left_out_delete_and_step():
+    layout, metadata = widget_phone()
+    handles = stylist.build_handles(layout)
+    h = handles.by_bundle_id.__getitem__
+    names = stylist.context_names(layout, metadata, handles)
+    plan = _stay_plan(delete=[
+        {"app": h("com.example.wd40"), "gratitude": ""},
+        {"app": h("com.example.wd41"), "gratitude": "   "},
+    ])
+    _ops, report = check_expansion(layout, metadata, plan)
+    assert report.deletes_without_line == [h("com.example.wd40"), h("com.example.wd41")]
+    assert report.dropped_deletes == []
+    warnings = stylist.plan_warnings(report, handles, names)
+    assert [w["message"] for w in warnings] == [(
+        f"Not deleted: {names['com.example.wd40']}, {names['com.example.wd41']}. "
+        "The plan gave no goodbye line for them."
+    )]
+
+    step = stylist.LayoutOperation("move_to_page", ["com.example.wd20"], target_page=0)
+    full = stylist.PlanReport(overfull=[step])
+    assert stylist.plan_warnings(full, handles, names) == [{
+        "kind": "dropped_step",
+        "message": f"Left out: move {names['com.example.wd20']} to page 1. "
+                   "This step would fill a page past its 24 slots.",
+        "bundle_ids": ["com.example.wd20"],
+    }]
+
+
+def test_the_sequence_records_why_it_leaves_a_step_out():
+    layout, _metadata = full_one_page_phone()
+    work = stylist._without_raw(layout)
+    report = stylist.PlanReport()
+    sequence = stylist._Sequence(work, report)
+    # With a limit of 1 slot, any step leaves a page too full. The step gives the same
+    # result all at once and one at a time, so the reason is the slots.
+    sequence.slot_limit = 1
+    one = next(item.app.bundle_id for item in layout.pages[0] if item.is_app and item.app.bundle_id != "com.example.one00")
+    assert not sequence.add(stylist.LayoutOperation("create_folder", [one], folder_name="Solo"))
+    assert len(report.overfull) == 1 and report.dropped == []
 
 
 def test_unknown_ids_and_names_are_reported_and_ignored():
