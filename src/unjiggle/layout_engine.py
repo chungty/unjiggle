@@ -8,10 +8,18 @@ is the source of truth, not the HomeScreenLayout model.
 from __future__ import annotations
 
 import copy
+import json
+from collections import Counter
 from typing import Any
 
-from unjiggle.analyzer import LayoutOperation, add_to_folder_pages, item_slots, place_new_folder
-from unjiggle.device import _parse_item
+from unjiggle.analyzer import (
+    PAGE_SLOTS,
+    LayoutOperation,
+    add_to_folder_pages,
+    item_slots,
+    place_new_folder,
+)
+from unjiggle.device import _parse_item, entry_app_id, is_folder_entry, is_widget_entry
 from unjiggle.models import HomeScreenLayout
 
 
@@ -55,6 +63,10 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
     as the parser sees them. A raw entry that device._parse_item drops takes no slot
     and stays where it is. A raw page with no entry that the parser keeps has no page
     index, so target_page and folder placement skip it.
+
+    The final cleanup removes only folders that have no entries left, in the dock
+    and on the pages, and then empty pages. check_write() compares the result with
+    the preview before anything is written.
     """
     raw = copy.deepcopy(layout.raw)
     # An app that an earlier operation took off the home screen (compact_to_single_page
@@ -94,7 +106,8 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                 pages = parsed_pages()
                 if 0 <= op.target_page < len(pages):
                     page = pages[op.target_page]
-                    if _raw_page_items(page) + len(extracted) <= 24:
+                    # Each moved app takes one slot. A widget takes the slots of its size.
+                    if _raw_page_slots(page) + len(extracted) <= PAGE_SLOTS:
                         page.extend(extracted)
                     else:
                         raw = snapshot
@@ -138,9 +151,11 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
                     raw = snapshot
 
         elif op.action == "compact_to_single_page":
-            extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
-            _set_pages(raw, [extracted] if extracted else [])
-            unparsed.clear()
+            # One page holds 24 apps. A longer list is skipped, as in the preview.
+            if len(op.bundle_ids) <= PAGE_SLOTS:
+                extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
+                _set_pages(raw, [extracted] if extracted else [])
+                unparsed.clear()
 
         elif op.action == "rebuild_pages":
             extracted = _raw_extract_apps(raw, op.bundle_ids, originals)
@@ -152,6 +167,8 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
             unparsed.clear()
 
     # Clean up folders the operations emptied, then empty pages, as the preview does.
+    dock = _get_dock(raw)
+    dock[:] = [item for item in dock if not _raw_is_empty_folder(item)]
     pages = [
         [item for item in page if not _raw_is_empty_folder(item)]
         for page in _get_pages(raw)
@@ -160,6 +177,134 @@ def apply_operations(layout: HomeScreenLayout, operations: list[LayoutOperation]
     _set_pages(raw, cleaned)
 
     return raw
+
+
+def check_write(layout: HomeScreenLayout, operations: list[LayoutOperation]):
+    """Build the state to write and check it before anything goes to the phone.
+
+    Returns ``(raw, preview, problem)``: the raw state from apply_operations, the
+    preview of the same operations (analyzer.preview_operations, all of them and then
+    the cleanup), and a short problem text, or None when the state is safe to write.
+    The problems:
+
+    - The raw state does not read back as the preview.
+    - The raw state lost an entry (an app, a widget or another icon) that no
+      operation took off the home screen. See lost_entries().
+    """
+    from unjiggle.analyzer import preview_operations
+    from unjiggle.device import parse_layout_state
+
+    preview = preview_operations(layout, operations)
+    raw = apply_operations(layout, operations)
+    if _signature(parse_layout_state(raw)) != _signature(preview):
+        return raw, preview, "the written layout would differ from the preview"
+    lost = lost_entries(layout.raw, raw, operations)
+    if lost:
+        shown = ", ".join(lost[:4]) + (f" and {len(lost) - 4} more" if len(lost) > 4 else "")
+        return raw, preview, f"the write would remove {shown}, which no operation names"
+    return raw, preview, None
+
+
+def _signature(layout: HomeScreenLayout) -> str:
+    """The layout as the post-write check of the CLI compares it."""
+    def key(item):
+        if item.is_app:
+            return item.app.bundle_id
+        if item.is_folder:
+            return {"folder": item.folder.display_name,
+                    "apps": [[app.bundle_id for app in page] for page in item.folder.pages]}
+        return {"widget": item.widget.container_bundle_id, "size": item.widget.grid_size.value}
+
+    return json.dumps({
+        "dock": [key(item) for item in layout.dock],
+        "pages": [[key(item) for item in page] for page in layout.pages],
+        "ignored": sorted(layout.ignored),
+    }, sort_keys=True)
+
+
+def raw_state_matches(layout: HomeScreenLayout) -> bool:
+    """True when layout.raw is the icon state that the layout was parsed from. A
+    layout that code builds directly has no such state, and the write path has
+    nothing to check."""
+    from unjiggle.device import parse_layout_state
+
+    if not isinstance(layout.raw, (list, dict)) or not layout.raw:
+        return False
+    try:
+        return _signature(parse_layout_state(layout.raw)) == _signature(layout)
+    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+        return False
+
+
+def _entry_key(item: Any) -> str:
+    app_id = entry_app_id(item)
+    if app_id:
+        return f"app:{app_id}"
+    if isinstance(item, dict) and item.get("displayIdentifier"):
+        return f"entry:{item['displayIdentifier']}"
+    return "entry:" + json.dumps(item, sort_keys=True, default=str)
+
+
+def _entry_label(item: Any) -> str:
+    """A name for an entry in a problem text: the app ID, or a widget's bundle ID."""
+    app_id = entry_app_id(item)
+    if app_id:
+        return app_id
+    if isinstance(item, dict):
+        for key in ("bundleIdentifier", "containerBundleIdentifier", "displayName", "displayIdentifier"):
+            if item.get(key):
+                return str(item[key])
+    return "an icon"
+
+
+def _entries(containers: list[list]) -> list:
+    """Each entry in these containers and in their folders. A folder is not an entry
+    of its own: it is a place for other entries."""
+    entries = []
+    for container in containers:
+        for item in container:
+            if is_folder_entry(item) or _raw_is_empty_folder(item):
+                for folder_page in item.get("iconLists") or []:
+                    entries.extend(folder_page)
+            else:
+                entries.append(item)
+    return entries
+
+
+def _entry_keys(containers: list[list]) -> list[str]:
+    return [_entry_key(entry) for entry in _entries(containers)]
+
+
+def lost_entries(before, after, operations: list[LayoutOperation]) -> list[str]:
+    """Entries of the raw state ``before`` that ``after`` lost, and that no operation
+    took off the home screen. An empty list when nothing was lost.
+
+    delete and move_to_app_library take the apps that they name off the home screen.
+    An app that another operation names must still be there at least once (a copy in
+    the dock and one on a page can become one). compact_to_single_page and
+    rebuild_pages replace all pages by design, so after them only the dock is checked.
+    """
+    removed = {
+        f"app:{bundle_id}" for op in operations
+        if op.action in ("delete", "move_to_app_library") for bundle_id in op.bundle_ids
+    }
+    named = {f"app:{bundle_id}" for op in operations for bundle_id in op.bundle_ids}
+    rebuilt = any(op.action in ("compact_to_single_page", "rebuild_pages") for op in operations)
+    labels = {_entry_key(entry): _entry_label(entry) for entry in _entries(_raw_dock_and_pages(before))}
+    before_all = Counter(_entry_keys(_raw_dock_and_pages(before)))
+    before_dock = Counter(_entry_keys([_get_dock(before)]))
+    after_all = Counter(_entry_keys(_raw_dock_and_pages(after)))
+    lost = []
+    for key, count in before_all.items():
+        if key in removed:
+            continue
+        if rebuilt:
+            need = 0 if key in named else before_dock.get(key, 0)
+        else:
+            need = 1 if key in named else count
+        if after_all.get(key, 0) < need:
+            lost.append(labels[key])
+    return lost
 
 
 def compact_to_single_page(
@@ -192,31 +337,31 @@ def compact_to_single_page(
 
 
 def _raw_find_app(item: Any) -> str | None:
-    """Extract bundle ID from a raw plist item."""
-    if isinstance(item, str):
-        return item
-    if isinstance(item, dict):
-        if "bundleIdentifier" in item:
-            return item["bundleIdentifier"]
-    return None
+    """The app ID of a raw entry, as the parser reads it (device.entry_app_id). None
+    for a widget, a Smart Stack, a folder or an entry that is not an app."""
+    return entry_app_id(item)
 
 
 def _raw_is_folder(item: Any) -> bool:
-    return isinstance(item, dict) and ("iconLists" in item or item.get("listType") == "folder")
+    """A folder, as the parser and SpringBoard read it (device.is_folder_entry). A
+    widget or an app with an empty "iconLists" key is not a folder."""
+    return is_folder_entry(item)
 
 
 def _raw_is_empty_folder(item: Any) -> bool:
-    if not _raw_is_folder(item):
+    """A folder that the operations emptied: no entries of any kind are left in it.
+    An entry that the parser does not show still keeps its folder."""
+    if not isinstance(item, dict) or is_widget_entry(item) or entry_app_id(item):
         return False
-    return not any(_raw_find_app(fi) for page in item.get("iconLists", []) for fi in page)
+    typed = item.get("listType") == "folder" or item.get("iconType") == "folder"
+    untyped = "iconLists" in item and not (item.get("bundleIdentifier") or item.get("displayIdentifier"))
+    if not (typed or untyped):
+        return False
+    return not any(item.get("iconLists") or [])
 
 
 def _raw_is_widget(item: Any) -> bool:
-    return isinstance(item, dict) and (
-        item.get("iconType") == "widget"
-        or item.get("elementType") == "widget"
-        or bool(item.get("elements"))
-    )
+    return is_widget_entry(item)
 
 
 def _raw_item_slots(item: Any) -> int:
@@ -226,9 +371,9 @@ def _raw_item_slots(item: Any) -> int:
     return 0 if parsed is None else item_slots(parsed)
 
 
-def _raw_page_items(page: list) -> int:
-    """The items that take a slot, as analyzer.page_items counts them."""
-    return sum(1 for item in page if _raw_item_slots(item))
+def _raw_page_slots(page: list) -> int:
+    """The slots that a page uses, as analyzer.page_slots counts them."""
+    return sum(_raw_item_slots(item) for item in page)
 
 
 def _raw_page_folder_named(pages: list[list], name: str | None):

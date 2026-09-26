@@ -199,7 +199,7 @@ def test_json_apply_applies_operations_and_reports_backup(monkeypatch, clean_lay
     monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
     monkeypatch.setattr(device, "read_layout", lambda lockdown: next(reads))
     monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, backup_path))
-    monkeypatch.setattr(layout_engine, "apply_operations", lambda layout, ops: {"iconLists": [["done"]]})
+    monkeypatch.setattr(layout_engine, "check_write", lambda layout, ops: ({"iconLists": [["done"]]}, predicted_layout, None))
     monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: written_raw.append(raw))
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (predicted_layout, ops))
 
@@ -270,7 +270,7 @@ def test_json_apply_accepts_compact_to_single_page(monkeypatch, clean_layout):
     monkeypatch.setattr(device, "read_layout", lambda lockdown: next(reads))
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (predicted_layout, ops))
     monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, backup_path))
-    monkeypatch.setattr(layout_engine, "apply_operations", lambda layout, ops: {"iconLists": [["done"]]})
+    monkeypatch.setattr(layout_engine, "check_write", lambda layout, ops: ({"iconLists": [["done"]]}, predicted_layout, None))
     monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: written_raw.append(raw))
 
     result = CliRunner().invoke(
@@ -291,6 +291,72 @@ def test_json_apply_accepts_compact_to_single_page(monkeypatch, clean_layout):
     assert payload["applied"] == 1
     assert payload["changed"] is True
     assert written_raw == [{"iconLists": [["done"]]}]
+
+
+def test_json_apply_writes_nothing_when_the_check_finds_a_problem(monkeypatch, clean_layout):
+    from unjiggle import device, layout_engine, safety
+
+    changed = HomeScreenLayout(dock=[], pages=[[clean_layout.pages[0][0]]], raw={"iconLists": [["x"]]})
+    writes: list = []
+    monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
+    monkeypatch.setattr(device, "read_layout", lambda lockdown: clean_layout)
+    monkeypatch.setattr(
+        layout_engine, "check_write",
+        lambda layout, ops: ({"iconLists": [["x"]]}, changed, "the written layout would differ from the preview"),
+    )
+    monkeypatch.setattr(device, "write_layout", lambda lockdown, raw: writes.append(raw))
+    monkeypatch.setattr(
+        safety,
+        "pre_write_safety_check",
+        lambda lockdown, layout: (_ for _ in ()).throw(AssertionError("no backup before a refused write")),
+    )
+
+    result = CliRunner().invoke(
+        json_group,
+        ["apply"],
+        input=json.dumps({"operations": [{"action": "move_to_page", "bundle_ids": ["com.apple.weather"], "target_page": 1}]}),
+    )
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["error"] == (
+        "Not written: the written layout would differ from the preview. No changes made."
+    )
+    assert writes == []
+
+
+def test_json_apply_predicts_all_operations_together(monkeypatch):
+    """json apply writes the operations together, as the preview of json suggest shows
+    them. Here the delete empties page 2, and one operation at a time would give a
+    different page for the move."""
+    from unjiggle import device, safety
+
+    def app(b):
+        return {"bundleIdentifier": b, "iconType": "app"}
+
+    raw = [[app("com.dock")], [app("com.p1")], [app("com.a")], [app("com.b")], [app("com.c"), app("com.d")]]
+    state = {"raw": raw}
+    writes = []
+
+    def write_layout(lockdown, new_raw):
+        writes.append(new_raw)
+        state["raw"] = new_raw
+
+    monkeypatch.setattr(device, "connect", lambda: ("LOCKDOWN", object()))
+    monkeypatch.setattr(device, "read_layout", lambda lockdown: device.parse_layout_state(state["raw"]))
+    monkeypatch.setattr(device, "write_layout", write_layout)
+    monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, Path("/tmp/backup.json")))
+
+    operations = [
+        {"action": "delete", "bundle_ids": ["com.a"]},
+        {"action": "move_to_page", "bundle_ids": ["com.c"], "target_page": 2},
+    ]
+    result = CliRunner().invoke(json_group, ["apply"], input=json.dumps({"operations": operations}))
+
+    assert result.exit_code == 0, result.output
+    assert len(writes) == 1
+    pages = [[item.app.bundle_id for item in page] for page in device.parse_layout_state(writes[0]).pages]
+    # Page index 2 is the page of com.b while page 2 is still there, as in the preview.
+    assert pages == [["com.p1"], ["com.b", "com.c"], ["com.d"]]
 
 
 def test_json_scan_and_diagnose_include_snapshot_identity(monkeypatch, clean_layout, sample_metadata):
@@ -375,7 +441,7 @@ def test_preset_preload_lifecycle_invalidates_after_apply_and_restore(monkeypatc
     monkeypatch.setattr(device, "read_layout", lambda lockdown: current_layout["value"])
     monkeypatch.setattr(itunes, "enrich_layout", lambda layout: sample_metadata)
     monkeypatch.setattr(safety, "pre_write_safety_check", lambda lockdown, layout: (True, backup_file))
-    monkeypatch.setattr(layout_engine, "apply_operations", lambda layout, ops: applied_layout.raw)
+    monkeypatch.setattr(layout_engine, "check_write", lambda layout, ops: (applied_layout.raw, applied_layout, None))
     monkeypatch.setattr(cli, "_preview_effective_operations", lambda layout, ops: (applied_layout, ops))
     monkeypatch.setattr(
         device,

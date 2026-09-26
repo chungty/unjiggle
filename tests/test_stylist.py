@@ -20,7 +20,7 @@ from unjiggle import device, stylist
 from unjiggle.analyzer import preview_operations
 from unjiggle.cli import _layout_signature, _preview_effective_operations
 from unjiggle.cli import json as json_group
-from unjiggle.layout_engine import apply_operations
+from unjiggle.layout_engine import check_write
 
 GENRES = [
     "Productivity", "Social Networking", "Games", "Finance", "Travel", "Health & Fitness",
@@ -168,7 +168,52 @@ def unparsed_raw_phone():
     return device.parse_layout_state(raw), metadata
 
 
+def ios26_shapes_phone():
+    """The item shapes of a real iOS 26 icon state. Widgets, the Smart Stack and some
+    apps have an empty "iconLists" key. Folders have listType "folder" and no
+    iconType. Some apps have no bundleIdentifier, only a displayIdentifier (such as
+    offloaded apps): loose on full pages, and in folders, one of which holds only
+    such apps and one installed app."""
+    bids = [f"com.example.ios{i:02d}" for i in range(60)]
+    offloaded = [f"com.example.off{i:02d}" for i in range(12)]
+    metadata = _metadata(bids + offloaded, random.Random(26))
+
+    def app(b, icon_lists=False):
+        item = {"bundleIdentifier": b, "displayIdentifier": b, "displayName": _label(b)}
+        if icon_lists:
+            item.update(iconType="app", iconLists=[])
+        return item
+
+    def off(b):
+        return {"displayIdentifier": b, "displayName": _label(b)}
+
+    def widget(i, size):
+        return {"bundleIdentifier": f"com.widget.w{i}.ext", "containerBundleIdentifier": f"com.widget.w{i}",
+                "displayIdentifier": f"W-{i}", "elementType": "widget", "gridSize": size,
+                "iconType": "custom", "iconLists": []}
+
+    def folder(name, entries):
+        return {"displayName": name, "listType": "folder",
+                "iconLists": [entries[i:i + 9] for i in range(0, len(entries), 9)]}
+
+    stack = {"displayIdentifier": "STACK-1", "gridSize": "small", "iconType": "custom", "iconLists": [],
+             "elements": [{"bundleIdentifier": "com.widget.s1.ext", "elementType": "widget"},
+                          {"bundleIdentifier": "com.widget.s2.ext", "elementType": "widget"}]}
+    page_one = [widget(0, "medium"), widget(1, "small"), stack, widget(2, "small"),
+                app(bids[4], icon_lists=True), app(bids[5], icon_lists=True)]
+    pages = [
+        page_one,
+        [folder("Pictures", [app(b) for b in bids[6:9]]), folder("Work", [app(b) for b in bids[9:13]] + [off(offloaded[0])])]
+        + [app(b) for b in bids[13:35]],
+        [folder("Games Archive", [off(b) for b in offloaded[1:9]] + [app(bids[35])])] + [app(b) for b in bids[36:47]],
+        [app(b) for b in bids[47:60]] + [off(b) for b in offloaded[9:12]] + [folder("Old", [off(offloaded[0] + "x")])],
+    ]
+    dock = [app(b) for b in bids[:4]]
+    return device.parse_layout_state([dock, *pages]), metadata
+
+
 PHONES = {
+    "ios26-shapes": ios26_shapes_phone,
     "big-ios26": lambda: big_phone(1, "ios26"),
     "big-legacy": lambda: big_phone(2, "legacy"),
     "big-ios26-b": lambda: big_phone(3, "ios26"),
@@ -253,13 +298,16 @@ def check_expansion(layout, metadata, plan):
     assert all(len(folder_page) <= 9 for folder in after.all_folders() for folder_page in folder.pages
                if foldered & {app.bundle_id for app in folder_page})
 
-    # `json apply` predicts the same layout, one operation at a time.
-    predicted, effective = _preview_effective_operations(layout, ops)
+    # One operation at a time gives the same layout.
+    predicted, _effective = _preview_effective_operations(layout, ops)
     assert _layout_signature(predicted) == _layout_signature(after)
-    # The written icon state reads back as that same layout.
+    # The written icon state (all operations, then cleanup) reads back as that same
+    # layout, and it keeps every raw entry that no operation removes.
     if layout.raw:
-        written = device.parse_layout_state(apply_operations(layout, effective))
-        assert _layout_signature(written) == _layout_signature(predicted)
+        written, shown, problem = check_write(layout, ops)
+        assert problem is None, problem
+        assert _layout_signature(device.parse_layout_state(written)) == _layout_signature(after)
+        assert _layout_signature(shown) == _layout_signature(after)
     assert stylist.expansion_problem(layout, ops) is None
     return ops, report
 

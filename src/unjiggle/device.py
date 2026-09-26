@@ -62,6 +62,55 @@ def connect() -> tuple:
     return lockdown, info
 
 
+def is_widget_entry(raw_item) -> bool:
+    """True for a widget or a Smart Stack entry of the icon state."""
+    if not isinstance(raw_item, dict):
+        return False
+    return (
+        raw_item.get("iconType") == "widget"
+        or raw_item.get("elementType") == "widget"
+        or (bool(raw_item.get("elements")) and raw_item.get("iconType") == "custom")
+    )
+
+
+def is_folder_entry(raw_item) -> bool:
+    """True for a folder entry of the icon state.
+
+    SpringBoard marks a folder with listType "folder" (older states use iconType
+    "folder"). On iOS 26, widgets, Smart Stacks and some apps also have an
+    "iconLists" key, often an empty list, so that key alone does not make a folder.
+    An entry with no type and no identifier of its own is a folder only when its
+    iconLists holds entries.
+    """
+    if not isinstance(raw_item, dict) or is_widget_entry(raw_item):
+        return False
+    if raw_item.get("listType") == "folder" or raw_item.get("iconType") == "folder":
+        return True
+    if raw_item.get("bundleIdentifier") or raw_item.get("displayIdentifier"):
+        return False
+    return any(raw_item.get("iconLists") or [])
+
+
+def entry_app_id(raw_item) -> str | None:
+    """The ID of an app entry: its bundleIdentifier, or for an app that the phone
+    shows without one (such as an offloaded app) its displayIdentifier. None for a
+    widget, a folder or an entry that is not an app.
+
+    The parser and the write path (layout_engine) find an app by this ID, so both
+    see the same apps.
+    """
+    if isinstance(raw_item, str):
+        return raw_item or None
+    if not isinstance(raw_item, dict) or is_widget_entry(raw_item) or is_folder_entry(raw_item):
+        return None
+    bundle_id = raw_item.get("bundleIdentifier")
+    if bundle_id:
+        return bundle_id
+    if raw_item.get("iconType") in (None, "app"):
+        return raw_item.get("displayIdentifier") or None
+    return None
+
+
 def _parse_item(raw_item) -> LayoutItem | None:
     """Parse a single item from the iOS 26 icon state format."""
     if isinstance(raw_item, str):
@@ -70,40 +119,26 @@ def _parse_item(raw_item) -> LayoutItem | None:
     if not isinstance(raw_item, dict):
         return None
 
-    icon_type = raw_item.get("iconType", raw_item.get("elementType", ""))
     bundle_id = raw_item.get("bundleIdentifier", "")
 
-    # Widget (standalone or in smart stack)
-    if icon_type == "widget" or raw_item.get("elementType") == "widget":
+    if is_widget_entry(raw_item):
+        # A Smart Stack is a custom entry with an elements array of widgets.
+        stack = raw_item.get("iconType") != "widget" and raw_item.get("elementType") != "widget"
         return LayoutItem(widget=WidgetItem(
-            container_bundle_id=raw_item.get("containerBundleIdentifier", bundle_id),
+            container_bundle_id="smartstack" if stack else raw_item.get("containerBundleIdentifier", bundle_id),
             grid_size=WidgetSize.parse(raw_item.get("gridSize")),
             raw=raw_item,
         ))
 
-    # Smart Stack (has elements array with multiple widgets)
-    if raw_item.get("elements") and raw_item.get("iconType") == "custom":
-        return LayoutItem(widget=WidgetItem(
-            container_bundle_id="smartstack",
-            grid_size=WidgetSize.parse(raw_item.get("gridSize")),
-            raw=raw_item,
-        ))
-
-    # Folder (has iconLists with actual content)
-    if raw_item.get("iconType") == "folder" or (
-        raw_item.get("iconLists") and any(raw_item.get("iconLists", []))
-    ):
+    if is_folder_entry(raw_item):
         folder_pages = []
         for folder_page in raw_item.get("iconLists", []):
             apps = []
             for entry in folder_page:
-                if isinstance(entry, str):
-                    apps.append(AppItem(bundle_id=entry))
-                elif isinstance(entry, dict):
-                    bid = entry.get("bundleIdentifier", "")
-                    name = entry.get("displayName")
-                    if bid:
-                        apps.append(AppItem(bundle_id=bid, display_name=name))
+                app_id = entry_app_id(entry)
+                if app_id:
+                    name = entry.get("displayName") if isinstance(entry, dict) else None
+                    apps.append(AppItem(bundle_id=app_id, display_name=name))
             folder_pages.append(apps)
         return LayoutItem(folder=FolderItem(
             display_name=raw_item.get("displayName", "Unnamed Folder"),
@@ -111,10 +146,12 @@ def _parse_item(raw_item) -> LayoutItem | None:
             raw=raw_item,
         ))
 
-    # Regular app (dict format in iOS 26)
-    if bundle_id:
+    # An app (a dict on iOS 26). An app with no bundleIdentifier is found by its
+    # displayIdentifier: it is an icon on the phone and takes a slot.
+    app_id = entry_app_id(raw_item)
+    if app_id:
         return LayoutItem(app=AppItem(
-            bundle_id=bundle_id,
+            bundle_id=app_id,
             display_name=raw_item.get("displayName"),
         ))
 

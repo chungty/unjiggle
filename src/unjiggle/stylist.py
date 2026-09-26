@@ -9,9 +9,11 @@ the apps that the plan does not name, and a note for the owner.
 expand_plan() turns the plan into the LayoutOperation list that the rest of the
 engine uses. Code, not the model, places every app. The expansion does not lose,
 duplicate or invent an app, and it keeps only operations that give the same
-result in the preview, in `json apply` (one operation at a time) and in the
-write path (all operations, then cleanup). plan_warnings() tells the owner what
-the preview does not do.
+result all at once (then cleanup) and one operation at a time (cleanup after
+each). When the layout has its raw icon state, the expansion also runs the write
+path and rejects the plan if the written state differs from the preview (see
+layout_engine.check_write). plan_warnings() tells the owner what the preview does
+not do.
 """
 
 from __future__ import annotations
@@ -34,6 +36,7 @@ from unjiggle.analyzer import (
     preview_operations,
 )
 from unjiggle.itunes import SYSTEM_APP_NAMES
+from unjiggle.layout_engine import check_write, raw_state_matches
 from unjiggle.llm import claude_json, openai_function_json, resolve_route, stale_year, today_line
 from unjiggle.models import HomeScreenLayout, ScoreBreakdown
 
@@ -200,8 +203,8 @@ class AppHandles:
 
 
 def dock_bundle_ids(layout: HomeScreenLayout) -> set[str]:
-    """Apps in the dock. No operation may name them, because the preview never
-    changes the dock but the write path removes a named app from it."""
+    """Apps in the dock. No operation may name them: an operation takes a named app
+    out of the dock, and the AI Stylist keeps the dock as it is."""
     ids: set[str] = set()
     for item in layout.dock:
         if item.is_app:
@@ -711,6 +714,10 @@ def expand_plan(
 
     ops = sequence.ops
     problem = expansion_problem(work, ops)
+    if not problem and ops and raw_state_matches(layout):
+        # The checks above use the parsed layout. This one runs the write path on the
+        # raw icon state, with the entries that the preview does not show.
+        problem = check_write(layout, ops)[2]
     if problem:
         report.dropped_operations.append(f"all: {problem}")
         report.rejected = problem
@@ -918,7 +925,8 @@ def _dock_key(layout: HomeScreenLayout) -> str:
 
 
 def _one_at_a_time(layout: HomeScreenLayout, ops: list[LayoutOperation]) -> HomeScreenLayout:
-    """What `json apply` predicts: each operation previewed on the result of the last."""
+    """Each operation previewed on the result of the last, with cleanup after each.
+    The interactive `suggest` command shows its steps this way."""
     state = layout
     for op in ops:
         state = preview_operations(state, [op])
@@ -940,10 +948,10 @@ class _Sequence:
     """Operations whose preview is the same all at once and one at a time.
 
     The preview of all the operations (then cleanup) is what `json suggest` shows,
-    and the write path gives the same result. `json apply` predicts the result one
-    operation at a time, with cleanup after each. The two can differ when an
-    operation empties a page or a folder that a later operation depends on. An
-    operation that makes them differ is left out.
+    and `json apply` writes the same result. One operation at a time, with cleanup
+    after each, can give a different result when an operation empties a page or a
+    folder that a later operation depends on. An operation that makes them differ is
+    left out, so the plan does not depend on that difference.
     """
 
     def __init__(self, layout: HomeScreenLayout, report: PlanReport):
@@ -993,7 +1001,7 @@ def expansion_problem(layout: HomeScreenLayout, ops: list[LayoutOperation]) -> s
       Library.
     - The dock does not change.
     - No page uses more than 24 slots, unless one did before.
-    - The preview matches the prediction of `json apply`.
+    - The preview matches the preview one operation at a time.
     """
     dock = dock_bundle_ids(layout)
     on_phone = set(layout.all_bundle_ids)

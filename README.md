@@ -66,6 +66,8 @@ Useful preset endpoints:
 
 In a transform preview, each entry of `changes` has `from_page` and `to_page` counted from 1, as the owner counts pages. A `delete` change also has `gratitude` and a `detail` line: a delete takes the icon off the home screen, and the app stays installed. The preview of `unjiggle json suggest --intent` also has `plan_warnings`: what the AI Stylist's plan asked for that the preview does not do, such as apps that did not fit on page 1. Each warning has a `kind`, a `message` and the `bundle_ids` that it is about.
 
+`unjiggle json apply` applies all operations together, as the preview of `json suggest` shows them. Before it writes, it checks the new icon state: when that state would differ from the preview, or would remove an icon that no operation names, it writes nothing and returns an error that starts with `Not written:`.
+
 ## Requirements
 
 - macOS

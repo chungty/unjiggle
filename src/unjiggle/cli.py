@@ -572,8 +572,9 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         console.print("  No changes to apply.\n")
         return
 
-    # Show final summary
-    final_preview = current_preview
+    # The write applies all accepted operations together, then cleans up. The summary
+    # shows that result, which can differ from the step-by-step previews above.
+    modified_raw, final_preview, write_problem = _prepare_write(layout, accepted_ops)
     final_score = compute_score(final_preview, metadata)
     _changes, _moved, _archived, _new_folders, summary = _derive_realized_changes(
         layout, final_preview, metadata, accepted_ops,
@@ -589,30 +590,27 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
         console.print(f"\n  [italic dim]{result.personality}[/italic dim]")
 
     console.print()
+    if write_problem:
+        console.print(f"  [red]Not written:[/red] {write_problem}. No changes made.\n")
+        return
+    if _layout_signature(final_preview) == _layout_signature(layout):
+        console.print("  [yellow]Nothing left to apply.[/yellow]\n")
+        return
     if click.confirm("  Apply these changes to your iPhone?", default=True):
-        from unjiggle.layout_engine import apply_operations
         from unjiggle.safety import pre_write_safety_check
-
-        predicted_layout, effective_ops = _preview_effective_operations(layout, accepted_ops)
-        if not effective_ops:
-            console.print("  [yellow]Nothing left to apply.[/yellow]\n")
-            return
 
         safe, backup_path = pre_write_safety_check(lockdown, layout)
         if not safe:
             console.print("  [red]Safety check failed. No changes made.[/red]\n")
             return
 
-        # Build the modified raw plist using the layout engine
-        modified_raw = apply_operations(layout, effective_ops)
-
-        # Write the modified layout to device
+        # Write the checked raw state to the device
         write_layout(lockdown, modified_raw)
 
         # Verify the write took effect
         from unjiggle.device import read_layout as re_read
         verify = re_read(lockdown)
-        if _layout_signature(verify) != _layout_signature(predicted_layout):
+        if _layout_signature(verify) != _layout_signature(final_preview):
             console.print("  [red]Write verification failed.[/red] The device layout did not match the preview.\n")
             return
         console.print(f"  [dim]Verifying write... {verify.page_count} pages, {verify.total_apps} apps read back.[/dim]")
@@ -1734,6 +1732,20 @@ def _preview_effective_operations(layout, operations: list) -> tuple[object, lis
     return current_layout, effective_ops
 
 
+def _prepare_write(layout, operations: list) -> tuple[object, object, str | None]:
+    """The raw state to write for these operations, the layout that it must read back
+    as, and a problem that stops the write (None when it is safe to write).
+
+    All operations are applied together and then cleaned up, which is what the
+    preview of `json suggest` shows. The raw state is checked before the write (see
+    layout_engine.check_write), so nothing is written when it would differ from that
+    preview or lose an icon that no operation names.
+    """
+    from unjiggle import layout_engine
+
+    return layout_engine.check_write(layout, operations)
+
+
 def _build_minimal_one_page_plan(layout, metadata: dict) -> tuple[list[str], list[str]]:
     """Return (keep_visible_bundle_ids, archive_bundle_ids) for the minimal preset.
 
@@ -2181,7 +2193,6 @@ def json_apply():
     """Apply operations from JSON on stdin."""
     from unjiggle.analyzer import LayoutOperation
     from unjiggle.device import connect, read_layout, write_layout
-    from unjiggle.layout_engine import apply_operations
 
     try:
         raw_input = click.get_text_stream("stdin").read()
@@ -2212,8 +2223,12 @@ def json_apply():
             gratitude=op_data.get("gratitude"),
         ))
 
-    predicted_layout, effective_ops = _preview_effective_operations(layout, ops)
-    if not effective_ops:
+    # `applied` counts the operations that change the layout, one at a time. The write
+    # applies all operations together and then cleans up, as the preview of `json
+    # suggest` does, so the prediction is that preview.
+    _one_at_a_time, effective_ops = _preview_effective_operations(layout, ops)
+    modified_raw, predicted_layout, write_problem = _prepare_write(layout, ops)
+    if not effective_ops or _layout_signature(predicted_layout) == _layout_signature(layout):
         _json_out({
             "requested": len(ops),
             "applied": 0,
@@ -2227,14 +2242,16 @@ def json_apply():
         })
         return
 
+    if write_problem:
+        _json_err(f"Not written: {write_problem}. No changes made.")
+
     # Safety: backup first
     from unjiggle.safety import pre_write_safety_check
     safe, backup_path = pre_write_safety_check(lockdown, layout)
     if not safe:
         _json_err("Safety check failed. No changes made.")
 
-    # Apply and write
-    modified_raw = apply_operations(layout, effective_ops)
+    # Write the checked raw state
     write_layout(lockdown, modified_raw)
 
     # Verify

@@ -113,7 +113,8 @@ OPERATION_SCHEMA = {
                 "move_to_app_library, and the owner sees it as a recommendation to let the "
                 "app go, together with your gratitude line. "
                 "move_to_page: appends the listed apps to target_page; skipped if that page "
-                "would pass 24 icons. "
+                "would pass 24 slots (an app or a folder takes 1 slot, a small widget 4, a "
+                "medium widget 8 and a large widget 16). "
                 "create_folder: makes a new folder named folder_name from the listed apps, "
                 "placed on the first page with room (from target_page, if given), or in "
                 "the place of the folder old_name, if given. "
@@ -123,7 +124,7 @@ OPERATION_SCHEMA = {
                 "folder_name; skipped if no folder has that name. "
                 "compact_to_single_page: replaces every page with one page holding exactly "
                 "the listed apps, in order; apps, folders, and widgets not listed leave the "
-                "home screen. "
+                "home screen. Skipped if it lists more than 24 apps. "
                 "rebuild_pages: replaces every page with the listed apps in order, 24 per "
                 "page; apps, folders, and widgets not listed leave the home screen, so list "
                 "every app that should stay."
@@ -415,7 +416,8 @@ def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperati
                 snapshot = copy.deepcopy(preview)
                 items = _extract_apps_from_layout(preview, op.bundle_ids)
                 page = preview.pages[op.target_page]
-                if page_items(page) + len(items) <= 24:
+                # Each moved app takes one slot. A widget takes the slots of its size.
+                if page_slots(page) + len(items) <= PAGE_SLOTS:
                     page.extend(items)
                 else:
                     preview = snapshot
@@ -460,8 +462,10 @@ def apply_preview_steps(layout: HomeScreenLayout, operations: list[LayoutOperati
                     preview = snapshot
 
         elif op.action == "compact_to_single_page":
-            items = _extract_apps_from_layout(preview, op.bundle_ids)
-            preview.pages = [items] if items else []
+            # One page holds 24 apps. A longer list is skipped.
+            if len(op.bundle_ids) <= PAGE_SLOTS:
+                items = _extract_apps_from_layout(preview, op.bundle_ids)
+                preview.pages = [items] if items else []
 
         elif op.action == "rebuild_pages":
             items = _extract_apps_from_layout(preview, op.bundle_ids)
@@ -480,8 +484,8 @@ PAGE_SLOTS = 24
 
 def item_slots(item) -> int:
     """The slots that an item takes. A folder with no apps takes none: an operation
-    emptied it, and the cleanup after the last operation removes it. The one-at-a-time
-    preview of `json apply` removes it at once, so both previews must count it as gone."""
+    emptied it, and the cleanup after the last operation removes it. A preview one
+    operation at a time removes it at once, so both previews must count it as gone."""
     if item.is_widget:
         return item.widget.grid_size.slots
     if item.is_folder and not any(item.folder.pages):
@@ -494,7 +498,7 @@ def page_slots(page) -> int:
 
 
 def page_items(page) -> int:
-    """The items on a page that take a slot. move_to_page counts these, not slots."""
+    """The items on a page that take a slot."""
     return sum(1 for item in page if item_slots(item))
 
 
@@ -562,8 +566,9 @@ def add_to_folder_pages(pages: list[list], items: list) -> None:
 
 
 def drop_empty_folders_and_pages(layout: HomeScreenLayout) -> None:
-    """Remove folders with no apps, then pages with no items (in place)."""
-    for page in layout.pages:
+    """Remove folders with no apps from the dock and the pages, then pages with no
+    items (in place). layout_engine.apply_operations cleans up the same way."""
+    for page in [layout.dock, *layout.pages]:
         page[:] = [
             item for item in page
             if not (item.is_folder and sum(len(fp) for fp in item.folder.pages) == 0)
@@ -572,9 +577,10 @@ def drop_empty_folders_and_pages(layout: HomeScreenLayout) -> None:
 
 
 def _remove_apps_from_layout(layout: HomeScreenLayout, bundle_ids: set[str]) -> None:
-    """Remove apps from all pages and folders (in-place)."""
+    """Remove apps from the dock, all pages and all folders (in place), as the write
+    path (layout_engine) does. An app that an operation names leaves the dock too."""
     bid_set = set(bundle_ids)
-    for page in layout.pages:
+    for page in [layout.dock, *layout.pages]:
         to_remove = []
         for i, item in enumerate(page):
             if item.is_app and item.app.bundle_id in bid_set:

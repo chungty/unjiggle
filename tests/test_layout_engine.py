@@ -553,3 +553,192 @@ class TestWritePathMatchesPreview:
             same, written = self._agree(raw, op)
             assert same, op.action
             assert written.dock[1].folder.display_name == ("Work" if op.action == "move_to_folder" else "Tools")
+
+
+def _ios26_state():
+    """The item shapes of a real iOS 26 icon state (the owner's phone, 2026-09).
+
+    Page 1 has widgets, a Smart Stack and two apps, and all of them have an empty
+    "iconLists" key. Folders have listType "folder" and no iconType. Some apps have no
+    bundleIdentifier, only a displayIdentifier: offloaded apps, loose and in folders.
+    """
+    def app(b):
+        return {"bundleIdentifier": b, "displayIdentifier": b, "displayName": b.rsplit(".", 1)[-1]}
+
+    def off(b):
+        return {"displayIdentifier": b, "displayName": b.rsplit(".", 1)[-1]}
+
+    widget = {"bundleIdentifier": "com.whoop.widget", "containerBundleIdentifier": "com.whoop",
+              "displayIdentifier": "W-1", "elementType": "widget", "gridSize": "medium",
+              "iconType": "custom", "iconLists": []}
+    small = {"bundleIdentifier": "com.sleep.widget", "containerBundleIdentifier": "com.sleep",
+             "displayIdentifier": "W-2", "elementType": "widget", "gridSize": "small",
+             "iconType": "custom", "iconLists": []}
+    stack = {"displayIdentifier": "STACK-1", "gridSize": "small", "iconType": "custom", "iconLists": [],
+             "elements": [{"bundleIdentifier": "com.photos.widget", "elementType": "widget"}]}
+    notes = {"bundleIdentifier": "com.apple.mobilenotes", "displayIdentifier": "com.apple.mobilenotes",
+             "iconType": "app", "iconLists": []}
+    health = {"bundleIdentifier": "com.apple.Health", "displayIdentifier": "com.apple.Health",
+              "iconType": "app", "iconLists": []}
+    return [
+        [app("com.apple.mobilesafari")],
+        [widget, small, stack, notes, health],
+        [{"displayName": "Pictures", "listType": "folder", "iconLists": [[app("com.p.one"), app("com.p.two")]]},
+         {"displayName": "Games Archive", "listType": "folder",
+          "iconLists": [[app("com.g.installed"), off("com.g.off1"), off("com.g.off2")]]}]
+        + [app(f"com.x.a{i:02d}") for i in range(20)] + [off("com.microsoft.Office.Word"), off("com.apple.clips")],
+        [app("com.y.b0"), app("com.y.b1")],
+    ]
+
+
+class TestRealIconStateShapes:
+    """A widget, a Smart Stack or an app with an empty "iconLists" key is not a folder,
+    and an app without a bundleIdentifier is an icon on the phone."""
+
+    @staticmethod
+    def _check(raw, ops):
+        from unjiggle.analyzer import preview_operations
+        from unjiggle.cli import _layout_signature
+        from unjiggle.device import parse_layout_state
+        from unjiggle.layout_engine import check_write
+
+        layout = parse_layout_state(raw)
+        written, _shown, problem = check_write(layout, ops)
+        assert problem is None, problem
+        assert _layout_signature(parse_layout_state(written)) == _layout_signature(preview_operations(layout, ops))
+        return layout, written
+
+    def test_the_parser_reads_every_shape(self):
+        from unjiggle.analyzer import page_slots
+        from unjiggle.device import parse_layout_state
+
+        layout = parse_layout_state(_ios26_state())
+        first = layout.pages[0]
+        assert [item.is_widget for item in first] == [True, True, True, False, False]
+        assert [item.app.bundle_id for item in first if item.is_app] == ["com.apple.mobilenotes", "com.apple.Health"]
+        assert page_slots(first) == 8 + 4 + 4 + 2
+        # The apps without a bundleIdentifier are apps, found by their displayIdentifier.
+        assert page_slots(layout.pages[1]) == 24
+        games = layout.pages[1][1].folder
+        assert [app.bundle_id for app in games.pages[0]] == ["com.g.installed", "com.g.off1", "com.g.off2"]
+        assert "com.microsoft.Office.Word" in layout.all_bundle_ids
+
+    def test_a_rename_keeps_the_widgets_and_page_one(self):
+        raw = _ios26_state()
+        op = LayoutOperation(action="rename_folder", bundle_ids=[], folder_name="Photos", old_name="Pictures")
+        _layout, written = self._check(raw, [op])
+        assert written[1] == raw[1]
+        assert len(written) == len(raw)
+
+    def test_a_targeted_change_keeps_the_widgets(self):
+        raw = _ios26_state()
+        ops = [
+            LayoutOperation(action="move_to_page", bundle_ids=["com.y.b0"], target_page=0),
+            LayoutOperation(action="move_to_app_library", bundle_ids=["com.x.a00"]),
+            LayoutOperation(action="create_folder", bundle_ids=["com.x.a01", "com.x.a02"], folder_name="Work"),
+        ]
+        _layout, written = self._check(raw, ops)
+        assert written[1][:5] == raw[1]
+        assert written[1][5]["bundleIdentifier"] == "com.y.b0"
+
+    def test_a_folder_with_offloaded_apps_stays_when_its_installed_app_leaves(self):
+        raw = _ios26_state()
+        op = LayoutOperation(action="move_to_app_library", bundle_ids=["com.g.installed"])
+        _layout, written = self._check(raw, [op])
+        games = [item for item in written[2] if item.get("displayName") == "Games Archive"]
+        assert games and games[0]["iconLists"] == [[raw[2][1]["iconLists"][0][1], raw[2][1]["iconLists"][0][2]]]
+
+    def test_an_offloaded_app_takes_a_slot(self):
+        from unjiggle.device import parse_layout_state
+
+        raw = _ios26_state()
+        # Page 2 is full: 2 folders, 20 apps and 2 offloaded apps.
+        op = LayoutOperation(action="move_to_page", bundle_ids=["com.y.b0"], target_page=1)
+        layout, written = self._check(raw, [op])
+        assert written == raw
+        assert parse_layout_state(written).pages == layout.pages
+
+    def test_move_to_page_counts_widget_slots(self):
+        raw = _ios26_state()
+        # Page 1 uses 18 of 24 slots, so 6 apps fit and a 7th does not.
+        six = [f"com.x.a{i:02d}" for i in range(6)]
+        _layout, written = self._check(raw, [LayoutOperation(action="move_to_page", bundle_ids=six, target_page=0)])
+        assert [item.get("bundleIdentifier") for item in written[1][5:]] == six
+        seven = [f"com.x.a{i:02d}" for i in range(7)]
+        _layout, written = self._check(raw, [LayoutOperation(action="move_to_page", bundle_ids=seven, target_page=0)])
+        assert written == raw
+
+    def test_compact_to_single_page_takes_at_most_24_apps(self):
+        raw = _ios26_state()
+        apps = [f"com.x.a{i:02d}" for i in range(20)] + ["com.y.b0", "com.y.b1", "com.p.one", "com.p.two", "com.g.off1"]
+        _layout, written = self._check(raw, [LayoutOperation(action="compact_to_single_page", bundle_ids=apps)])
+        assert written == raw
+        _layout, written = self._check(raw, [LayoutOperation(action="compact_to_single_page", bundle_ids=apps[:24])])
+        assert len(written) == 2 and len(written[1]) == 24
+
+    def test_an_operation_on_a_dock_app_changes_the_preview_dock_too(self):
+        from unjiggle.analyzer import preview_operations
+
+        raw = _ios26_state()
+        op = LayoutOperation(action="move_to_page", bundle_ids=["com.apple.mobilesafari"], target_page=0)
+        layout, written = self._check(raw, [op])
+        assert written[0] == []
+        assert preview_operations(layout, [op]).dock == []
+
+    def test_a_legacy_app_library_move_of_a_dock_app_matches_the_preview(self):
+        raw = _make_raw_layout()
+        op = LayoutOperation(action="move_to_app_library", bundle_ids=["com.apple.mobilesafari"])
+        _layout, written = self._check(raw, [op])
+        assert "com.apple.mobilesafari" not in written["buttonBar"]
+        assert "com.apple.mobilesafari" in written["ignored"]
+
+
+class TestLostEntries:
+    def test_an_entry_that_no_operation_removes_must_stay(self):
+        from unjiggle.layout_engine import lost_entries
+
+        before = _ios26_state()
+        after = [list(page) for page in before]
+        after[2] = [item for item in after[2] if item.get("displayIdentifier") != "com.apple.clips"]
+        assert lost_entries(before, after, []) == ["com.apple.clips"]
+        remove = LayoutOperation(action="move_to_app_library", bundle_ids=["com.apple.clips"])
+        assert lost_entries(before, after, [remove]) == []
+
+    def test_a_lost_widget_is_found(self):
+        from unjiggle.layout_engine import lost_entries
+
+        before = _ios26_state()
+        after = [list(page) for page in before]
+        after[1] = after[1][3:]
+        assert lost_entries(before, after, []) == ["com.whoop.widget", "com.sleep.widget", "STACK-1"]
+
+    def test_after_a_rebuild_only_the_dock_is_checked(self):
+        from unjiggle.layout_engine import lost_entries
+
+        before = _ios26_state()
+        rebuild = LayoutOperation(action="rebuild_pages", bundle_ids=["com.y.b0"])
+        assert lost_entries(before, [before[0], [before[3][0]]], [rebuild]) == []
+        assert lost_entries(before, [[], [before[3][0]]], [rebuild]) == ["com.apple.mobilesafari"]
+
+    def test_check_write_stops_a_write_that_loses_an_entry(self, monkeypatch):
+        from unjiggle import layout_engine
+        from unjiggle.device import parse_layout_state
+
+        raw = _ios26_state()
+        clip = {"iconType": "custom", "displayName": "Web clip"}  # the parser does not show it
+        raw[3].append(clip)
+        layout = parse_layout_state(raw)
+        real = layout_engine.apply_operations
+
+        def losing(layout, ops, drop=None):
+            written = real(layout, ops)
+            written[3] = [item for item in written[3] if item != drop]
+            return written
+
+        op = LayoutOperation(action="rename_folder", bundle_ids=[], folder_name="Photos", old_name="Pictures")
+        # A lost app shows in the layout that the write reads back as.
+        monkeypatch.setattr(layout_engine, "apply_operations", lambda layout, ops: losing(layout, ops, raw[3][0]))
+        assert layout_engine.check_write(layout, [op])[2] == "the written layout would differ from the preview"
+        # A lost entry that the parser does not show is found in the raw state.
+        monkeypatch.setattr(layout_engine, "apply_operations", lambda layout, ops: losing(layout, ops, clip))
+        assert layout_engine.check_write(layout, [op])[2] == "the write would remove Web clip, which no operation names"
