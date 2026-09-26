@@ -39,15 +39,17 @@ CLAUDE_MAX_TOKENS = 16000
 # API re-runs it on the model Anthropic recommends for that refusal category.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
-# Models without structured outputs, which every AI feature relies on: the Claude 3
-# family and the first Claude 4 models (Sonnet 4 and Opus 4, dated 2025-05-14).
-# They are refused before any request is sent.
+# Models that every AI feature cannot use, because they have no structured outputs
+# or are retired: the Claude 3 family, the first Claude 4 models (Sonnet 4 and
+# Opus 4, dated 2025-05-14) and Claude Opus 4.1 (retired on 2026-08-05). They are
+# refused before any request is sent.
 _NO_STRUCTURED_OUTPUT_PREFIXES = (
     "claude-3",
     "claude-4-",
     "claude-sonnet-4-0",
     "claude-sonnet-4-2",
     "claude-opus-4-0",
+    "claude-opus-4-1",
     "claude-opus-4-2",
 )
 
@@ -55,7 +57,6 @@ _NO_STRUCTURED_OUTPUT_PREFIXES = (
 _NO_EFFORT_PREFIXES = (
     "claude-haiku-4",
     "claude-sonnet-4-5",
-    "claude-opus-4-1",
 )
 
 # Models whose safety classifiers can decline a request and that accept
@@ -90,13 +91,14 @@ class LLMOutputError(LLMError):
 
 
 class LLMUnsupportedModelError(LLMError):
-    """The requested model can't return structured output, so no request is sent."""
+    """The requested model can't return structured output or is retired, so no
+    request is sent."""
 
     def __init__(self, model: str) -> None:
         self.model = model
         super().__init__(
             f"{model} does not support structured outputs, which Unjiggle's AI features "
-            f"need. Use the default ({DEFAULT_ANTHROPIC_MODEL}), or Claude Haiku 4.5, "
+            "need, or is retired. Use the feature's default model, or Claude Haiku 4.5, "
             "Sonnet 4.5, Opus 4.5 or a newer model."
         )
 

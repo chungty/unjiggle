@@ -275,6 +275,8 @@ def test_model_without_effort_or_fallbacks_gets_a_plain_request(
     "claude-opus-4-20250514",
     "claude-opus-4-0",
     "claude-3-haiku-20240307",
+    "claude-opus-4-1",  # retired
+    "claude-opus-4-1-20250805",
 ])
 def test_models_without_structured_outputs_are_refused_before_any_request(
     fake_claude, chaotic_layout, sample_metadata, model,
@@ -288,7 +290,6 @@ def test_models_without_structured_outputs_are_refused_before_any_request(
 @pytest.mark.parametrize(("model", "has_effort"), [
     ("claude-haiku-4-5", False),
     ("claude-sonnet-4-5", False),
-    ("claude-opus-4-1", False),
     ("claude-opus-4-5", True),
     ("claude-sonnet-4-6", True),
     ("claude-opus-5", True),
@@ -462,6 +463,8 @@ def test_default_models():
 def test_unsupported_model_advice_names_models_that_are_still_served():
     message = str(llm.LLMUnsupportedModelError("claude-opus-4-0"))
     assert "Opus 4.5" in message and "Opus 4.1" not in message
+    # The Mirror and the Obituary have a different default, so the message names none.
+    assert llm.DEFAULT_ANTHROPIC_MODEL not in message and "the feature's default model" in message
 
 
 def test_openai_model_with_both_keys_set_uses_the_openai_key(monkeypatch):
