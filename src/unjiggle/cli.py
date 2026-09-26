@@ -1049,6 +1049,15 @@ def demo():
 # _JsonCommand, the class of each command of the json group).
 # ---------------------------------------------------------------------------
 
+# The version of the `unjiggle json` contract. A client that bundles the engine can
+# require a minimum version before it ships (the package version does not change with
+# each contract change).
+# 2: every json command asks no question and writes one JSON document to stdout (also
+#    for an error that it does not catch). json apply has no round trip, takes the
+#    snapshot_id of the preview, and names the backup in an error after the write.
+#    json restore refuses a backup with no apps and returns undo_backup.
+JSON_CONTRACT = 2
+
 # The real stdout while a json command runs. None outside a json command.
 _json_stdout = None
 

@@ -302,6 +302,12 @@ def app_payload(operations: list[dict], snapshot_id: str | None = None) -> str:
 CONTRACT_COMMANDS = {"status", "scan", "diagnose", "mirror", "obituary", "suggest", "presets", "restore", "render", "apply"}
 
 
+def test_the_contract_version_is_2():
+    # A client can require this version before it bundles the engine. Raise it when a
+    # client must refuse the engines before a change of this contract.
+    assert cli.JSON_CONTRACT == 2
+
+
 def test_every_json_command_has_a_contract_test():
     assert set(cli.json.commands) == CONTRACT_COMMANDS
 
