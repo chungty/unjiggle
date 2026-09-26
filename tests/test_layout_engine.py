@@ -1,6 +1,8 @@
 """Tests for the layout engine (raw plist operations)."""
 
 
+import pytest
+
 from unjiggle.analyzer import LayoutOperation
 from unjiggle.device import is_folder_entry
 from unjiggle.layout_engine import apply_operations, compact_to_single_page
@@ -1043,6 +1045,33 @@ class TestWriteChecks:
         assert lost_entries(before, after, []) == ["com.apple.mobilesafari (from the dock)"]
         named = LayoutOperation(action="move_to_page", bundle_ids=["com.apple.mobilesafari"], target_page=2)
         assert lost_entries(before, after, [named]) == []
+
+    @pytest.mark.parametrize("op", [
+        LayoutOperation(action="move_to_page", bundle_ids=["com.not.installed"], target_page=2),
+        LayoutOperation(action="create_folder", bundle_ids=["com.x.a00", "com.not.installed"], folder_name="New"),
+        LayoutOperation(action="move_to_folder", bundle_ids=["com.not.installed"], folder_name="Pictures"),
+        LayoutOperation(action="rebuild_pages", bundle_ids=["com.x.a00", "com.not.installed"]),
+    ], ids=lambda op: op.action)
+    def test_a_write_that_adds_an_app_that_is_not_on_the_phone_is_stopped(self, op):
+        from unjiggle.device import parse_layout_state
+        from unjiggle.layout_engine import added_apps, check_write
+
+        layout = parse_layout_state(_ios26_state())
+        written, _preview, problem = check_write(layout, [op])
+
+        assert added_apps(layout.raw, written) == ["com.not.installed"]
+        assert problem == "the operations name com.not.installed, which is not on the home screen"
+
+    def test_added_apps_lists_only_new_app_store_apps(self):
+        from unjiggle.layout_engine import added_apps
+
+        before = _ios26_state()
+        assert added_apps(before, before) == []
+        after = [list(page) for page in before]
+        after[3] = after[3] + [{"bundleIdentifier": "com.new.a"}, {"bundleIdentifier": "com.new.b"},
+                               {"displayIdentifier": "com.new.webclip"}]
+        # A pinned icon (no bundleIdentifier) is not an App Store app.
+        assert added_apps(before, after) == ["com.new.a", "com.new.b"]
 
     def test_a_write_with_more_pages_than_an_iphone_shows_is_stopped(self):
         from unjiggle.device import parse_layout_state

@@ -2292,8 +2292,9 @@ def _read_stdin() -> str:
     return data.decode("utf-8-sig") if isinstance(data, bytes) else data
 
 
-def _read_apply_operations() -> list:
-    """The operations of `json apply` from stdin: {"operations": [...]}. Stops the
+def _read_apply_operations() -> tuple[list, str | None]:
+    """The input of `json apply` from stdin: {"operations": [...], "snapshot_id": ...}.
+    Returns the operations and the snapshot_id (None when the input has none). Stops the
     command with a JSON error when the input is not that."""
     from unjiggle.analyzer import LayoutOperation
 
@@ -2309,6 +2310,9 @@ def _read_apply_operations() -> list:
         _json_err(f"No operations provided. {expected}")
     if not isinstance(operations_data, list):
         _json_err(f"Invalid JSON input. {expected}")
+    snapshot_id = data.get("snapshot_id")
+    if snapshot_id is not None and not isinstance(snapshot_id, str):
+        _json_err('Invalid JSON input. "snapshot_id" must be the text that the preview gave, or null.')
 
     ops = []
     for op_data in operations_data:
@@ -2323,7 +2327,7 @@ def _read_apply_operations() -> list:
             old_name=op_data.get("old_name"),
             gratitude=op_data.get("gratitude"),
         ))
-    return ops
+    return ops, snapshot_id
 
 
 def _json_verified_backup(lockdown, layout) -> Path:
@@ -2341,9 +2345,15 @@ def _json_verified_backup(lockdown, layout) -> Path:
 def json_apply():
     """Apply operations from JSON on stdin. Asks no question.
 
+    The input is {"operations": [...], "snapshot_id": "..."}. snapshot_id is optional:
+    the snapshot_id of the preview (json suggest or json presets). When it is there and
+    the layout on the phone is not that snapshot any more, nothing is written, because
+    the operations would make a layout that the owner did not see.
+
     The safety steps, in this order:
     1. The check of the new icon state (layout_engine.check_write): it must read back as
-       the preview and lose no entry that no operation names. If not, nothing is written.
+       the preview, lose no entry that no operation names, and add no app that is not
+       on the home screen. If not, nothing is written.
     2. A verified backup (safety.verified_backup). If it fails, nothing is written.
     3. The write.
     4. The read-back check: the phone must read back as the preview.
@@ -2362,7 +2372,7 @@ def json_apply():
     """
     from unjiggle.device import connect, read_layout, write_layout
 
-    ops = _read_apply_operations()
+    ops, snapshot_id = _read_apply_operations()
 
     try:
         lockdown, _device = connect()
@@ -2370,6 +2380,8 @@ def json_apply():
         _json_err("No iPhone detected")
 
     layout = read_layout(lockdown)
+    if snapshot_id is not None and snapshot_id != _layout_signature(layout):
+        _json_err("Not written: the layout on the iPhone changed since the preview. Make a new preview.")
 
     # `applied` counts the operations that change the layout, one at a time. The write
     # applies all operations together and then cleans up, as the preview of `json

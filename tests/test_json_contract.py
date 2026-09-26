@@ -284,11 +284,15 @@ def failed(result) -> dict:
     return payload
 
 
-def app_payload(operations: list[dict]) -> str:
+def app_payload(operations: list[dict], snapshot_id: str | None = None) -> str:
     """The stdin of `json apply`, as the Mac app encodes it: only the TransformOperation
-    keys, no null values, and the escaped slashes of Swift's JSONEncoder."""
+    keys, no null values, the snapshot_id of the preview when there is one, and the
+    escaped slashes of Swift's JSONEncoder."""
     ops = [{key: op[key] for key in TRANSFORM_OPERATION if op.get(key) is not None} for op in operations]
-    return json.dumps({"operations": ops}, separators=(",", ":")).replace("/", "\\/")
+    payload = {"operations": ops}
+    if snapshot_id is not None:
+        payload["snapshot_id"] = snapshot_id
+    return json.dumps(payload, separators=(",", ":")).replace("/", "\\/")
 
 
 # --- each command -----------------------------------------------------------------------
@@ -419,7 +423,7 @@ def test_apply_writes_once_and_returns_the_backup(phone):
     preview = _focus_preview()
     assert preview["operations"]
 
-    payload = ok(run("apply", stdin=app_payload(preview["operations"])), APPLIED_TRANSFORM)
+    payload = ok(run("apply", stdin=app_payload(preview["operations"], preview["snapshot_id"])), APPLIED_TRANSFORM)
 
     assert payload["changed"] is True
     assert payload["applied"] >= 1
@@ -451,6 +455,62 @@ def test_apply_sends_the_text_of_the_backup_to_stderr(phone, monkeypatch):
 
     ok(result, APPLIED_TRANSFORM)
     assert "device state changed between reads" in result.stderr
+
+
+def _remove_app(raw: list, bundle_id: str) -> None:
+    """Take the app off the phone (the owner deleted it), from the pages and folders."""
+    for page in raw:
+        page[:] = [e for e in page if not (isinstance(e, dict) and e.get("bundleIdentifier") == bundle_id)]
+        for entry in page:
+            if isinstance(entry, dict) and isinstance(entry.get("iconLists"), list):
+                entry["iconLists"] = [
+                    [f for f in folder_page if not (isinstance(f, dict) and f.get("bundleIdentifier") == bundle_id)]
+                    for folder_page in entry["iconLists"]
+                ]
+
+
+def _first_moved_app(preview: dict) -> str:
+    return next(op["bundle_ids"][0] for op in preview["operations"] if op["action"] == "move_to_page")
+
+
+def test_apply_with_the_snapshot_id_of_the_presets(phone):
+    presets = ok(run("presets"), PRESETS_RESPONSE)
+    focus = presets["presets"]["focus"]
+
+    payload = ok(run("apply", stdin=app_payload(focus["operations"], presets["snapshot_id"])), APPLIED_TRANSFORM)
+
+    assert payload["changed"] is True
+
+
+@pytest.mark.parametrize("change", ["app_removed", "app_added"])
+def test_apply_after_the_phone_changed_since_the_preview_writes_nothing(phone, change):
+    preview = _focus_preview()
+    if change == "app_removed":
+        _remove_app(phone.raw, _first_moved_app(preview))
+    else:
+        phone.raw[-1].append({"bundleIdentifier": "com.owner.new-app", "displayIdentifier": "com.owner.new-app"})
+
+    payload = failed(run("apply", stdin=app_payload(preview["operations"], preview["snapshot_id"])))
+
+    assert payload["error"] == (
+        "Not written: the layout on the iPhone changed since the preview. Make a new preview."
+    )
+    assert "backup" not in payload
+    assert phone.writes == []
+    assert phone.backups() == []
+
+
+def test_apply_that_names_an_app_that_is_not_on_the_phone_writes_nothing(phone):
+    # A client that sends no snapshot_id: the check of the new icon state still refuses
+    # the made-up entry for an app that left the phone after the preview.
+    preview = _focus_preview()
+    moved = _first_moved_app(preview)
+    _remove_app(phone.raw, moved)
+
+    payload = failed(run("apply", stdin=app_payload(preview["operations"])))
+
+    assert payload["error"].startswith(f"Not written: the operations name {moved}, which is not on the home screen")
+    assert phone.writes == []
 
 
 def test_apply_that_changes_nothing_still_returns_a_backup(phone):
@@ -678,7 +738,9 @@ def test_preview_apply_and_undo_in_a_process(tmp_path, source, preset):
     preview = _process_ok(_process(tmp_path, "suggest", "--preset", preset), TRANSFORM_PREVIEW)
     assert preview["operations"], f"{preset} has nothing to apply on this phone"
 
-    applied = _process(tmp_path, "apply", stdin=app_payload(preview["operations"]))
+    # The app sends the snapshot_id of the preview. The phone has not changed, so the
+    # apply must accept it.
+    applied = _process(tmp_path, "apply", stdin=app_payload(preview["operations"], preview["snapshot_id"]))
     assert "Aborted" not in applied.stderr
     applied_payload = _process_ok(applied, APPLIED_TRANSFORM)
     assert applied_payload["changed"] is True

@@ -235,6 +235,8 @@ def check_write(layout: HomeScreenLayout, operations: list[LayoutOperation]):
       Store app, any icon of an app with more than one icon, or a dock entry that no
       operation names. See lost_entries().
     - The raw state holds an entry more often than before (see doubled_entries()).
+    - The raw state has an App Store app that was not on the home screen before (see
+      added_apps()).
     - The raw state has more pages than an iPhone shows (analyzer.MAX_PAGES), and
       more than it had before.
     """
@@ -245,6 +247,10 @@ def check_write(layout: HomeScreenLayout, operations: list[LayoutOperation]):
     raw = apply_operations(layout, operations)
     if _signature(parse_layout_state(raw)) != _signature(preview):
         return raw, preview, "the written layout would differ from the preview"
+    added = added_apps(layout.raw, raw)
+    if added:
+        verb = "is" if len(added) == 1 else "are"
+        return raw, preview, f"the operations name {_listed(added)}, which {verb} not on the home screen"
     lost = lost_entries(layout.raw, raw, operations)
     if lost:
         return raw, preview, f"the write would remove {_listed(lost)}, which no operation names"
@@ -395,6 +401,26 @@ def doubled_entries(before, after) -> list[str]:
     after_all = Counter(_entry_key(entry) for entry in after_entries)
     labels = {_entry_key(entry): _entry_label(entry) for entry in after_entries}
     return [labels[key] for key, count in after_all.items() if count > max(before_all.get(key, 0), 1)]
+
+
+def added_apps(before, after) -> list[str]:
+    """The IDs of the App Store apps in ``after`` that ``before`` does not have, in the
+    dock, on the pages or in a folder. An empty list when there is none.
+
+    No operation puts an app on the home screen. An operation that names an app that
+    is not there (it was removed after the preview, or the ID is wrong) would write a
+    made-up entry for it, {"bundleIdentifier": ..., "iconType": "app"}, with none of
+    the fields that the phone gives an app (_raw_extract_apps). The preview shows the
+    same entry, so the other checks do not find it.
+    """
+    def app_ids(state) -> list[str]:
+        return [
+            entry_app_id(entry) for entry in _entries(_raw_dock_and_pages(state))
+            if is_app_store_entry(entry)
+        ]
+
+    known = set(app_ids(before))
+    return list(dict.fromkeys(app_id for app_id in app_ids(after) if app_id not in known))
 
 
 def compact_to_single_page(
