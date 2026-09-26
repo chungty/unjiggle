@@ -1076,11 +1076,23 @@ def _stdout_to_stderr():
 
 class _JsonCommand(click.Command):
     """A json command: its body runs in _stdout_to_stderr(). Its --help still goes to
-    stdout, because click parses the arguments before it calls invoke()."""
+    stdout, because click parses the arguments before it calls invoke().
+
+    An exception that the body does not catch becomes {"error": ...} on stdout (exit
+    code 1), with the traceback on stderr, so a client always gets a JSON document."""
 
     def invoke(self, ctx):
         with _stdout_to_stderr():
-            return super().invoke(ctx)
+            try:
+                return super().invoke(ctx)
+            except click.exceptions.Exit:
+                raise
+            except Exception as e:
+                import traceback
+
+                traceback.print_exc(file=sys.stderr)
+                detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+                _json_err(f"Unexpected error: {detail}")
 
 
 class _JsonGroup(click.Group):
@@ -2108,7 +2120,9 @@ def json_presets():
 
 
 @json.command(name="restore")
-@click.argument("backup_file", type=click.Path(exists=True), required=True)
+# No exists=True: click would print usage text and exit with code 2, and a client needs
+# a JSON document. The body checks the file.
+@click.argument("backup_file", type=click.Path(), required=True)
 def json_restore(backup_file: str):
     """Restore a previously backed up layout and verify it. Asks no question.
 
@@ -2123,6 +2137,9 @@ def json_restore(backup_file: str):
         restore_layout_from_file,
         write_layout,
     )
+
+    if not Path(backup_file).is_file():
+        _json_err(f"Backup not found: {backup_file}")
 
     try:
         lockdown, _device = connect()
@@ -2292,6 +2309,26 @@ def _read_stdin() -> str:
     return data.decode("utf-8-sig") if isinstance(data, bytes) else data
 
 
+def _operation_type_problem(op_data: dict) -> str | None:
+    """What is wrong with the types of one operation of `json apply`, or None. The types
+    are those of the preview's operations (the TransformOperation model of a client):
+    bundle_ids is a list of texts, target_page is a whole number, and folder_name,
+    old_name and gratitude are texts. Each field can also be null or missing."""
+    bundle_ids = op_data.get("bundle_ids")
+    if bundle_ids is not None and not (
+        isinstance(bundle_ids, list) and all(isinstance(b, str) for b in bundle_ids)
+    ):
+        return '"bundle_ids" must be a list of bundle IDs.'
+    target_page = op_data.get("target_page")
+    # A JSON true or false is a bool, and a bool is also an int in Python.
+    if target_page is not None and (not isinstance(target_page, int) or isinstance(target_page, bool)):
+        return '"target_page" must be a whole number.'
+    for key in ("folder_name", "old_name", "gratitude"):
+        if op_data.get(key) is not None and not isinstance(op_data[key], str):
+            return f'"{key}" must be text.'
+    return None
+
+
 def _read_apply_operations() -> tuple[list, str | None]:
     """The input of `json apply` from stdin: {"operations": [...], "snapshot_id": ...}.
     Returns the operations and the snapshot_id (None when the input has none). Stops the
@@ -2316,9 +2353,12 @@ def _read_apply_operations() -> tuple[list, str | None]:
 
     ops = []
     for op_data in operations_data:
+        shown = _json.dumps(op_data, ensure_ascii=False)
         if not isinstance(op_data, dict) or not isinstance(op_data.get("action"), str):
-            shown = _json.dumps(op_data, ensure_ascii=False)
             _json_err(f'Invalid operation: {shown}. Each operation needs an "action".')
+        problem = _operation_type_problem(op_data)
+        if problem:
+            _json_err(f"Invalid operation: {shown}. {problem}")
         ops.append(LayoutOperation(
             action=op_data["action"],
             bundle_ids=op_data.get("bundle_ids") or [],

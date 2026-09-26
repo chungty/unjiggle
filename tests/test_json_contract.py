@@ -594,6 +594,50 @@ def test_apply_with_bad_input_writes_nothing(phone, stdin):
     assert phone.backups() == []
 
 
+@pytest.mark.parametrize("field, value", [
+    ("target_page", "1"),
+    ("target_page", 1.5),
+    ("target_page", True),
+    ("bundle_ids", [["com.owner.app100"]]),
+    ("bundle_ids", "com.owner.app100"),
+    ("folder_name", 5),
+    ("old_name", ["Work"]),
+    ("gratitude", {"text": "thanks"}),
+])
+def test_apply_with_a_wrong_type_writes_nothing(phone, field, value):
+    operation = {"action": "move_to_page", "bundle_ids": ["com.owner.app100"], "target_page": 1, field: value}
+
+    payload = failed(run("apply", stdin=json.dumps({"operations": [operation]})))
+
+    assert payload["error"].startswith("Invalid operation:")
+    assert f'"{field}"' in payload["error"]
+    assert phone.writes == []
+    assert phone.backups() == []
+
+
+@pytest.mark.parametrize("snapshot_id", [5, ["x"], {"a": 1}])
+def test_apply_with_a_snapshot_id_that_is_not_text_writes_nothing(phone, snapshot_id):
+    operations = [{"action": "move_to_page", "bundle_ids": ["com.owner.app100"], "target_page": 1}]
+
+    failed(run("apply", stdin=json.dumps({"operations": operations, "snapshot_id": snapshot_id})))
+
+    assert phone.writes == []
+
+
+def test_an_unexpected_error_is_a_json_document(phone, monkeypatch):
+    def broken(_layout, _ops):
+        raise KeyError("iconLists")
+
+    monkeypatch.setattr(layout_engine, "check_write", broken)
+    operations = [{"action": "move_to_page", "bundle_ids": ["com.owner.app100"], "target_page": 1}]
+
+    payload = failed(run("apply", stdin=app_payload(operations)))
+
+    assert payload["error"] == "Unexpected error: KeyError: 'iconLists'"
+    assert "Traceback" in run("apply", stdin=app_payload(operations)).stderr
+    assert phone.writes == []
+
+
 def test_apply_with_the_phone_not_connected(phone):
     phone.connected = False
     preview_operations = [{"action": "move_to_app_library", "bundle_ids": ["com.owner.app100"]}]
@@ -662,6 +706,15 @@ def test_restore_with_a_write_error(phone):
     payload = failed(run("restore", str(backup)))
 
     assert "USB connection lost" in payload["error"]
+
+
+def test_restore_with_a_missing_file(phone):
+    missing = phone.home / ".unjiggle" / "backups" / "layout-gone.json"
+
+    payload = failed(run("restore", str(missing)))
+
+    assert payload["error"] == f"Backup not found: {missing}"
+    assert phone.writes == []
 
 
 def test_restore_with_a_file_that_is_not_a_backup(phone):
