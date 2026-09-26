@@ -922,19 +922,22 @@ def test_apply_and_undo_pass_when_ios_adds_the_app_at_each_write(phone):
 
 
 def test_apply_names_each_app_that_ios_adds(phone):
-    other = {**UNLISTED_APP, "bundleIdentifier": "com.example.news", "displayIdentifier": "com.example.news",
-             "displayName": "News [Daily]"}
-    phone.keep = lambda state: adds_unlisted_app(adds_unlisted_app(state), other)
+    news = {**UNLISTED_APP, "bundleIdentifier": "com.example.news", "displayIdentifier": "com.example.news",
+            "displayName": "News [Daily]"}
+    deals = {**UNLISTED_APP, "bundleIdentifier": "com.example.deals", "displayIdentifier": "com.example.deals",
+             "displayName": "Deals :fire:"}
+    phone.keep = lambda state: adds_unlisted_app(adds_unlisted_app(adds_unlisted_app(state), news), deals)
 
     result = _write(phone, "apply")
 
     payload = ok(result, APPLIED_TRANSFORM)
     assert [(app["bundle_id"], app["name"]) for app in payload["ios_added"]] == [
-        (AMAZON, "Amazon"), ("com.example.news", "News [Daily]"),
+        (AMAZON, "Amazon"), ("com.example.news", "News [Daily]"), ("com.example.deals", "Deals :fire:"),
     ]
-    # The names come from the phone, and they are not read as Rich markup.
-    assert "iOS added 2 apps that the preview does not have: Amazon (page " in result.stderr
+    # The names come from the phone. They are not read as Rich markup or emoji codes.
+    assert "iOS added 3 apps that the preview does not have: Amazon (page " in result.stderr
     assert "News [Daily] (page " in result.stderr
+    assert "Deals :fire: (page " in result.stderr
 
 
 def test_apply_with_no_app_that_ios_adds_has_no_ios_added_key(phone):
@@ -956,6 +959,34 @@ def test_the_check_fails_when_ios_adds_a_second_icon_of_an_app(phone, command):
     assert payload["error"].startswith(WRITE_CHECK_FAILED[command])
     assert "ios_added" not in payload
     assert len(phone.writes) == 1
+
+
+@pytest.mark.parametrize("command", ["apply", "restore"])
+def test_the_check_fails_when_the_phone_ignores_the_write(phone, command):
+    # The owner put an app on the home screen after the backup (or after the preview),
+    # and SpringBoard ignores the write. The phone then differs from the backup only by
+    # a loose app in the first free slot, as an app that iOS adds. But the phone reads
+    # back the layout that it had before the write, so the write had no effect.
+    backup = phone.home / "layout-before.json"
+    backup.write_text(json.dumps(phone.raw, default=str))
+    phone.raw = put_in_first_free_slot(phone.raw, {
+        "bundleIdentifier": "com.example.userapp", "displayIdentifier": "com.example.userapp", "displayName": "UserApp",
+    })
+    unchanged = copy.deepcopy(phone.raw)
+    phone.keep = lambda _state: copy.deepcopy(unchanged)
+
+    if command == "apply":
+        preview = _focus_preview()
+        result = run("apply", stdin=app_payload(preview["operations"], preview["snapshot_id"]))
+    else:
+        result = run("restore", str(backup))
+
+    payload = failed(result)
+    assert payload["error"].startswith(WRITE_CHECK_FAILED[command])
+    assert "ios_added" not in payload
+    assert "iOS added" not in result.stderr
+    assert len(phone.writes) == 1
+    assert phone.raw == unchanged
 
 
 def test_apply_fails_when_the_phone_puts_back_an_app_that_an_operation_took_off(phone):
@@ -1031,7 +1062,13 @@ def _in_a_folder(state):
         "displayName": "New", "listType": "folder", "iconLists": [[copy.deepcopy(UNLISTED_APP)]]}),
     lambda state: _in_dock(copy.deepcopy(state)),
     lambda state: _in_a_folder(copy.deepcopy(state)),
-], ids=["widget", "pinned-icon", "folder", "app-in-the-dock", "app-in-a-folder"])
+    # The parser shows these two entries as apps, because they have a bundleIdentifier.
+    lambda state: put_in_first_free_slot(state, {
+        "iconType": "custom", "bundleIdentifier": "com.x.thing", "displayIdentifier": "T1"}),
+    lambda state: put_in_first_free_slot(state, {
+        **UNLISTED_APP, "displayIdentifier": "UUID-NEW", "iconType": "app", "iconLists": []}),
+], ids=["widget", "pinned-icon", "folder", "app-in-the-dock", "app-in-a-folder", "custom-entry-with-a-bundle-id",
+        "second-icon-shape"])
 def test_the_check_fails_when_the_phone_adds_an_entry_that_is_not_a_loose_app(phone, command, keep):
     phone.keep = keep
 

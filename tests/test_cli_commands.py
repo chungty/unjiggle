@@ -621,3 +621,66 @@ def test_suggest_accepts_only_apps_that_ios_adds_at_the_write(monkeypatch, tmp_p
         assert "Write verification failed." in result.output
         assert "iOS added" not in result.output
         assert "Done!" not in result.output
+
+
+@pytest.mark.parametrize("phone_change", ["ios_adds_an_app", "ios_adds_an_app_and_drops_one"])
+def test_suggest_with_the_round_trip_accepts_only_apps_that_ios_adds(monkeypatch, tmp_path, phone_change):
+    """The default flow of `unjiggle suggest`: the safety check with the round trip (a
+    write of the unchanged layout), then the write of the changes. iOS adds an app at
+    each write. The round trip and the read-back check accept the app and name it. With
+    another difference, the round trip fails, and the text does not say that nothing
+    changed, because the round trip wrote to the phone."""
+    import click
+
+    from tests.fake_springboard import UNLISTED_APP, adds_unlisted_app, page_of
+    from tests.test_json_contract import FakePhone
+    from tests.test_preservation import owner_shaped_phone
+    from unjiggle import analyzer, cli, device, itunes, safety, screentime
+
+    layout, metadata = owner_shaped_phone()
+    phone = FakePhone(layout.raw, metadata, tmp_path)
+    amazon = UNLISTED_APP["bundleIdentifier"]
+
+    def keep(state):
+        state = adds_unlisted_app(state)
+        if phone_change == "ios_adds_an_app_and_drops_one":
+            page = state[-1]
+            del page[max(i for i, entry in enumerate(page) if device.is_app_store_entry(entry)
+                         and device.entry_app_id(entry) != amazon)]
+        return state
+
+    phone.keep = keep
+    operations = cli._PRESET_BUILDERS["focus"](layout, metadata)
+    monkeypatch.setattr(device, "connect", phone.connect)
+    monkeypatch.setattr(device, "read_layout", phone.read_layout)
+    monkeypatch.setattr(device, "write_layout", phone.write_layout)
+    monkeypatch.setattr(itunes, "enrich_layout", lambda layout, progress_callback=None: metadata)
+    monkeypatch.setattr(screentime, "get_usage", lambda *args, **kwargs: {})
+    monkeypatch.setattr(safety, "BACKUP_DIR", tmp_path / "backups")
+    # No AI model: the analysis gives the operations of the focus preset.
+    monkeypatch.setattr(analyzer, "analyze", lambda *args, **kwargs: analyzer.AnalysisResult(
+        observations=[analyzer.Observation("organization", "Focus", "Work apps first.", operations)],
+        personality="", archetype="Test",
+    ))
+    # The owner accepts each default, also the round trip.
+    monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: True)
+
+    result = CliRunner().invoke(cli.main, ["suggest", "--api-key", "sk-ant-test", "--apply-all"])
+
+    assert result.exit_code == 0, result.output
+    output = " ".join(result.output.split())
+    if phone_change == "ios_adds_an_app":
+        assert len(phone.writes) == 2
+        assert "Round-trip verified. All icons are in their positions." in output
+        assert "iOS added an app that the layout before the write does not have: Amazon (page " in output
+        page = page_of(phone.raw, amazon)
+        assert f"iOS added an app that the preview does not have: Amazon (page {page})." in output
+        assert "Done!" in output
+    else:
+        assert len(phone.writes) == 1
+        assert "Round-trip FAILED." in output
+        assert "Safety check failed. Unjiggle did not apply these changes." in output
+        assert "To go back to the layout before the safety check: unjiggle restore " in output
+        assert "No changes made" not in output
+        assert "iOS added" not in output
+        assert "Done!" not in output

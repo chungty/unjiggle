@@ -427,6 +427,8 @@ def ios_added_apps(
     read_back: HomeScreenLayout,
     expected: HomeScreenLayout,
     before: HomeScreenLayout | None = None,
+    *,
+    apps_of_before: bool = True,
 ) -> list[dict] | None:
     """The apps that iOS added to the home screen at a write, when they are the only
     difference between the layout that the phone reads back and the expected layout.
@@ -438,12 +440,13 @@ def ios_added_apps(
     slot. The write is correct, but the phone reads back one more app. An entry of
     ``read_back`` is such an app only when all of these are true:
 
-    - It is an App Store app (it has a bundle ID). A widget, a folder and a pinned icon
-      are not.
+    - It is only the icon of an App Store app (AppItem.plain_entry, see
+      device.is_plain_app_entry). A widget, a folder, a pinned icon, a second icon of
+      an app and an entry of another type (for example iconType "custom") are not.
     - It is loose on a page. An app in the dock or in a folder is not.
-    - Its app is not on the home screen of ``expected``, and not on the home screen of
-      ``before`` (the layout before the write), when there is one: not in the dock, not
-      on a page and not in a folder. So an app that an operation took off the home
+    - Its app is not on the home screen of ``expected``: not in the dock, not on a page
+      and not in a folder. With ``apps_of_before`` (the default), its app is also not
+      on the home screen of ``before``. So an app that an operation took off the home
       screen, and a second icon of an app, are not such apps.
     - It is the only icon of its app in ``read_back``.
 
@@ -454,11 +457,26 @@ def ios_added_apps(
     In a legacy state, the App Library list (``ignored``) is compared without the added
     apps, because iOS takes an app out of that list when it adds the app.
 
+    ``before`` is the layout on the phone just before the write, when the caller has
+    it. When ``read_back`` has the layout of ``before`` and not the layout of
+    ``expected``, the write had no effect, and the result is None. For example, the
+    owner put an app on the home screen after a backup, and SpringBoard ignored the
+    write of that backup: the extra app is not an app that iOS added. `json restore`
+    gives ``apps_of_before=False``: it compares the apps with the backup only, because
+    iOS can have added the same app at the apply that the restore undoes.
+
     Returns [{"bundle_id", "name", "page"}], with the page number in ``read_back`` from
     1. An empty list when ``read_back`` has the layout of ``expected``.
     """
+    read_back_signature = _signature(read_back)
+    if (
+        before is not None
+        and read_back_signature == _signature(before)
+        and read_back_signature != _signature(expected)
+    ):
+        return None
     on_home_screen = set(expected.all_bundle_ids)
-    if before is not None:
+    if before is not None and apps_of_before:
         on_home_screen |= set(before.all_bundle_ids)
     icons = Counter(read_back.all_bundle_ids)
 
@@ -470,6 +488,7 @@ def ios_added_apps(
             app = item.app
             if (
                 app is not None
+                and app.plain_entry
                 and not app.pinned
                 and app.bundle_id not in on_home_screen
                 and icons[app.bundle_id] == 1

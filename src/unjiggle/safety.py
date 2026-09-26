@@ -60,12 +60,30 @@ def verified_backup(lockdown, layout: HomeScreenLayout, out: Console | None = No
     return path
 
 
+def print_ios_added(added: list[dict], reference: str, out: Console | None = None) -> None:
+    """Tell the owner about the apps that iOS added at a write
+    (layout_engine.ios_added_apps), on one line, so a client can show it. ``out`` gets
+    the text (default: stdout). The names come from the phone, so Rich does not read
+    them as markup or as emoji codes (such as ":fire:")."""
+    from unjiggle.layout_engine import describe_ios_added
+
+    (out or console).print(
+        f"  {describe_ios_added(added, reference)}",
+        markup=False, emoji=False, highlight=False, soft_wrap=True,
+    )
+
+
 def test_restore_roundtrip(lockdown) -> bool:
     """Test that backup+restore works by doing a no-op round-trip.
 
     Reads the current layout, writes it back unchanged, reads again,
     and verifies the state is identical. This proves the write path
     works without changing anything.
+
+    It also passes when the only difference is apps that iOS added to the home screen
+    at the write (layout_engine.ios_added_apps, with the layout before the write as the
+    expected layout). It names them, and it does not move them. All other differences
+    fail, as before.
 
     Returns True if the round-trip succeeds.
     """
@@ -85,10 +103,18 @@ def test_restore_roundtrip(lockdown) -> bool:
     if before_json == after_json:
         console.print("  [green]Round-trip verified.[/green] Read → Write → Read produced identical state.")
         return True
-    else:
-        console.print("  [red]Round-trip FAILED.[/red] Layout changed after no-op write.")
-        console.print("  [red]DO NOT proceed with changes. Something is wrong.[/red]")
-        return False
+    from unjiggle.layout_engine import ios_added_apps
+
+    # An empty list means the same layout with other values of the icon state: that
+    # still fails, as before.
+    ios_added = ios_added_apps(after, before, before)
+    if ios_added:
+        console.print("  [green]Round-trip verified.[/green] All icons are in their positions.")
+        print_ios_added(ios_added, "layout before the write")
+        return True
+    console.print("  [red]Round-trip FAILED.[/red] Layout changed after no-op write.")
+    console.print("  [red]DO NOT proceed with changes. Something is wrong.[/red]")
+    return False
 
 
 def restore_from_backup(lockdown, backup_path: Path) -> bool:
@@ -117,7 +143,8 @@ def restore_from_backup(lockdown, backup_path: Path) -> bool:
 
     console.print("  [dim]Backing up the current layout first...[/dim]")
     try:
-        undo_path = verified_backup(lockdown, read_layout(lockdown))
+        current = read_layout(lockdown)
+        undo_path = verified_backup(lockdown, current)
     except Exception as e:
         console.print(f"  [red]Backup failed: {e}. Nothing was restored.[/red]")
         return False
@@ -135,13 +162,14 @@ def restore_from_backup(lockdown, backup_path: Path) -> bool:
         console.print("  [green]Restore verified.[/green] Your phone is back to the backed-up state.")
         return True
     # iOS can add an app from the App Library to the home screen at the write. As in
-    # `unjiggle json restore`, only the backup tells which apps were on the home screen.
-    from unjiggle.layout_engine import describe_ios_added, ios_added_apps
+    # `unjiggle json restore`, only the backup tells which apps were on the home screen,
+    # and the layout before the restore only tells when the write had no effect.
+    from unjiggle.layout_engine import ios_added_apps
 
-    ios_added = ios_added_apps(restored, expected)
+    ios_added = ios_added_apps(restored, expected, current, apps_of_before=False)
     if ios_added:
-        console.print("  [green]Restore verified.[/green] Your phone is back to the backed-up state.")
-        console.print(f"  {describe_ios_added(ios_added, 'backup')}", markup=False, highlight=False, soft_wrap=True)
+        console.print("  [green]Restore verified.[/green] All icons of the backup are in their positions.")
+        print_ios_added(ios_added, "backup")
         return True
     console.print("  [yellow]Restore applied but verification shows minor differences.[/yellow]")
     console.print("  [yellow]This is usually cosmetic (SpringBoard may normalize some values).[/yellow]")

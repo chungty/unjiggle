@@ -1164,7 +1164,7 @@ class TestIosAddedApps:
         ]
 
     @staticmethod
-    def _check(read_back, expected, before=None):
+    def _check(read_back, expected, before=None, **kwargs):
         from unjiggle.device import parse_layout_state
         from unjiggle.layout_engine import ios_added_apps
 
@@ -1172,6 +1172,7 @@ class TestIosAddedApps:
             parse_layout_state(read_back),
             parse_layout_state(expected),
             None if before is None else parse_layout_state(before),
+            **kwargs,
         )
 
     def test_the_same_layout_has_no_added_app(self):
@@ -1252,12 +1253,56 @@ class TestIosAddedApps:
         {"iconType": "widget", "containerBundleIdentifier": "com.w.new", "gridSize": "small"},
         {"displayIdentifier": "com.apple.webapp.new", "displayName": "Web"},
         {"displayName": "New", "listType": "folder", "iconLists": [[AMAZON]]},
-    ], ids=["widget", "pinned-icon", "folder"])
+        # The parser shows these entries as apps, because they have a bundleIdentifier.
+        {"iconType": "custom", "bundleIdentifier": "com.x.thing", "displayIdentifier": "T1"},
+        {"iconType": "app", "bundleIdentifier": "com.x.new", "displayIdentifier": "UUID-1", "iconLists": []},
+        {"bundleIdentifier": "com.x.new", "displayIdentifier": "com.x.new", "gridSize": "small"},
+        {"bundleIdentifier": "com.x.new", "displayIdentifier": "com.x.new", "containerBundleIdentifier": "com.x"},
+        {"bundleIdentifier": "com.x.new", "displayIdentifier": "com.x.new", "iconLists": [[AMAZON]]},
+    ], ids=["widget", "pinned-icon", "folder", "custom-entry-with-a-bundle-id", "second-icon-shape",
+            "grid-size", "container-bundle-id", "folder-pages"])
     def test_an_entry_that_is_not_an_app_store_app_is_not_added(self, entry):
         read_back = self._state()
         read_back[2].append(entry)
 
         assert self._check(read_back, self._state()) is None
+
+    @pytest.mark.parametrize("entry", [
+        {"bundleIdentifier": "com.x.new"},
+        {"bundleIdentifier": "com.x.new", "displayIdentifier": "com.x.new", "displayName": "New",
+         "bundleVersion": "1.0", "iconModDate": "2026-09-17 16:02:26.858528"},
+        {"iconType": "app", "bundleIdentifier": "com.x.new", "displayIdentifier": "com.x.new", "iconLists": []},
+    ], ids=["bundle-id-only", "as-on-the-phone", "icon-type-app"])
+    def test_the_plain_entry_of_an_app_is_added(self, entry):
+        read_back = self._state()
+        read_back[2].append(entry)
+
+        assert [app["bundle_id"] for app in self._check(read_back, self._state())] == ["com.x.new"]
+
+    def test_a_write_with_no_effect_is_not_accepted(self):
+        # The owner put an app on the home screen after the backup, and SpringBoard
+        # ignored the write of the backup. The phone reads back the layout from before
+        # the write, and the extra app looks like an app that iOS added.
+        before = self._state()
+        before[2].append(self.AMAZON)
+
+        assert self._check(before, self._state()) == [
+            {"bundle_id": "com.amazon.Amazon", "name": "Amazon", "page": 2},
+        ]
+        assert self._check(before, self._state(), before=before, apps_of_before=False) is None
+        assert self._check(before, self._state(), before=before) is None
+
+    def test_without_the_apps_of_before_an_app_that_ios_added_before_is_added_again(self):
+        # The undo of an apply: iOS added the app at the apply, and it adds the app again
+        # when the backup (which does not have it) comes back.
+        before = [self._state()[0], list(reversed(self._state()[1])), [*self._state()[2], self.AMAZON]]
+        read_back = self._state()
+        read_back[2].append(self.AMAZON)
+
+        assert self._check(read_back, self._state(), before=before) is None
+        assert self._check(read_back, self._state(), before=before, apps_of_before=False) == [
+            {"bundle_id": "com.amazon.Amazon", "name": "Amazon", "page": 2},
+        ]
 
     @pytest.mark.parametrize("change", ["dropped", "moved", "reordered"])
     def test_another_difference_still_fails(self, change):

@@ -39,6 +39,10 @@ class AppItem:
     so a pinned icon never leaves the home screen: no operation moves or removes it,
     and a rebuild of the pages keeps it (see analyzer.stays_in_rebuild). An app with
     more than one icon is fixed in the same way (HomeScreenLayout.fixed_ids()).
+
+    ``plain_entry`` is True when the parser read the icon from an entry that is only
+    the icon of an App Store app (device.is_plain_app_entry). The read-back check uses
+    it (layout_engine.ios_added_apps). It is not part of the comparison of two items.
     """
 
     bundle_id: str
@@ -49,6 +53,7 @@ class AppItem:
     last_updated: str | None = None
     description: str | None = None
     pinned: bool = False
+    plain_entry: bool = field(default=False, compare=False, repr=False)
 
 
 @dataclass

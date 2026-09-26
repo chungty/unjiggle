@@ -602,7 +602,13 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
 
         safe, backup_path = pre_write_safety_check(lockdown, layout)
         if not safe:
-            console.print("  [red]Safety check failed. No changes made.[/red]\n")
+            if backup_path is None:
+                console.print("  [red]Safety check failed. No changes made.[/red]\n")
+            else:
+                # The round trip wrote the layout to the phone, and the phone read back
+                # another layout.
+                console.print("  [red]Safety check failed.[/red] Unjiggle did not apply these changes.")
+                console.print(f"  To go back to the layout before the safety check: [bold]unjiggle restore {backup_path}[/bold]\n")
             return
 
         # Write the checked raw state to the device
@@ -1618,7 +1624,7 @@ def _layout_signature(layout) -> str:
     )
 
 
-def _read_back_check(read_back, expected, before=None) -> list[dict] | None:
+def _read_back_check(read_back, expected, before=None, *, apps_of_before: bool = True) -> list[dict] | None:
     """The read-back check after a write (json apply, json restore, `unjiggle suggest`).
 
     Returns [] when the phone reads back as ``expected`` (the same _layout_signature).
@@ -1631,15 +1637,14 @@ def _read_back_check(read_back, expected, before=None) -> list[dict] | None:
     if _layout_signature(read_back) == _layout_signature(expected):
         return []
     # An empty list here would mean no difference, which the line above did not find.
-    return layout_engine.ios_added_apps(read_back, expected, before) or None
+    return layout_engine.ios_added_apps(read_back, expected, before, apps_of_before=apps_of_before) or None
 
 
 def _print_ios_added(added: list[dict], reference: str, out: Console) -> None:
-    """Tell the owner about the apps that iOS added at the write, on one line (a client
-    can show it). The names come from the phone, so they are not read as Rich markup."""
-    from unjiggle import layout_engine
+    """Tell the owner about the apps that iOS added at the write (safety.print_ios_added)."""
+    from unjiggle.safety import print_ios_added
 
-    out.print(f"  {layout_engine.describe_ios_added(added, reference)}", markup=False, highlight=False, soft_wrap=True)
+    print_ios_added(added, reference, out)
 
 
 def _snapshot_metadata(layout) -> dict:
@@ -2179,9 +2184,11 @@ def json_restore(backup_file: str):
        difference is apps that iOS added to the home screen at the write
        (layout_engine.ios_added_apps). The output names them in "ios_added", and the
        command does not move them. Only the backup tells which apps were on the home
-       screen: the layout before the restore is not used. The restore often undoes an
-       apply, and iOS can have added the same app at that apply. The backup does not
-       have the app, so iOS adds it again.
+       screen: the apps of the layout before the restore are not used. The restore
+       often undoes an apply, and iOS can have added the same app at that apply. The
+       backup does not have the app, so iOS adds it again. But when the phone reads
+       back the layout that it had before the restore, the write had no effect, and the
+       check fails.
 
     A backup file does not record the device, so this command cannot refuse a backup
     of a different iPhone.
@@ -2210,7 +2217,8 @@ def json_restore(backup_file: str):
     if expected.page_count == 0 or expected.total_apps == 0:
         _json_err(f"Not restored: the backup {backup_file} has no apps on the home screen. No changes made.")
 
-    undo_backup = _json_verified_backup(lockdown, read_layout(lockdown))
+    current = read_layout(lockdown)
+    undo_backup = _json_verified_backup(lockdown, current)
     undo = f"To undo, restore {undo_backup}."
 
     try:
@@ -2223,8 +2231,9 @@ def json_restore(backup_file: str):
     restored_json = _json.dumps(verify.raw, default=str, sort_keys=True)
     ios_added = []
     if expected_json != restored_json:
-        # No `before` layout: see step 3 in the docstring.
-        ios_added = _read_back_check(verify, expected)
+        # The apps of the layout before the restore are not used: see step 3 in the
+        # docstring. That layout only tells when the write had no effect.
+        ios_added = _read_back_check(verify, expected, before=current, apps_of_before=False)
         if ios_added is None:
             _json_err(
                 f"Restore verification failed: the layout on the iPhone does not match the backup. {undo}",
