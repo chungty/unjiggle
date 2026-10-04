@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-labelledby="title desc">
+  <title id="title">Unjiggle — see your home screen clearly</title>
+  <desc id="desc">Unjiggle CLI illustration with a sample home screen score and swipe estimate</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1">
+      <stop stop-color="#101B30"/>
+      <stop offset="1" stop-color="#172C3D"/>
+    </linearGradient>
+    <linearGradient id="panel" x2="1" y2="1">
+      <stop stop-color="#244453"/>
+      <stop offset="1" stop-color="#1A3343"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#background)"/>
+  <circle cx="1120" cy="70" r="320" fill="#4FD2BD" opacity=".06"/>
+  <circle cx="1100" cy="620" r="270" fill="#4FD2BD" opacity=".04"/>
+  <rect x="76" y="73" width="48" height="48" rx="14" fill="#55DBC3"/>
+  <path d="M89 98l10 9 17-22" fill="none" stroke="#102D39" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="140" y="107" font-family="Arial, sans-serif" font-size="27" font-weight="700" fill="#F1F8F6">unjiggle</text>
+  <text x="76" y="245" font-family="Arial, sans-serif" font-size="60" font-weight="700" fill="#F7FCFA">See your home</text>
+  <text x="76" y="317" font-family="Arial, sans-serif" font-size="60" font-weight="700" fill="#F7FCFA">screen clearly</text>
+  <text x="78" y="382" font-family="Arial, sans-serif" font-size="25" fill="#B6CFD1">Scan, score, and decide what moves</text>
+  <rect x="76" y="445" width="325" height="62" rx="13" fill="#55DBC3"/>
+  <text x="100" y="485" font-family="monospace" font-size="25" font-weight="700" fill="#12323D">$ unjiggle demo</text>
+  <text x="78" y="563" font-family="Arial, sans-serif" font-size="18" fill="#91ADB5">Open-source macOS CLI  ·  No phone needed for demo</text>
+  <rect x="735" y="81" width="473" height="489" rx="26" fill="#0B1C2A" stroke="#47717A" stroke-width="2"/>
+  <rect x="735" y="81" width="473" height="62" rx="26" fill="#203C4A"/>
+  <rect x="735" y="117" width="473" height="26" fill="#203C4A"/>
+  <circle cx="769" cy="112" r="7" fill="#FF8A80"/>
+  <circle cx="794" cy="112" r="7" fill="#FFD77A"/>
+  <circle cx="819" cy="112" r="7" fill="#55DBC3"/>
+  <text x="857" y="119" font-family="monospace" font-size="16" fill="#D5E7E8">unjiggle — sample layout</text>
+  <text x="770" y="193" font-family="monospace" font-size="19" fill="#55DBC3">&gt; unjiggle demo</text>
+  <rect x="770" y="226" width="403" height="124" rx="15" fill="url(#panel)"/>
+  <text x="795" y="267" font-family="Arial, sans-serif" font-size="20" fill="#C4DBDC">Sample home screen</text>
+  <text x="794" y="324" font-family="Arial, sans-serif" font-size="49" font-weight="700" fill="#F7FCFA">Score + insights</text>
+  <text x="773" y="393" font-family="monospace" font-size="18" fill="#D1E5E3">✓  Pages and app count</text>
+  <text x="773" y="435" font-family="monospace" font-size="18" fill="#D1E5E3">✓  Estimated swipe tax</text>
+  <text x="773" y="477" font-family="monospace" font-size="18" fill="#D1E5E3">✓  Nothing changed on phone</text>
+  <rect x="769" y="515" width="246" height="32" rx="9" fill="#294F53"/>
+  <text x="785" y="537" font-family="Arial, sans-serif" font-size="16" fill="#86E9D4">SAMPLE DATA · NO DEVICE</text>
+</svg>

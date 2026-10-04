@@ -15,5 +15,6 @@ build/
 .ruff_cache/
 .playwright-mcp/
 
-# Strategy docs belong in unjiggle-private, not this public repo
-docs/
+# Only the public assistant guide belongs under docs/
+docs/*
+!docs/AI-ASSISTANTS.md

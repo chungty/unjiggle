@@ -1,36 +1,48 @@
 # Unjiggle
 
-Public engine and CLI for reading, diagnosing, and safely transforming iPhone home screen layouts over USB.
+See what is taking up space on your iPhone home screen before you move a single icon. Unjiggle is an open-source macOS CLI that reads your layout over USB, scores it, and shows you where the extra swipes come from. You decide whether to change anything.
 
-This repository is the open-source core:
-- device connection and layout read/write
-- scoring, diagnostics, and shareable reports
-- safe transforms, backups, and restore
-- a machine-readable JSON API used by separate clients
+**No phone handy?** Try the sample layout first. It needs no device, API key, or AI service.
 
-It is not the private product repo. Named growth mechanics, lifecycle funnels, streaks, and branded campaign wrappers do not belong here.
+<a id="quick-start"></a>
 
-Boundary details live in [ARCHITECTURE.md](ARCHITECTURE.md). Contribution rules live in [CONTRIBUTING.md](CONTRIBUTING.md).
+## Try the demo
+
+On macOS with Python 3.10+:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install unjiggle
+unjiggle demo
+```
+
+You will see a sample home screen score and diagnostics, including estimated wasted swipes. This does not connect to a phone or change a layout.
 
 <p align="center">
   <img src="assets/cli-demo.png" width="600" alt="Unjiggle CLI demo">
 </p>
 
-## Quick Start
+## Scan your own layout
+
+Only after you choose to share your layout with the CLI: connect your iPhone by USB, tap **Trust This Computer**, and run:
 
 ```bash
-pip install unjiggle
+unjiggle scan
+unjiggle score
 ```
 
-Connect your iPhone via USB, then:
+These commands read your layout; they do not rearrange icons. `scan` shows pages and apps; `score` gives an organization score. App metadata lookups may use the network. Your phone may contain personal app and folder names, so check what you share with an assistant or in a report.
 
-```bash
-unjiggle go
-```
+`unjiggle go` is a separate, opt-in report flow: it can send layout data to an AI provider if an API key is present in your environment, writes reports locally, opens a share card, and may ask about analytics. Do not use it as an unannounced read-only scan.
 
-That scans your phone, scores the layout, runs diagnostics, and generates a report.
+Want an assistant to walk you through the same steps? Start with the [Claude, Codex, and Cursor guide](docs/AI-ASSISTANTS.md). For the website, see [unjiggle.com](https://unjiggle.com/?source=github-readme).
 
-## What This Repo Owns
+## A CLI walkthrough from Leo
+
+[Leo (@runes_leo)](https://x.com/runes_leo/status/2076675326814675289) reports using the CLI to organize 304 apps across three pages; see [Leo's step-by-step tutorial](https://x.com/runes_leo/status/2076969856319320502). This is Leo's reported result, not a guaranteed outcome for another phone. iOS may reflow icons after a layout write, so review the result on your device. No images from those posts are reproduced here.
+
+## Commands and API
 
 ### Diagnostics
 
@@ -50,15 +62,15 @@ That scans your phone, scores the layout, runs diagnostics, and generates a repo
 
 | Command | What it does |
 |---------|-------------|
-| `unjiggle suggest` | Preview changes step by step |
+| `unjiggle suggest` | Interactive suggestions; can call AI and write changes after confirmation |
 | `unjiggle suggest --apply-all` | Apply the full suggested transform |
 | `unjiggle backup` | Save the current layout before changes |
 | `unjiggle restore` | Restore a saved backup |
-| `unjiggle safety-test` | Verify the write path without changing layout |
+| `unjiggle safety-test` | Write the unchanged layout back to test the write path; requires separate consent |
 
 ### Machine API
 
-`unjiggle json ...` exposes structured output for external clients. That JSON API is public and stable enough to power separate frontends, including the private native Mac app.
+`unjiggle json ...` exposes structured output for external clients.
 
 Useful preset endpoints:
 - `unjiggle json suggest --preset focus|relax|minimal|beautiful` for one preset preview
@@ -79,7 +91,7 @@ On iOS 26, iOS can add an installed app from the App Library to the home screen 
 - macOS
 - iPhone connected via USB with "Trust This Computer" accepted
 - Python 3.10+
-- Optional, for AI features: `pip install 'unjiggle[ai]'` and an API key. With `ANTHROPIC_API_KEY`, layout analysis and the AI Stylist use Claude Opus 5.5 (`claude-opus-5-5`), and the Personality Mirror and the App Obituary use Claude Sonnet 5 (`claude-sonnet-5`). With `OPENAI_API_KEY`, every AI feature uses `gpt-4.1`. `--model` overrides the default, and a `claude-*` or `gpt-*` model name also selects the provider. Claude models need structured outputs: Claude Haiku 4.5, Sonnet 4.5, Opus 4.5 or newer.
+- Optional, for AI features: `pip install 'unjiggle[ai]'` and an API key. With `ANTHROPIC_API_KEY`, layout analysis and the AI Stylist use Claude Opus 5.5 (`claude-opus-5-5`), and the Personality Mirror and the App Obituary use Claude Sonnet 5 (`claude-sonnet-5`). With `OPENAI_API_KEY`, every AI feature uses `gpt-4.1`. `--model` overrides the default, and a `claude-*` or `gpt-*` model name also selects the provider. Claude models need structured outputs: Claude Haiku 4.5, Sonnet 4.5, Opus 4.5 or newer. Never give an assistant your key in chat.
 
 ## How It Works
 
@@ -89,21 +101,12 @@ On supported macOS versions it can also read Screen Time data from `knowledgeC.d
 
 Share cards render to PNG via headless Chrome and copy cleanly to the macOS clipboard.
 
-## Public vs. Private
+<a id="what-this-repo-owns"></a>
+<a id="public-vs-private"></a>
 
-The public repo owns generic primitives and diagnostics:
-- layout read/write
-- score and analysis engines
-- shareable single-snapshot diagnostics
-- generic transforms such as a one-page preset
-- backup, restore, and JSON contracts
+## Contributing
 
-The private product owns conversion mechanics and branded wrappers:
-- named campaigns and challenges
-- streaks, milestones, and give-up loops
-- growth experiments, funnels, and product marketing strategy
-
-If a feature blurs that line, update [ARCHITECTURE.md](ARCHITECTURE.md) before shipping it.
+This repository contains the CLI, layout engine, diagnostics, and JSON API. See [ARCHITECTURE.md](ARCHITECTURE.md) for its scope and [CONTRIBUTING.md](CONTRIBUTING.md) before changing commands or contracts.
 
 ## Project Links
 
