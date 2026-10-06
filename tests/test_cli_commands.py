@@ -624,12 +624,8 @@ def test_suggest_accepts_only_apps_that_ios_adds_at_the_write(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("phone_change", ["ios_adds_an_app", "ios_adds_an_app_and_drops_one"])
-def test_suggest_with_the_round_trip_accepts_only_apps_that_ios_adds(monkeypatch, tmp_path, phone_change):
-    """The default flow of `unjiggle suggest`: the safety check with the round trip (a
-    write of the unchanged layout), then the write of the changes. iOS adds an app at
-    each write. The round trip and the read-back check accept the app and name it. With
-    another difference, the round trip fails, and the text does not say that nothing
-    changed, because the round trip wrote to the phone."""
+def test_suggest_backs_up_without_an_extra_write(monkeypatch, tmp_path, phone_change):
+    """The backup step never writes; only the requested transform reaches the phone."""
     import click
 
     from tests.fake_springboard import UNLISTED_APP, adds_unlisted_app, page_of
@@ -662,25 +658,21 @@ def test_suggest_with_the_round_trip_accepts_only_apps_that_ios_adds(monkeypatch
         observations=[analyzer.Observation("organization", "Focus", "Work apps first.", operations)],
         personality="", archetype="Test",
     ))
-    # The owner accepts each default, also the round trip.
     monkeypatch.setattr(click, "confirm", lambda *args, **kwargs: True)
 
     result = CliRunner().invoke(cli.main, ["suggest", "--api-key", "sk-ant-test", "--apply-all"])
 
     assert result.exit_code == 0, result.output
     output = " ".join(result.output.split())
+    assert len(phone.writes) == 1
+    assert "Round-trip" not in output
+    assert "No test write was performed" in output
     if phone_change == "ios_adds_an_app":
-        assert len(phone.writes) == 2
-        assert "Round-trip verified. All icons are in their positions." in output
-        assert "iOS added an app that the layout before the write does not have: Amazon (page " in output
         page = page_of(phone.raw, amazon)
         assert f"iOS added an app that the preview does not have: Amazon (page {page})." in output
         assert "Done!" in output
     else:
-        assert len(phone.writes) == 1
-        assert "Round-trip FAILED." in output
-        assert "Safety check failed. Unjiggle did not apply these changes." in output
-        assert "To go back to the layout before the safety check: unjiggle restore " in output
+        assert "Write verification failed." in output
         assert "No changes made" not in output
         assert "iOS added" not in output
         assert "Done!" not in output

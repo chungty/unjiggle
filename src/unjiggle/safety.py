@@ -2,9 +2,9 @@
 
 Trust architecture:
 1. Backup is visible and verified (read-back confirms integrity)
-2. Restore can be tested before any real changes
+2. A write test requires explicit consent and can change the phone
 3. Every write is preceded by a verified backup
-4. Clear undo path that doesn't require technical knowledge
+4. Restore failures are reported without an automatic retry
 """
 
 from __future__ import annotations
@@ -31,17 +31,20 @@ def verified_backup(lockdown, layout: HomeScreenLayout, out: Console | None = No
     from unjiggle.device import read_layout
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = BACKUP_DIR / f"layout-{timestamp}.json"
-    # Two backups in the same second (an apply and then its undo) get two files.
-    number = 2
-    while path.exists():
-        path = BACKUP_DIR / f"layout-{timestamp}-{number}.json"
-        number += 1
-    path.parent.mkdir(parents=True, exist_ok=True)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
     # Save (default=str handles datetime objects from pymobiledevice3)
     raw_json = json.dumps(layout.raw, indent=2, default=str)
-    path.write_text(raw_json)
+    number = 1
+    while True:
+        suffix = f"-{number}" if number > 1 else ""
+        path = BACKUP_DIR / f"layout-{timestamp}{suffix}.json"
+        try:
+            with path.open("x") as backup:
+                backup.write(raw_json)
+            break
+        except FileExistsError:
+            number += 1
 
     # Verify: read it back and compare (compare the JSON strings, not dicts,
     # because default=str converts non-serializable types one-way)
@@ -51,11 +54,19 @@ def verified_backup(lockdown, layout: HomeScreenLayout, out: Console | None = No
         raise RuntimeError("Backup verification failed: saved file doesn't match device state")
 
     # Verify: re-read from device to confirm device state hasn't drifted
-    fresh_layout = read_layout(lockdown)
+    try:
+        fresh_layout = read_layout(lockdown)
+    except Exception as error:
+        raise RuntimeError(
+            f"The backup was saved at {path}, but the phone could not be read again: {error}. "
+            "No changes were sent to the phone."
+        ) from error
     fresh_json = json.dumps(fresh_layout.raw, indent=2, default=str)
     if fresh_json != raw_json:
-        (out or console).print("[yellow]  Warning: device state changed between reads. Re-backing up...[/yellow]")
-        path.write_text(fresh_json)
+        raise RuntimeError(
+            f"Device layout changed while verifying the backup. No device write was performed. "
+            f"The original read is saved at {path}. Refresh the layout before trying again."
+        )
 
     return path
 
@@ -73,27 +84,24 @@ def print_ios_added(added: list[dict], reference: str, out: Console | None = Non
     )
 
 
-def test_restore_roundtrip(lockdown) -> bool:
-    """Test that backup+restore works by doing a no-op round-trip.
+def test_restore_roundtrip(lockdown, backup_path: Path) -> bool:
+    """Write the current layout and check for an identical read-back.
 
-    Reads the current layout, writes it back unchanged, reads again,
-    and verifies the state is identical. This proves the write path
-    works without changing anything.
-
-    It also passes when the only difference is apps that iOS added to the home screen
-    at the write (layout_engine.ios_added_apps, with the layout before the write as the
-    expected layout). It names them, and it does not move them. All other differences
-    fail, as before.
-
-    Returns True if the round-trip succeeds.
+    The caller must obtain write consent and retain a verified backup first.
+    SpringBoard can change the layout even when the input is unchanged.
+    Returns False for any difference; never retries or writes a rollback.
     """
     from unjiggle.device import read_layout, write_layout
 
     console.print("  [dim]Reading current layout...[/dim]")
     before = read_layout(lockdown)
     before_json = json.dumps(before.raw, indent=2, default=str)
+    backup_json = json.dumps(json.loads(backup_path.read_text()), indent=2, default=str)
+    if before_json != backup_json:
+        console.print("  [red]Write test cancelled.[/red] The layout changed since the backup. No device write was performed.")
+        return False
 
-    console.print("  [dim]Writing layout back unchanged (no-op write)...[/dim]")
+    console.print("  [yellow]Writing the current layout. iOS may add or move icons.[/yellow]")
     write_layout(lockdown, before.raw)
 
     console.print("  [dim]Reading layout again to verify...[/dim]")
@@ -105,25 +113,46 @@ def test_restore_roundtrip(lockdown) -> bool:
         return True
     from unjiggle.layout_engine import ios_added_apps
 
-    # An empty list means the same layout with other values of the icon state: that
-    # still fails, as before.
     ios_added = ios_added_apps(after, before, before)
     if ios_added:
-        console.print("  [green]Round-trip verified.[/green] All icons are in their positions.")
         print_ios_added(ios_added, "layout before the write")
-        return True
-    console.print("  [red]Round-trip FAILED.[/red] Layout changed after no-op write.")
-    console.print("  [red]DO NOT proceed with changes. Something is wrong.[/red]")
+    console.print("  [red]Round-trip FAILED.[/red] The read-back state differs from before the write.")
+    console.print("  [red]Stop here. Keep the backup; do not retry or restore automatically.[/red]")
     return False
+
+
+def _backup_is_supported(state) -> bool:
+    from unjiggle.device import _parse_item
+
+    if isinstance(state, list):
+        pages = state
+    elif isinstance(state, dict):
+        dock = state.get("buttonBar", [])
+        screens = state.get("iconLists", [])
+        if not isinstance(dock, list) or not isinstance(screens, list):
+            return False
+        pages = [dock, *screens]
+    else:
+        return False
+    has_items = False
+    for page in pages:
+        if not isinstance(page, list):
+            return False
+        for raw_item in page:
+            item = _parse_item(raw_item)
+            if item is None:
+                return False
+            if item.app or item.widget or (item.folder and any(item.folder.pages)):
+                has_items = True
+    return has_items
 
 
 def restore_from_backup(lockdown, backup_path: Path) -> bool:
     """Restore a layout from a backup file.
 
-    Returns True if the restore succeeds and is verified. As `unjiggle json restore`
-    does, it refuses a backup with no app on the home screen, makes a verified backup
-    of the layout on the phone before the write, and writes the dates of the backup as
-    dates (device.restore_layout_from_file).
+    Returns True only for an exact read-back match. Unlike the JSON restore contract,
+    extra apps and metadata-only differences also fail. Refuses an empty backup,
+    backs up the current layout first, and restores icon dates to their original type.
     """
     from unjiggle.device import parse_layout_state, read_layout, restore_layout_from_file, write_layout
 
@@ -133,12 +162,12 @@ def restore_from_backup(lockdown, backup_path: Path) -> bool:
 
     try:
         state = restore_layout_from_file(backup_path)
+        if not _backup_is_supported(state):
+            console.print("  [red]The backup is empty or has an unsupported layout. Nothing was restored.[/red]")
+            return False
         expected = parse_layout_state(state)
     except Exception as e:
         console.print(f"  [red]Cannot read the backup: {e}[/red]")
-        return False
-    if expected.page_count == 0 or expected.total_apps == 0:
-        console.print("  [red]The backup has no apps on the home screen. Nothing was restored.[/red]")
         return False
 
     console.print("  [dim]Backing up the current layout first...[/dim]")
@@ -148,18 +177,26 @@ def restore_from_backup(lockdown, backup_path: Path) -> bool:
     except Exception as e:
         console.print(f"  [red]Backup failed: {e}. Nothing was restored.[/red]")
         return False
-    console.print(f"  To undo this restore: [bold]unjiggle restore {undo_path}[/bold]")
+    console.print(f"  Layout before this restore saved at: [bold]{undo_path}[/bold]")
 
-    console.print("  [dim]Restoring layout from backup...[/dim]")
-    write_layout(lockdown, state)
+    try:
+        console.print("  [dim]Restoring layout from backup...[/dim]")
+        write_layout(lockdown, state)
 
-    console.print("  [dim]Verifying restore...[/dim]")
-    restored = read_layout(lockdown)
+        console.print("  [dim]Verifying restore...[/dim]")
+        restored = read_layout(lockdown)
+    except Exception as error:
+        console.print(f"  [red]Restore could not be verified: {error}[/red]")
+        console.print("  The phone may have changed. Do not retry or restore automatically.")
+        console.print(f"  Requested backup: {backup_path}", markup=False, highlight=False, soft_wrap=True)
+        console.print(f"  Layout before this restore: {undo_path}", markup=False, highlight=False, soft_wrap=True)
+        return False
     restored_json = json.dumps(restored.raw, default=str)
     expected_json = json.dumps(state, default=str)
 
     if restored_json == expected_json:
-        console.print("  [green]Restore verified.[/green] Your phone is back to the backed-up state.")
+        console.print("  [green]Restore verified.[/green] The phone currently matches the backup.")
+        console.print("  This does not guarantee that the layout will stay the same after a reboot.")
         return True
     # iOS can add an app from the App Library to the home screen at the write. As in
     # `unjiggle json restore`, only the backup tells which apps were on the home screen,
@@ -168,12 +205,10 @@ def restore_from_backup(lockdown, backup_path: Path) -> bool:
 
     ios_added = ios_added_apps(restored, expected, current, apps_of_before=False)
     if ios_added:
-        console.print("  [green]Restore verified.[/green] All icons of the backup are in their positions.")
         print_ios_added(ios_added, "backup")
-        return True
-    console.print("  [yellow]Restore applied but verification shows minor differences.[/yellow]")
-    console.print("  [yellow]This is usually cosmetic (SpringBoard may normalize some values).[/yellow]")
-    return True  # Still likely fine
+    console.print("  [red]Restore verification failed.[/red] The read-back state does not match the backup.")
+    console.print("  Keep both backups. Do not retry or restore automatically; another write may change the layout again.")
+    return False
 
 
 def _backup_order(path: Path) -> tuple:
@@ -192,16 +227,15 @@ def list_backups() -> list[Path]:
 
 
 def pre_write_safety_check(lockdown, layout: HomeScreenLayout) -> tuple[bool, Path | None]:
-    """Run the full safety check before a write of the human CLI (`unjiggle suggest`).
+    """Verify a backup before the requested write, without a separate test write.
 
-    Returns (safe_to_proceed, backup_path). It asks a question (the round trip), so a
-    json command must not use it: `unjiggle json apply` reads its payload from stdin, and
-    nobody can answer. json apply uses verified_backup() directly (see cli.json_apply).
+    Returns (backup_verified, backup_path). A verified backup does not guarantee that
+    iOS will preserve the requested layout or that a later restore will succeed.
     """
     console.print("\n  [bold]Safety Check[/bold]\n")
 
     # Step 1: Verified backup
-    console.print("  [bold]Step 1/3:[/bold] Creating verified backup...")
+    console.print("  [bold]Step 1/2:[/bold] Creating verified backup...")
     try:
         backup_path = verified_backup(lockdown, layout)
         console.print(f"  [green]✓[/green] Backup saved and verified: [dim]{backup_path}[/dim]\n")
@@ -211,26 +245,12 @@ def pre_write_safety_check(lockdown, layout: HomeScreenLayout) -> tuple[bool, Pa
         return False, None
 
     # Step 2: Show backup stats
-    console.print("  [bold]Step 2/3:[/bold] Backup contains:")
+    console.print("  [bold]Step 2/2:[/bold] Backup contains:")
     console.print(f"    {layout.page_count} pages, {layout.total_apps} apps, {len(layout.all_folders())} folders")
     console.print(f"    Dock: {len(layout.dock)} items")
     console.print(f"    App Library: {len(layout.ignored)} hidden apps\n")
 
-    # Step 3: Offer round-trip test
-    console.print("  [bold]Step 3/3:[/bold] Round-trip verification")
-    console.print("  This writes your current layout back unchanged, then reads it to")
-    console.print("  prove the write path works. Your phone won't change at all.")
-
-    import click
-    if click.confirm("  Run the safety round-trip test?", default=True):
-        success = test_restore_roundtrip(lockdown)
-        if not success:
-            return False, backup_path
-        console.print()
-    else:
-        console.print("  [dim]Skipped. Proceeding on trust.[/dim]\n")
-
-    console.print("  [green bold]Safety check passed.[/green bold] You have a verified backup")
-    console.print(f"  and can undo anytime with: [bold]unjiggle restore {backup_path}[/bold]\n")
+    console.print("  [green bold]Backup verified.[/green bold] No test write was performed.")
+    console.print("  iOS may add or move icons when applying a layout. A backup does not guarantee a successful restore.\n")
 
     return True, backup_path

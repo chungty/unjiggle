@@ -35,7 +35,7 @@ def main(ctx):
         console.print("\n[bold]Unjiggle[/bold] v" + __version__ + "\n")
         console.print("  Connect your iPhone via USB, then:\n")
         console.print("  [bold]unjiggle go[/bold]              Full experience: scan → score → AI analysis → share card")
-        console.print("  [bold]unjiggle safety-test[/bold]     Prove read/write works (changes nothing)")
+        console.print("  [bold]unjiggle safety-test[/bold]     Check reads and save a verified backup (no device write)")
         console.print("  [bold]unjiggle scan[/bold]            See your home screen layout")
         console.print("  [bold]unjiggle score[/bold]           Get your organization score")
         console.print("  [bold]unjiggle analyze[/bold]         AI-powered observations")
@@ -278,7 +278,8 @@ def score():
 @main.command()
 def backup():
     """Backup your current home screen layout."""
-    from unjiggle.device import backup_layout, connect, read_layout
+    from unjiggle.device import connect, read_layout
+    from unjiggle.safety import verified_backup
 
     console.print("\n[bold]Unjiggle[/bold] — Backing up layout...\n")
 
@@ -288,10 +289,12 @@ def backup():
         console.print(f"[red]No iPhone detected.[/red] {e}")
         sys.exit(1)
 
-    layout = read_layout(lockdown)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = BACKUP_DIR / f"layout-{timestamp}.json"
-    backup_layout(layout, path)
+    try:
+        layout = read_layout(lockdown)
+        path = verified_backup(lockdown, layout)
+    except Exception as error:
+        console.print(f"  Backup failed: {error}", markup=False, soft_wrap=True)
+        sys.exit(1)
     console.print(f"  [green]Saved to:[/green] {path}\n")
 
 
@@ -323,19 +326,22 @@ def restore(backup_file: str | None):
         sys.exit(1)
 
     console.print(f"  Device: [cyan]{device.name}[/cyan] (iOS {device.ios_version})\n")
-    restore_from_backup(lockdown, Path(backup_file))
+    console.print("  [yellow]Restoring writes to your phone. iOS may add or move icons.[/yellow]")
+    success = restore_from_backup(lockdown, Path(backup_file))
     console.print()
+    if not success:
+        sys.exit(1)
 
 
 @main.command(name="safety-test")
-def safety_test():
-    """Test that backup and restore work correctly (no-op round-trip)."""
+@click.option("--write-roundtrip", is_flag=True, help="Also offer a write test that can change the layout. Requires confirmation.")
+def safety_test(write_roundtrip: bool):
+    """Check reads and backup without writing to the phone by default."""
     from unjiggle.device import connect, read_layout
     from unjiggle.safety import test_restore_roundtrip, verified_backup
 
     console.print("\n[bold]Unjiggle[/bold] — Safety Test\n")
-    console.print("  This test proves that Unjiggle can safely read and write")
-    console.print("  your home screen without changing anything.\n")
+    console.print("  Read the layout and save a verified backup without writing to the phone.\n")
 
     try:
         lockdown, device = connect()
@@ -347,8 +353,8 @@ def safety_test():
 
     # Step 1: Verified backup
     console.print("  [bold]1. Creating verified backup...[/bold]")
-    layout = read_layout(lockdown)
     try:
+        layout = read_layout(lockdown)
         backup_path = verified_backup(lockdown, layout)
         console.print(f"     [green]✓[/green] Backup saved: {backup_path}")
         console.print(f"     [green]✓[/green] {layout.page_count} pages, {layout.total_apps} apps captured\n")
@@ -356,19 +362,34 @@ def safety_test():
         console.print(f"     [red]✗ Backup failed: {e}[/red]\n")
         sys.exit(1)
 
-    # Step 2: Round-trip test
+    if not write_roundtrip:
+        console.print("  [green bold]Read-only checks passed.[/green bold] The write path was not tested.")
+        console.print("  This does not guarantee that applying or restoring a layout will succeed.\n")
+        return
+
+    console.print("  [yellow]This writes to your phone. iOS may add or move icons, even with unchanged input.[/yellow]")
+    console.print("  A failed test does not undo the write. Restoring the backup may change the layout again.")
+    if not click.confirm("  Write the current layout to your iPhone for this test?", default=False):
+        console.print("  Write test cancelled. No device write was performed.\n")
+        return
+
     console.print("  [bold]2. Round-trip test (write current layout back, read again)...[/bold]")
-    success = test_restore_roundtrip(lockdown)
+    try:
+        success = test_restore_roundtrip(lockdown, backup_path)
+    except Exception as error:
+        console.print(f"  [red]Write test could not be verified: {error}[/red]")
+        console.print("  The phone may have changed. Do not retry or restore automatically.")
+        console.print(f"  Keep the backup at {backup_path}", markup=False, soft_wrap=True)
+        sys.exit(1)
     console.print()
 
     if success:
-        console.print("  [green bold]All safety tests passed.[/green bold]")
-        console.print("  Unjiggle can safely read and write your home screen layout.")
+        console.print("  [green bold]This write read back unchanged.[/green bold]")
+        console.print("  This does not guarantee that another write or a later reboot will preserve the layout.")
         console.print(f"  Your backup is at: {backup_path}")
-        console.print("\n  You're safe to run [bold]unjiggle suggest[/bold] now.\n")
     else:
         console.print("  [red bold]Safety test failed.[/red bold]")
-        console.print("  Do NOT run unjiggle suggest until this is resolved.\n")
+        console.print(f"  Keep the backup at {backup_path}. Stop further writes until the difference is understood.\n")
         sys.exit(1)
 
 
@@ -602,13 +623,7 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
 
         safe, backup_path = pre_write_safety_check(lockdown, layout)
         if not safe:
-            if backup_path is None:
-                console.print("  [red]Safety check failed. No changes made.[/red]\n")
-            else:
-                # The round trip wrote the layout to the phone, and the phone read back
-                # another layout.
-                console.print("  [red]Safety check failed.[/red] Unjiggle did not apply these changes.")
-                console.print(f"  To go back to the layout before the safety check: [bold]unjiggle restore {backup_path}[/bold]\n")
+            console.print("  [red]Backup check failed. No changes made.[/red]\n")
             return
 
         # Write the checked raw state to the device
@@ -626,7 +641,8 @@ def suggest(api_key: str | None, model: str, apply_all: bool):
             _print_ios_added(ios_added, "preview", console)
 
         console.print("\n  [green bold]Done![/green bold] Your iPhone has been reorganized.")
-        console.print(f"  Undo anytime: [bold]unjiggle restore {backup_path}[/bold]")
+        console.print(f"  Backup saved at: {backup_path}", markup=False, soft_wrap=True)
+        console.print("  Restoring may also add or move icons. It is not a guaranteed undo.")
         console.print()
         console.print("  [bold]Share your transformation:[/bold]")
         console.print("    [bold]unjiggle report --open[/bold] to generate a before/after share card")
@@ -2486,15 +2502,17 @@ def json_apply():
     The output has the backup path, for undo with `json restore`. After a failed write or
     a failed read-back check, the error also has it.
 
-    There is no round trip: the write of the unchanged layout that `unjiggle suggest`
-    offers before its write (safety.test_restore_roundtrip). The reasons:
+    Neither this command nor `unjiggle suggest` performs a separate round trip
+    before the requested write. The reasons:
     - Nobody can answer a question on stdin.
     - When the write path is broken, the round trip also writes to the phone, so it does
-      not prevent a bad write. Step 4 finds the same problem, and the backup undoes it.
+      not prevent a bad write. Step 4 checks the result and retains the backup.
+      Restoring is another write and is not guaranteed to recover the layout.
     - The round trip compares the full icon state. If SpringBoard changes one value on a
       write, every apply stops.
     - It adds a write and two reads over USB, and one more reload of the home screen.
-    To test the write path, use `unjiggle safety-test`.
+    An explicit write test uses `unjiggle safety-test --write-roundtrip` and can
+    change the layout. The default safety-test command only reads and backs up.
     """
     from unjiggle.device import connect, read_layout, write_layout
 

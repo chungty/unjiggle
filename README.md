@@ -57,16 +57,23 @@ Want an assistant to walk you through the same steps? Start with the [Claude, Co
 | `unjiggle swipetax` | Estimate wasted swipes per year |
 | `unjiggle report` | Generate a shareable report card |
 | `unjiggle demo` | Run the CLI without a phone |
+| `unjiggle safety-test` | Check reads and save a verified backup; does not write to the phone |
 
-### Safe transforms
+### Layout writes and backups
 
 | Command | What it does |
 |---------|-------------|
 | `unjiggle suggest` | Interactive suggestions; can call AI and write changes after confirmation |
 | `unjiggle suggest --apply-all` | Apply the full suggested transform |
 | `unjiggle backup` | Save the current layout before changes |
-| `unjiggle restore` | Restore a saved backup |
-| `unjiggle safety-test` | Write the unchanged layout back to test the write path; requires separate consent |
+| `unjiggle restore` | Write a saved backup; exits unsuccessfully if the read-back state differs |
+| `unjiggle safety-test --write-roundtrip` | Offer a write test after a backup and explicit confirmation; can change the layout |
+
+`safety-test` checks reads and a local backup by default. It does not test the write path. With `--write-roundtrip`, the confirmation defaults to **No**. Even writing unchanged input can make iOS add or move icons. A failed test does not undo the write, and a passing immediate read-back does not guarantee the layout will stay unchanged after reboot.
+
+If the layout changes while a backup is being verified, the command stops before writing and keeps the original backup rather than replacing it. An explicit round-trip also stops if the layout has changed since that backup. Refresh and review the layout before deciding on another operation.
+
+The interactive `restore` command requires an exact read-back match, including icon-state metadata. It fails conservatively even if a difference might be cosmetic; it does not report extra apps as a successful restore. Keep both backups and stop after a mismatch. Do not automatically retry or restore again: another write can repeat the problem. These safeguards do not prevent iOS icon repopulation or establish a safe recovery procedure for an affected phone.
 
 ### Machine API
 
@@ -80,11 +87,11 @@ In a transform preview, each entry of `changes` has `from_page` and `to_page` co
 
 `unjiggle.cli.JSON_CONTRACT` is the version of this contract (now 2). A client that bundles the engine can require a minimum version. Every `unjiggle json` command asks no question and writes exactly one JSON document to stdout. All other text goes to stderr. On failure, the document is `{"error": "..."}`, the message also goes to stderr, and the exit code is 1.
 
-`unjiggle json apply` reads `{"operations": [...], "snapshot_id": "..."}` from stdin and applies all operations together, as the preview of `json suggest` shows them. `snapshot_id` is optional. Send the `snapshot_id` of the preview (from `json suggest` or `json presets`): when the layout on the phone changed after the preview, apply writes nothing and returns an error that starts with `Not written:`. Before it writes, it checks the new icon state: when that state would differ from the preview, would remove an icon that no operation names, or would add an app that is not on the home screen, it writes nothing and returns an error that starts with `Not written:`. Then it makes a verified backup, writes, and reads the layout back to compare it with the preview. It does not do the round trip of `unjiggle suggest` (a write of the unchanged layout before the real write). To test the write path, use `unjiggle safety-test`. In the output, `backup` is the path of the backup of the layout before the command, also when nothing changed (`"changed": false`). `unjiggle json restore <backup>` undoes the change. When the write or the read-back check fails, the error also has `backup`.
+`unjiggle json apply` reads `{"operations": [...], "snapshot_id": "..."}` from stdin and applies all operations together, as the preview of `json suggest` shows them. `snapshot_id` is optional. Send the `snapshot_id` of the preview (from `json suggest` or `json presets`): when the layout on the phone changed after the preview, apply writes nothing and returns an error that starts with `Not written:`. Before it writes, it checks the new icon state: when that state would differ from the preview, would remove an icon that no operation names, or would add an app that is not on the home screen, it writes nothing and returns an error that starts with `Not written:`. Then it makes a verified backup, writes, and reads the layout back to compare it with the preview. Neither this command nor `unjiggle suggest` performs a separate round-trip test before the requested write. In the output, `backup` is the path of the backup of the layout before the command, also when nothing changed (`"changed": false`). `unjiggle json restore <backup>` attempts to restore it; another device write is required. When the write or the read-back check fails, the error also has `backup`.
 
 `unjiggle json restore` refuses a backup with no apps on the home screen (an empty or damaged file), because it would take every icon off the home screen. Before it writes, it makes a verified backup of the layout on the phone, and returns its path as `undo_backup`. When the write or the read-back check fails, the error also has `undo_backup`. The restore writes each date of the backup (`iconModDate`) as a date, as the phone gave it, not as the text of the JSON file. It passes when the phone reads back as the backup. It accepts values of the icon state that SpringBoard changes on a write, when the dock, the pages, the folders and the widgets are the same.
 
-On iOS 26, iOS can add an installed app from the App Library to the home screen when it gets a new layout. The read-back check of `json apply` and `json restore` accepts such apps when they are the only difference. Each one must be the plain icon of an App Store app (not a widget, a folder, a pinned icon, a second icon or an entry of another type), loose on a page, and not on the home screen of the preview (for `json apply`) or of the backup (for `json restore`). For `json apply`, it must also not be on the home screen before the write. All other icons must be in the positions of the preview or the backup. When the phone reads back the layout that it had before the write, the write had no effect, and the check fails. The engine does not move or remove these apps. The output lists them in the optional key `ios_added`, for example `[{"bundle_id": "...", "name": "...", "page": 2}]`, with the page counted from 1, and a short message goes to stderr. The key is not there when iOS added no app. All other differences still fail the check. `unjiggle restore`, `unjiggle suggest` and the round trip of `unjiggle safety-test` use the same check and name the apps.
+On iOS 26, iOS can add an installed app from the App Library to the home screen when it gets a new layout. The read-back check of `json apply` and `json restore` accepts such apps when they are the only difference. Each one must be the plain icon of an App Store app (not a widget, a folder, a pinned icon, a second icon or an entry of another type), loose on a page, and not on the home screen of the preview (for `json apply`) or of the backup (for `json restore`). For `json apply`, it must also not be on the home screen before the write. All other icons must be in the positions of the preview or the backup. When the phone reads back the layout that it had before the write, the write had no effect, and the check fails. The engine does not move or remove these apps. The output lists them in the optional key `ios_added`, for example `[{"bundle_id": "...", "name": "...", "page": 2}]`, with the page counted from 1, and a short message goes to stderr. The key is not there when iOS added no app. All other differences still fail the check. `unjiggle suggest` uses the same check. In contrast, the interactive `unjiggle restore` and the explicit `safety-test --write-roundtrip` name recognized additions but fail when the read-back differs. The machine API's existing `ios_added` contract is unchanged; it reports tolerated additions, not their prevention.
 
 ## Requirements
 
@@ -95,7 +102,7 @@ On iOS 26, iOS can add an installed app from the App Library to the home screen 
 
 ## How It Works
 
-Unjiggle uses [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) to communicate with iPhone SpringBoard services over USB. It reads `IconState`, enriches the layout with App Store metadata, computes diagnostics, previews transforms, and can safely write changes back after backup.
+Unjiggle uses [pymobiledevice3](https://github.com/doronz88/pymobiledevice3) to communicate with iPhone SpringBoard services over USB. It reads `IconState`, enriches the layout with App Store metadata, computes diagnostics, previews transforms, and can apply changes after saving a backup. A backup does not guarantee that iOS will preserve the requested layout or that a later restore will succeed.
 
 On supported macOS versions it can also read Screen Time data from `knowledgeC.db` for usage-aware suggestions. Otherwise it falls back to positional heuristics.
 
