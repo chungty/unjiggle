@@ -63,9 +63,32 @@ These generate share cards with or without an API key. With Claude or GPT, the r
 
 | Command | What it does |
 |---------|-------------|
-| `unjiggle safety-test` | Prove read/write works (changes nothing) |
+| `unjiggle safety-test` | Read the layout and verify a backup without changing the phone |
+| `unjiggle safety-test --write-roundtrip` | Offer a write test that can change icons; requires confirmation |
 | `unjiggle backup` | Save current layout |
-| `unjiggle restore` | Undo any changes |
+| `unjiggle restore` | List backups; pass a file to attempt a restore |
+
+### Safety update in 0.3.2
+
+Earlier versions of `safety-test` sent the layout back to the iPhone despite saying
+the test changed nothing. Sending even an unchanged layout can make iOS add or move
+icons. The default test now only reads the phone and saves a backup.
+
+- A write test requires `--write-roundtrip` and a separate yes/no confirmation that
+  defaults to No. It is not needed before using Unjiggle.
+- Preparing to apply changes no longer runs an extra test write.
+- If the layout changes while a backup is being checked, Unjiggle stops and keeps
+  the original backup. New verified backups do not overwrite files from the same second.
+- Restore saves the phone's current layout first. If the phone does not match the
+  requested backup afterward, the command reports failure and exits with an error.
+  It does not retry or try another restore automatically.
+- Restore refuses completely empty layouts and unsupported backup formats rather
+  than sending them to the phone. Layouts containing only widgets are supported.
+
+These changes do not establish a fix for icons returning on iOS 27, or a safe way
+to recover folders lost after resetting the Home Screen. If a test or restore has
+already changed your layout unexpectedly, stop further attempts and keep your backups.
+Backup files contain app and folder names; share them privately when seeking help.
 
 ## Requirements
 
@@ -82,7 +105,10 @@ On macOS 12-15, it can also read Screen Time data from `knowledgeC.db` for real 
 
 Share cards render to PNG via Chrome headless and auto-copy to your macOS clipboard.
 
-The write path is validated on iPhone 16 Pro, iOS 26. Every write is preceded by a verified backup and an optional round-trip safety test.
+Earlier device testing used an iPhone 16 Pro on iOS 26; it does not establish safety
+on other iOS versions. Applying or restoring a layout can add or move icons. A
+verified backup is not a guarantee that a restore will succeed, and an immediate
+match does not prove the layout will stay the same after a reboot.
 
 ## GUI Coming Soon
 
