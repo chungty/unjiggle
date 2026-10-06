@@ -34,6 +34,16 @@ def test_first_run_help_uses_public_boundary_language():
     assert "challenge" not in result.output.lower()
 
 
+def test_write_test_is_explicit_and_never_promised_harmless():
+    result = CliRunner().invoke(main, ["safety-test", "--help"])
+
+    assert result.exit_code == 0
+    assert "--write-roundtrip" in result.output
+    assert "Requires confirmation" in result.output
+    assert "without writing to the phone by default" in result.output
+    assert "changes nothing" not in CliRunner().invoke(main, []).output
+
+
 def test_readme_does_not_advertise_private_mechanics():
     readme = (REPO_ROOT / "README.md").read_text()
 

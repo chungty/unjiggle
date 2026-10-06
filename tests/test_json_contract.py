@@ -453,12 +453,12 @@ def test_apply_writes_once_and_returns_the_backup(phone):
     assert payload["result"]["total_apps"] == preview["proposed_layout"]["total_apps"]
 
 
-def test_apply_sends_the_text_of_the_backup_to_stderr(phone, monkeypatch):
+def test_apply_aborts_if_layout_drifts_during_backup(phone, monkeypatch):
     preview = _focus_preview()
+    before = copy.deepcopy(phone.raw)
     reads = []
 
     def drifting_read(lockdown):
-        # The phone changes after the first read, so the backup check warns.
         reads.append(1)
         if len(reads) == 2:
             phone.raw = phone.raw[:1] + [list(reversed(phone.raw[1]))] + phone.raw[2:]
@@ -468,8 +468,12 @@ def test_apply_sends_the_text_of_the_backup_to_stderr(phone, monkeypatch):
 
     result = run("apply", stdin=app_payload(preview["operations"]))
 
-    ok(result, APPLIED_TRANSFORM)
-    assert "device state changed between reads" in result.stderr
+    assert result.exit_code == 1
+    assert "Device layout changed" in json.loads(result.stdout)["error"]
+    assert "No changes made" in result.stderr
+    assert phone.writes == []
+    assert len(phone.backups()) == 1
+    assert json.loads(phone.backups()[0].read_text()) == json.loads(json.dumps(before, default=str))
 
 
 def _remove_app(raw: list, bundle_id: str) -> None:

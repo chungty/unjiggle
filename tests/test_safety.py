@@ -151,15 +151,15 @@ class TestRestoreFromBackup:
         monkeypatch.setattr(device, "write_layout", write_layout)
         return phone, backup
 
-    def test_restore_names_an_app_that_ios_adds(self, tmp_path, monkeypatch, capsys):
+    def test_restore_fails_and_names_an_app_that_ios_adds(self, tmp_path, monkeypatch, capsys):
         phone, backup = self._phone_that_adds_an_app(tmp_path, monkeypatch)
 
-        assert safety.restore_from_backup(None, backup) is True
+        assert safety.restore_from_backup(None, backup) is False
 
         out = capsys.readouterr().out
         # The phone has one more app than the backup, so the text does not say that the
         # phone is back to the backed-up state.
-        assert "Restore verified. All icons of the backup are in their positions." in out
+        assert "Restore verification failed." in out
         assert "back to the backed-up state" not in out
         assert "iOS added an app that the backup does not have: Amazon (page 1)." in out
         assert "minor differences" not in out
@@ -170,7 +170,7 @@ class TestRestoreFromBackup:
         entry = {**UNLISTED_APP, "displayName": "Deals :fire: [b]Now[/b]"}
         _phone, backup = self._phone_that_adds_an_app(tmp_path, monkeypatch, entry=entry)
 
-        assert safety.restore_from_backup(None, backup) is True
+        assert safety.restore_from_backup(None, backup) is False
 
         assert "does not have: Deals :fire: [b]Now[/b] (page 1)." in capsys.readouterr().out
 
@@ -181,24 +181,26 @@ class TestRestoreFromBackup:
         phone.raw = put_in_first_free_slot(_phone_state(), UNLISTED_APP)
         monkeypatch.setattr(device, "write_layout", lambda lockdown, state: phone.writes.append(state))
 
-        assert safety.restore_from_backup(None, backup) is True
+        assert safety.restore_from_backup(None, backup) is False
 
         out = capsys.readouterr().out
         assert len(phone.writes) == 1
-        assert "minor differences" in out
+        assert "Restore verification failed." in out
+        assert "cosmetic" not in out
         assert "iOS added" not in out
         assert "Restore verified." not in out
 
-    def test_restore_with_another_difference_says_what_it_said_before(self, tmp_path, monkeypatch, capsys):
+    def test_restore_fails_when_an_existing_icon_is_lost(self, tmp_path, monkeypatch, capsys):
         def drop_page_b(state):
             del state[1][1]
 
         _phone, backup = self._phone_that_adds_an_app(tmp_path, monkeypatch, change=drop_page_b)
 
-        assert safety.restore_from_backup(None, backup) is True
+        assert safety.restore_from_backup(None, backup) is False
 
         out = capsys.readouterr().out
-        assert "minor differences" in out
+        assert "Restore verification failed." in out
+        assert "cosmetic" not in out
         assert "iOS added" not in out
 
     def test_restore_refuses_a_backup_with_no_apps(self, tmp_path, monkeypatch):
@@ -210,11 +212,12 @@ class TestRestoreFromBackup:
 
 
 class TestRoundTrip:
-    """safety.test_restore_roundtrip: the no-op write of `unjiggle safety-test` and of
-    the safety check of `unjiggle suggest`."""
+    """The explicitly requested write of `unjiggle safety-test --write-roundtrip`."""
 
-    def _run(self, monkeypatch, keep):
+    def _run(self, monkeypatch, tmp_path, keep):
         phone = _Phone(_phone_state())
+        backup = tmp_path / "roundtrip-backup.json"
+        backup.write_text(json.dumps(phone.raw, default=str))
 
         def write_layout(lockdown, state):
             phone.write_layout(lockdown, state)
@@ -222,23 +225,23 @@ class TestRoundTrip:
 
         monkeypatch.setattr(device, "read_layout", phone.read_layout)
         monkeypatch.setattr(device, "write_layout", write_layout)
-        return safety.test_restore_roundtrip(None), phone
+        return safety.test_restore_roundtrip(None, backup), phone
 
-    def test_the_same_state_passes(self, monkeypatch, capsys):
-        passed, phone = self._run(monkeypatch, lambda state: state)
+    def test_the_same_state_passes(self, monkeypatch, tmp_path, capsys):
+        passed, phone = self._run(monkeypatch, tmp_path, lambda state: state)
 
         assert passed is True
         assert "Read → Write → Read produced identical state." in capsys.readouterr().out
         assert len(phone.writes) == 1
 
-    def test_an_app_that_ios_adds_passes_and_is_named(self, monkeypatch, capsys):
-        passed, phone = self._run(monkeypatch, adds_unlisted_app)
+    def test_an_app_that_ios_adds_fails_and_is_named(self, monkeypatch, tmp_path, capsys):
+        passed, phone = self._run(monkeypatch, tmp_path, adds_unlisted_app)
 
         out = capsys.readouterr().out
-        assert passed is True
-        assert "Round-trip verified. All icons are in their positions." in out
+        assert passed is False
+        assert "Round-trip verified" not in out
         assert "iOS added an app that the layout before the write does not have: Amazon (page 1)." in out
-        assert "FAILED" not in out
+        assert "Round-trip FAILED" in out
         # The round trip does not move or remove the app.
         assert len(phone.writes) == 1
         assert "com.amazon.Amazon" in parse_layout_state(phone.raw).all_bundle_ids
@@ -261,9 +264,9 @@ class TestRoundTrip:
         return state
 
     @pytest.mark.parametrize("change", ["_adds_an_app_and_drops_one", "_new_date", "_custom_entry"])
-    def test_every_other_difference_fails(self, monkeypatch, capsys, change):
+    def test_every_other_difference_fails(self, monkeypatch, tmp_path, capsys, change):
         keep = getattr(TestRoundTrip, change)
-        passed, _phone = self._run(monkeypatch, keep)
+        passed, _phone = self._run(monkeypatch, tmp_path, keep)
 
         out = capsys.readouterr().out
         assert passed is False

@@ -35,3 +35,12 @@ Before tagging or publishing:
 4. Confirm the repo can be explained in one sentence as a public engine and CLI.
 
 If you cannot explain the boundary cleanly, do not publish yet.
+
+## Device-write safety checks
+
+Run `pytest -q tests/test_write_consent.py tests/test_safety.py` when changing backup,
+restore, or write consent. These tests use a simulated phone. Default diagnostics
+and pre-write backups must make zero device writes; explicit write tests must
+require consent and fail on read-back differences without retrying. Do not use a
+personal phone to reproduce a layout-loss report. Passing simulated tests is not
+proof that iOS will preserve a layout or that a customer's backup can be restored.

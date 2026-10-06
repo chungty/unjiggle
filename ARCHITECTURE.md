@@ -12,6 +12,15 @@ It owns:
 - share cards for single-snapshot diagnostics and before/after transforms
 - the public JSON contract under `unjiggle json`
 
+Diagnostics must not test the device write path implicitly. `safety-test` reads and
+backs up by default; its write-roundtrip mode requires explicit confirmation.
+The pre-write backup for a requested transform does not perform a test write.
+Interactive restore fails on any read-back mismatch and never retries automatically.
+These checks cannot guarantee how iOS will normalize a write or behave after reboot.
+Manual and pre-write backups use exclusive file creation. If the layout changes
+during verification, the operation stops and keeps the original backup. A failed
+second read reports where that backup was saved.
+
 It does not own the private product strategy layer.
 
 ## Boundary
