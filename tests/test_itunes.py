@@ -1,6 +1,40 @@
 """Tests for iTunes Search API integration."""
 
-from unjiggle.itunes import GENRE_MAP, _is_system_app, _system_app_name
+import httpx
+
+from unjiggle.itunes import GENRE_MAP, _is_system_app, _system_app_name, lookup_app
+
+
+def _client(results, seen):
+    def respond(request):
+        seen.append(request.url.params["bundleId"])
+        return httpx.Response(200, json={"results": results})
+
+    return httpx.Client(transport=httpx.MockTransport(respond))
+
+
+def test_lookup_uses_only_exact_bundle_id_even_if_it_is_not_first():
+    seen = []
+    cache = {}
+    with _client([
+        {"bundleId": "other.app", "trackName": "Wrong", "description": "Wrong app"},
+        {"bundleId": "target.app", "trackName": "Right", "description": "Actual app"},
+    ], seen) as client:
+        result = lookup_app("target.app", cache, client)
+        assert result["name"] == "Right"
+        assert result["description"] == "Actual app"
+        assert result["bundle_id"] == "target.app"
+        assert lookup_app("target.app", cache, client) == result
+    assert seen == ["target.app"]
+
+
+def test_lookup_rejects_mismatched_results_and_unverified_old_cache():
+    seen = []
+    cache = {"target.app": {"name": "Unverified old lookup"}}
+    with _client([{"bundleId": "other.app", "trackName": "Wrong"}], seen) as client:
+        assert lookup_app("target.app", cache, client) is None
+    assert seen == ["target.app"]
+    assert cache["target.app"] is None
 
 
 class TestSystemAppDetection:
