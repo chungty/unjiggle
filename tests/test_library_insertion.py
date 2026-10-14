@@ -10,6 +10,7 @@ from unjiggle import cli, device, safety
 from tests.test_json_contract import FakePhone, failed, ok, run
 from unjiggle.library_insertion import (
     project_library_folder_insertion, project_library_insertion, project_library_insertions,
+    project_mixed_operations,
 )
 
 
@@ -26,6 +27,102 @@ def sample():
     layout = device.parse_layout_state(raw)
     inventory = device.reconcile_installed_apps({APP: {"ApplicationType": "User"}}, layout)
     return layout, inventory
+
+
+def test_mixed_projection_checks_ordered_move_insertion_and_folder_move():
+    layout, inventory = sample()
+    original = copy.deepcopy(layout.raw)
+    operations = [
+        {"action": "move_to_folder", "bundle_ids": ["org.example.visible"], "folder_name": "Other"},
+        {"action": "insert_from_library", "bundle_id": APP, "target_page": 0},
+        {"action": "move_to_folder", "bundle_ids": [APP], "folder_name": "Other"},
+    ]
+    steps = project_mixed_operations(layout, inventory, operations)
+    assert len(steps) == 3
+    assert steps[0].raw["iconLists"][0][0]["iconLists"][0][-1] == "org.example.visible"
+    assert steps[1].raw["iconLists"][0][-1] == APP
+    assert steps[2].raw["iconLists"][0][0]["iconLists"][0][-1] == APP
+    assert layout.raw == original
+    assert all(device.layout_parse_integrity(step)["structure_preserved"] for step in steps)
+
+
+@pytest.mark.parametrize("operations,reason", [
+    ([{"action": "move_to_page", "bundle_ids": ["org.example.visible"], "target_page": 9}], "existing page"),
+    ([{"action": "move_to_page", "bundle_ids": [APP], "target_page": 0}], "Home Screen"),
+    ([{"action": "move_to_folder", "bundle_ids": ["org.example.child"], "folder_name": "Other"}], "no change"),
+    ([{"action": "insert_from_library", "bundle_id": APP, "target_page": True}], "page index"),
+    ([{"action": "insert_from_library", "bundle_id": APP, "target_page": 0},
+      {"action": "insert_from_library", "bundle_id": APP, "target_page": 0}], "repeats"),
+    ([{"action": "delete", "bundle_ids": ["org.example.visible"]}], "unsupported"),
+    ([{"action": "move_to_folder", "bundle_ids": ["org.example.visible"], "folder_name": "Missing"}], "unambiguous"),
+])
+def test_mixed_projection_fails_closed_on_invalid_steps(operations, reason):
+    layout, inventory = sample()
+    with pytest.raises(ValueError, match=reason):
+        project_mixed_operations(layout, inventory, operations)
+
+
+def test_mixed_cli_returns_exact_prefix_hashes_without_writes(monkeypatch):
+    layout, inventory = sample()
+    reads = [layout, layout]
+    monkeypatch.setattr(device, "connect", lambda: ("phone", object()))
+    monkeypatch.setattr(device, "read_layout", lambda _: reads.pop(0))
+    monkeypatch.setattr(device, "read_installed_apps", lambda _lockdown, _layout: inventory)
+    monkeypatch.setattr(device, "write_layout", lambda *args: pytest.fail("projection wrote"))
+    operations = [
+        {"action": "move_to_folder", "bundle_ids": ["org.example.visible"], "folder_name": "Other"},
+        {"action": "insert_from_library", "bundle_id": APP, "target_page": 0},
+    ]
+    request = {"operations": operations, "snapshot_id": cli._layout_signature(layout),
+               "source_raw_sha256": cli._raw_state_fingerprint(layout)}
+    result = CliRunner().invoke(cli.main, ["json", "check-mixed-operations"], input=json.dumps(request))
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    prefixes = project_mixed_operations(layout, inventory, operations)
+    assert payload["writable"] is False
+    assert payload["source_raw_sha256"] == request["source_raw_sha256"]
+    assert [s["raw_sha256"] for s in payload["steps"]] == [cli._raw_state_fingerprint(s) for s in prefixes]
+    assert [s["snapshot_id"] for s in payload["steps"]] == [cli._layout_signature(s) for s in prefixes]
+    assert payload["proposed_raw_sha256"] == payload["steps"][-1]["raw_sha256"]
+    assert payload["proposed_snapshot_id"] == payload["steps"][-1]["snapshot_id"]
+    assert reads == []
+
+
+def test_mixed_cli_rejects_raw_drift_during_inventory(monkeypatch):
+    layout, inventory = sample()
+    altered = copy.deepcopy(layout.raw)
+    altered["uniqueIdentifier"] = "different"
+    reads = [layout, device.parse_layout_state(altered)]
+    monkeypatch.setattr(device, "connect", lambda: ("phone", object()))
+    monkeypatch.setattr(device, "read_layout", lambda _: reads.pop(0))
+    monkeypatch.setattr(device, "read_installed_apps", lambda _lockdown, _layout: inventory)
+    request = {"operations": [{"action": "insert_from_library", "bundle_id": APP, "target_page": 0}],
+               "snapshot_id": cli._layout_signature(layout),
+               "source_raw_sha256": cli._raw_state_fingerprint(layout)}
+    result = CliRunner().invoke(cli.main, ["json", "check-mixed-operations"], input=json.dumps(request))
+    assert "changed while reading" in json.loads(result.stdout)["error"]
+
+
+def test_mixed_cli_rejects_stale_raw_hash_before_inventory(monkeypatch):
+    layout, _ = sample()
+    monkeypatch.setattr(device, "connect", lambda: ("phone", object()))
+    monkeypatch.setattr(device, "read_layout", lambda _: layout)
+    monkeypatch.setattr(device, "read_installed_apps", lambda *_: pytest.fail("stale scan read inventory"))
+    request = {"operations": [{"action": "insert_from_library", "bundle_id": APP, "target_page": 0}],
+               "snapshot_id": cli._layout_signature(layout), "source_raw_sha256": "0" * 64}
+    result = CliRunner().invoke(cli.main, ["json", "check-mixed-operations"], input=json.dumps(request))
+    assert "changed since the scan" in json.loads(result.stdout)["error"]
+
+
+def test_mixed_projection_rejects_duplicate_folder_name():
+    layout, inventory = sample()
+    raw = copy.deepcopy(layout.raw)
+    raw["iconLists"].append([copy.deepcopy(raw["iconLists"][0][1])])
+    layout = device.parse_layout_state(raw)
+    with pytest.raises(ValueError, match="unambiguous"):
+        project_mixed_operations(layout, inventory, [
+            {"action": "move_to_folder", "bundle_ids": ["org.example.visible"], "folder_name": "Other"},
+        ])
 
 
 def test_projection_changes_only_ignored_and_chosen_page():

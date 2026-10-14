@@ -2775,6 +2775,61 @@ def json_check_library_insertions():
     })
 
 
+@json.command(name="check-mixed-operations")
+def json_check_mixed_operations():
+    """Read-only ordered projection of Home Screen moves and Library additions."""
+    from unjiggle.device import connect, layout_parse_integrity, read_installed_apps, read_layout
+    from unjiggle.library_insertion import project_mixed_operations
+
+    try:
+        request = _json.loads(_read_stdin())
+    except ValueError as error:
+        _json_err(f"Invalid JSON input: {error}")
+    if not isinstance(request, dict) or set(request) != {"snapshot_id", "source_raw_sha256", "operations"}:
+        _json_err("Expected a snapshot ID, raw-state SHA-256 and ordered operations")
+    snapshot_id = request["snapshot_id"]
+    source_hash = request["source_raw_sha256"]
+    if (not isinstance(snapshot_id, str) or not snapshot_id
+        or not isinstance(source_hash, str) or len(source_hash) != 64
+        or any(c not in "0123456789abcdef" for c in source_hash)):
+        _json_err("A current scan snapshot ID and raw-state SHA-256 are required")
+    operations = request["operations"]
+    if not isinstance(operations, list) or not 1 <= len(operations) <= 50:
+        _json_err("Provide one to fifty ordered operations")
+
+    try:
+        lockdown, _device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+    source = read_layout(lockdown)
+    if _layout_signature(source) != snapshot_id or _raw_state_fingerprint(source) != source_hash:
+        _json_err("The source icon state changed since the scan. Scan again.")
+    try:
+        inventory = read_installed_apps(lockdown, source)
+        steps = project_mixed_operations(source, inventory, operations)
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        _json_err(f"Operations not checked: {error}")
+    if (_layout_signature(readback := read_layout(lockdown)) != snapshot_id
+        or _raw_state_fingerprint(readback) != source_hash):
+        _json_err("The icon state changed while reading installed apps. Scan again.")
+    proposed = steps[-1]
+    _json_out({
+        "writable": False,
+        "snapshot_id": snapshot_id,
+        "source_raw_sha256": source_hash,
+        "proposed_snapshot_id": _layout_signature(proposed),
+        "proposed_raw_sha256": _raw_state_fingerprint(proposed),
+        "operations": operations,
+        "proposed_layout": _layout_summary_to_json(proposed, {}),
+        "steps": [{"index": index, "snapshot_id": _layout_signature(step),
+                   "raw_sha256": _raw_state_fingerprint(step),
+                   "layout": _layout_summary_to_json(step, {})}
+                  for index, step in enumerate(steps, 1)],
+        "parse_integrity": layout_parse_integrity(proposed),
+        "warning": "Offline projection only; physical placement, writes and recovery are unverified.",
+    })
+
+
 @json.command(name="apply-library-checked")
 def json_apply_library_checked():
     """Experimental, explicitly opted-in checked insertion of one ignored User app.

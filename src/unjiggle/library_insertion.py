@@ -147,3 +147,85 @@ def project_library_folder_insertion(layout, inventory, bundle_id: str, folder_n
     ):
         raise ValueError("The projected icon state did not preserve its structure")
     return projected
+
+
+def project_mixed_operations(layout, inventory, operations):
+    """Check each ordered page/folder move or Library addition without device writes.
+
+    Each move is checked against the preceding raw projection, rather than
+    combining operations with a different cleanup boundary. The installed-app
+    inventory remains the one read for the original layout.
+    """
+    from unjiggle.analyzer import LayoutOperation
+    from unjiggle.layout_engine import check_write
+
+    if not isinstance(operations, list) or not 1 <= len(operations) <= 50:
+        raise ValueError("Provide one to fifty operations")
+    if not layout_parse_integrity(layout)["structure_preserved"] or not raw_state_matches(layout):
+        raise ValueError("The source icon state was not completely preserved")
+
+    current = layout
+    steps = []
+    added = set()
+    for index, entry in enumerate(operations, 1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Operation {index} must be an object")
+        action = entry.get("action")
+        if action == "insert_from_library":
+            if set(entry) not in ({"action", "bundle_id", "target_page"},
+                                  {"action", "bundle_id", "target_folder"}):
+                raise ValueError(f"Operation {index} needs one Library app and one destination")
+            bundle_id = entry["bundle_id"]
+            if not isinstance(bundle_id, str) or not bundle_id.strip() or bundle_id in added:
+                raise ValueError(f"Operation {index} repeats or lacks a Library bundle ID")
+            if "target_page" in entry:
+                next_layout = project_library_insertion(current, inventory, bundle_id, entry["target_page"])
+            else:
+                next_layout = project_library_folder_insertion(current, inventory, bundle_id, entry["target_folder"])
+            added.add(bundle_id)
+        elif action in ("move_to_page", "move_to_folder"):
+            destination = "target_page" if action == "move_to_page" else "folder_name"
+            if set(entry) != {"action", "bundle_ids", destination}:
+                raise ValueError(f"Operation {index} needs bundle IDs and one destination")
+            ids = entry["bundle_ids"]
+            if (not isinstance(ids, list) or not ids or any(
+                not isinstance(b, str) or not b.strip() for b in ids
+            ) or len(set(ids)) != len(ids)):
+                raise ValueError(f"Operation {index} needs distinct Home Screen bundle IDs")
+            if any(current.all_bundle_ids.count(b) != 1 or b in current.fixed_ids() for b in ids):
+                raise ValueError(f"Operation {index} needs movable, unique Home Screen icons")
+            if action == "move_to_page":
+                page = entry[destination]
+                if isinstance(page, bool) or not isinstance(page, int) or not 0 <= page < len(current.pages):
+                    raise ValueError(f"Operation {index} needs an existing page")
+            else:
+                folder_name = entry[destination]
+                if not isinstance(folder_name, str) or not folder_name.strip():
+                    raise ValueError(f"Operation {index} needs an existing folder name")
+                raw = current.raw
+                if not isinstance(raw, dict) or not isinstance(raw.get("iconLists"), list) or not isinstance(raw.get("buttonBar"), list):
+                    raise ValueError(f"Operation {index} cannot locate its folder exactly")
+                folders = [item for page in raw["iconLists"] for item in page
+                           if is_folder_entry(item) and item.get("displayName") == folder_name]
+                dock_match = any(is_folder_entry(item) and item.get("displayName") == folder_name
+                                 for item in raw["buttonBar"])
+                if len(folders) != 1 or dock_match:
+                    raise ValueError(f"Operation {index} needs one unambiguous Home Screen folder")
+            operation = LayoutOperation(action=action, bundle_ids=ids,
+                                        target_page=entry.get("target_page"),
+                                        folder_name=entry.get("folder_name"))
+            raw, _preview, problem = check_write(current, [operation])
+            if problem:
+                raise ValueError(f"Operation {index}: {problem}")
+            next_layout = parse_layout_state(raw)
+            if not raw_state_matches(next_layout) or not layout_parse_integrity(next_layout)["structure_preserved"]:
+                raise ValueError(f"Operation {index} did not preserve its structure")
+            if any(next_layout.all_bundle_ids.count(b) != 1 for b in ids):
+                raise ValueError(f"Operation {index} lost or duplicated a moved icon")
+        else:
+            raise ValueError(f"Operation {index} has an unsupported action")
+        if next_layout.raw == current.raw:
+            raise ValueError(f"Operation {index} makes no change")
+        current = next_layout
+        steps.append(current)
+    return steps

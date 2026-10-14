@@ -42,6 +42,8 @@ An installed-app lookup is a read-only capability. A record missing from the
 Home Screen is only an App Library candidate; do not infer that iOS can display
 its icon or accept it in a new layout without real-device proof. Keep unknown
 Home Screen IDs visible to callers instead of treating them as deletions.
+The mixed-operation check also remains read-only: its ordered layout and Library
+projections are comparison data, not permission for an existing write endpoint.
 
 Run `pytest -q tests/test_write_consent.py tests/test_safety.py` when changing backup,
 restore, or write consent. These tests use a simulated phone. Default diagnostics

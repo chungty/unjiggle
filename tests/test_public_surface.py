@@ -52,6 +52,15 @@ def test_library_insertion_projection_is_documented_as_non_writable():
     assert "`json check-library-insertion`" in architecture
 
 
+def test_mixed_operations_projection_is_documented_as_read_only():
+    assert "check-mixed-operations" in json_group.commands
+    readme = (REPO_ROOT / "README.md").read_text()
+    architecture = (REPO_ROOT / "ARCHITECTURE.md").read_text()
+    assert "`unjiggle json check-mixed-operations`" in readme
+    assert "`json check-mixed-operations`" in architecture
+    assert "writable: false" in readme
+
+
 def test_first_run_help_uses_public_boundary_language():
     result = CliRunner().invoke(main, [])
 

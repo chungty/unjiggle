@@ -113,6 +113,20 @@ nor `apply-checked` can use them to authorize writing these apps to an iPhone.
 Each step also has a `raw_sha256` fingerprint, and the final fingerprint is
 repeated in `proposed_raw_sha256` for exact-state comparison.
 
+`unjiggle json check-mixed-operations` accepts a scan `snapshot_id`, its
+`source_raw_sha256`, and one to fifty ordered `operations`. Each operation is
+either `{"action":"move_to_page","bundle_ids":["..."],"target_page":0}`,
+`{"action":"move_to_folder","bundle_ids":["..."],"folder_name":"Existing Folder"}`,
+or `{"action":"insert_from_library","bundle_id":"...","target_page":0}`
+(replace `target_page` with `"target_folder":"Existing Folder"` to insert
+into a folder). Destinations must already exist when their step runs. The command
+checks each move and Library addition against the preceding projected raw state,
+then returns `steps` with the layout, snapshot ID, and raw SHA-256 after every
+operation. The result includes the final layout and fingerprints and always has
+`writable: false`. The command only reads the phone and installed inventory; its
+projections do not establish physical placement or recovery and cannot authorize
+any checked-write command.
+
 An experimental `unjiggle json apply-library-batch-checked` accepts that check's
 `insertions`, source snapshot and raw fingerprint, proposed snapshot and raw
 fingerprint, plus `checked_step_raw_sha256` containing each step's `raw_sha256`
