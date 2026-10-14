@@ -3145,6 +3145,9 @@ def _json_write_checked(lockdown, device, layout, snapshot_id, expected_raw,
     """One backup, durable recovery candidate, one write and exact raw readback."""
     from unjiggle.device import read_layout, write_layout
 
+    if expected_raw == actual_destination_raw or snapshot_id == predicted_id:
+        _json_err("Not written: the checked destination makes no change. No changes made.")
+
     device_id = _device_fingerprint(device)
     if device_id is None:
         _json_err("Not written: the connected iPhone has no reliable device identifier.")

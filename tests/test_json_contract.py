@@ -690,6 +690,27 @@ def test_checked_apply_writes_once_after_verified_backup_and_exact_proposal(phon
     assert records == [{"journal": result["journal"], "recovery": result["recovery"]}]
 
 
+@pytest.mark.parametrize("unchanged", ["raw", "layout"])
+def test_shared_checked_write_rejects_unchanged_destination_before_backup(phone, capsys, unchanged):
+    source = phone.read_layout("LOCKDOWN")
+    source_id = cli._layout_signature(source)
+    source_raw = cli._raw_state_fingerprint(source)
+    destination = copy.deepcopy(source.raw)
+    if unchanged == "layout":
+        destination[1][0]["unused_metadata"] = "a raw-only change"
+    destination_raw = cli._raw_state_fingerprint(device.parse_layout_state(destination))
+
+    with pytest.raises(SystemExit) as stopped:
+        cli._json_write_checked(
+            "LOCKDOWN", DeviceInfo(name="Test iPhone", model="iPhone18,4", ios_version="26.0", udid="FAKE"),
+            source, source_id, source_raw, destination, source_id, destination_raw, 1,
+        )
+
+    assert stopped.value.code == 1
+    assert "checked destination makes no change" in capsys.readouterr().out
+    assert phone.writes == [] and phone.backups() == []
+
+
 def test_checked_apply_fails_closed_when_journal_cannot_be_saved(phone, monkeypatch):
     request = _checked_request()
 
