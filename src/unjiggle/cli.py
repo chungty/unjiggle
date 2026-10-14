@@ -3172,7 +3172,7 @@ def _checked_recovery_preflight(request, label: str):
     before its own verified backup and write.
     """
     from unjiggle.device import connect, layout_parse_integrity, parse_layout_state, read_layout, restore_layout_from_file
-    from unjiggle import layout_engine
+    from unjiggle import layout_engine, safety
 
     fields = ("backup_sha256", "source_raw_sha256", "applied_raw_sha256", "device_id_sha256")
     if not isinstance(request, dict) or any(
@@ -3184,6 +3184,10 @@ def _checked_recovery_preflight(request, label: str):
     if not isinstance(backup_name, str) or not backup_name or not Path(backup_name).is_file():
         _json_err(f"{label}: checked backup is missing. No changes made.")
     backup_path = Path(backup_name)
+    # A receipt supplied on stdin is not authority to write. Only a matching
+    # durable record in the checked backup directory can authorize recovery.
+    if backup_path.parent != safety.BACKUP_DIR or backup_path.is_symlink():
+        _json_err(f"{label}: checked backup is outside the recovery directory. No changes made.")
     try:
         if _sha256_file(backup_path) != request["backup_sha256"]:
             _json_err(f"{label}: checked backup changed. No changes made.")
@@ -3196,6 +3200,13 @@ def _checked_recovery_preflight(request, label: str):
             or not layout_engine.raw_state_matches(expected)
             or _raw_state_fingerprint(expected) != request["source_raw_sha256"]):
         _json_err(f"{label}: checked backup does not match a complete source layout. No changes made.")
+
+    try:
+        recorded = any(record["recovery"] == request for record in safety.checked_recovery_journals())
+    except Exception as exc:
+        _json_err(f"{label}: checked recovery journal could not be read: {exc}. No changes made.")
+    if not recorded:
+        _json_err(f"{label}: checked recovery journal does not match this receipt. No changes made.")
 
     try:
         lockdown, device = connect()

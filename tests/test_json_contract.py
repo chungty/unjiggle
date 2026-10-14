@@ -750,6 +750,29 @@ def test_check_recovery_only_reads_and_requires_exact_live_state(phone):
     assert len(phone.writes) == 1 and len(phone.backups()) == backups_before
 
 
+def test_checked_recovery_requires_the_original_durable_journal(phone):
+    applied = ok(run("apply-checked", stdin=json.dumps(_checked_request())))
+    receipt = applied["recovery"]
+    Path(applied["journal"]).unlink()
+
+    for command in ("check-recovery", "restore-checked"):
+        result = failed(run(command, stdin=json.dumps(receipt)))
+        assert "journal does not match" in result["error"]
+    assert len(phone.writes) == 1 and len(phone.backups()) == 1
+
+
+def test_checked_recovery_rejects_a_copied_backup_outside_the_recovery_directory(phone, tmp_path):
+    applied = ok(run("apply-checked", stdin=json.dumps(_checked_request())))
+    copied = tmp_path / "copied-layout.json"
+    copied.write_bytes(Path(applied["backup"]).read_bytes())
+    receipt = {**applied["recovery"], "backup": str(copied)}
+
+    for command in ("check-recovery", "restore-checked"):
+        result = failed(run(command, stdin=json.dumps(receipt)))
+        assert "outside the recovery directory" in result["error"]
+    assert len(phone.writes) == 1 and len(phone.backups()) == 1
+
+
 def test_check_recovery_rejects_unapplied_or_tampered_candidate(phone):
     phone.write_error = OSError("USB disconnected before write")
     failed(run("apply-checked", stdin=json.dumps(_checked_request())))
