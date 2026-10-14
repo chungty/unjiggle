@@ -486,6 +486,36 @@ def test_batch_apply_readback_mismatch_keeps_recovery_candidate(batch_phone, mon
     assert len(ok(run("pending-checked"))["records"]) == 1
 
 
+def test_batch_apply_lost_response_recovers_exact_original(batch_phone, monkeypatch):
+    original = copy.deepcopy(batch_phone.raw)
+    request = checked_batch(device.parse_layout_state(original))
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE", "1")
+    original_output = cli._json_out
+
+    def process_stopped_before_response(payload, *args, **kwargs):
+        if payload.get("changed") and payload.get("journal"):
+            raise SystemExit(137)
+        return original_output(payload, *args, **kwargs)
+
+    monkeypatch.setattr(cli, "_json_out", process_stopped_before_response)
+    stopped = run("apply-library-batch-checked", stdin=json.dumps(request))
+    assert stopped.exit_code == 137
+    assert not stopped.stdout
+    monkeypatch.setattr(cli, "_json_out", original_output)
+
+    assert len(batch_phone.writes) == 1
+    assert len(batch_phone.backups()) == 1
+    assert json.loads(batch_phone.backups()[0].read_text()) == original
+    records = ok(run("pending-checked"))["records"]
+    assert len(records) == 1
+    receipt = records[0]["recovery"]
+    assert ok(run("check-recovery", stdin=json.dumps(receipt)))["eligible_for_restore_attempt"] is True
+    assert len(batch_phone.writes) == 1
+    ok(run("restore-checked", stdin=json.dumps(receipt)))
+    assert len(batch_phone.writes) == 2
+    assert batch_phone.raw == original
+
+
 def test_batch_cli_rejects_bad_plan_before_connect_and_stale_state(monkeypatch):
     layout, _ = sample()
     monkeypatch.setattr(device, "connect", lambda: pytest.fail("invalid plan opened device"))
