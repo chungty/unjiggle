@@ -113,6 +113,16 @@ nor `apply-checked` can use them to authorize writing these apps to an iPhone.
 Each step also has a `raw_sha256` fingerprint, and the final fingerprint is
 repeated in `proposed_raw_sha256` for exact-state comparison.
 
+An experimental `unjiggle json apply-library-batch-checked` accepts that check's
+`insertions`, source snapshot and raw fingerprint, proposed snapshot and raw
+fingerprint, plus `checked_step_raw_sha256` containing each step's `raw_sha256`
+in order. It requires `"experimental_library_write": true` and
+`UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE=1`. It rechecks the installed User apps and
+every projected step against the checked plan, then makes a single backed-up,
+journaled raw-state write with exact readback and a `restore-checked` recovery
+receipt. Offline tests cannot prove physical icon placement or restore on an
+iPhone; keep client Apply disabled until these are independently established.
+
 `unjiggle json icon --bundle-id com.example.app` reads one icon from the connected
 iPhone. It returns `{"bundle_id": "...", "png_base64": "..."}` with PNG bytes
 encoded as base64, or `png_base64: null` when the icon is unavailable. It does

@@ -66,6 +66,7 @@ Public:
 - `json check-library-insertion`: strict raw-snapshot-bound, read-only projection onto one existing page or into one unambiguous existing folder for one ignored User app; always non-writable, with no physical-placement guarantee
 - `json check-library-insertions`: read-only, scan-bound prefix projections for up to fifty distinct ignored User apps; always non-writable, with no physical-placement guarantee
 - `json apply-library-checked`: experimental single-app checked insertion behind both an explicit request opt-in and an environment gate. Rechecks installed identity and source/destination fingerprints, then uses the same verified backup, recovery journal, single write and exact raw readback as `apply-checked`. Offline tests exercise it; no physical icon placement or recovery is certified. Clients must not enable the gate from a preview alone.
+- `json apply-library-batch-checked`: experimental generic batch of up to fifty checked insertions, bound to each prefix raw fingerprint and the final source/destination state. Uses one verified backup, recovery journal, raw write and exact readback; offline tests cannot certify physical placement or recovery. It shares the explicit request and environment gates above.
 
 Private:
 - "One-Page Challenge"

@@ -384,6 +384,108 @@ def test_experimental_library_apply_keeps_candidate_if_readback_does_not_match(i
     assert len(ok(run("pending-checked"))["records"]) == 1
 
 
+@pytest.fixture
+def batch_phone(insertion_phone, monkeypatch):
+    second = "org.example.second"
+    insertion_phone.raw["ignored"].append(second)
+
+    def inventory(_lockdown, layout):
+        return device.reconcile_installed_apps({
+            APP: {"ApplicationType": "User"}, second: {"ApplicationType": "User"},
+        }, layout)
+
+    monkeypatch.setattr(device, "read_installed_apps", inventory)
+    return insertion_phone
+
+
+def checked_batch(layout):
+    request = {"insertions": [
+        {"bundle_id": APP, "target_page": 0},
+        {"bundle_id": "org.example.second", "target_page": 0},
+    ], "snapshot_id": cli._layout_signature(layout),
+        "source_raw_sha256": cli._raw_state_fingerprint(layout)}
+    checked = ok(run("check-library-insertions", stdin=json.dumps(request)))
+    return {**request, "proposed_snapshot_id": checked["proposed_snapshot_id"],
+            "proposed_raw_sha256": checked["proposed_raw_sha256"],
+            "checked_step_raw_sha256": [step["raw_sha256"] for step in checked["steps"]],
+            "experimental_library_write": True}
+
+
+def test_batch_apply_one_write_one_backup_journal_and_exact_restore(batch_phone, monkeypatch):
+    original = copy.deepcopy(batch_phone.raw)
+    request = checked_batch(device.parse_layout_state(original))
+    assert "disabled" in failed(run("apply-library-batch-checked", stdin=json.dumps(request)))["error"]
+    assert not batch_phone.writes and not batch_phone.backups()
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE", "1")
+    assert "disabled" in failed(run("apply-library-batch-checked", stdin=json.dumps({
+        **request, "experimental_library_write": False})))["error"]
+    assert not batch_phone.writes and not batch_phone.backups()
+    applied = ok(run("apply-library-batch-checked", stdin=json.dumps(request)))
+    assert len(batch_phone.writes) == 1
+    assert len(batch_phone.backups()) == 1
+    assert json.loads(batch_phone.backups()[0].read_text()) == original
+    assert applied["recovery"]["applied_raw_sha256"] == request["proposed_raw_sha256"]
+    assert applied["journal"] == ok(run("pending-checked"))["records"][0]["journal"]
+    assert batch_phone.raw["iconLists"][0][-2:] == [APP, "org.example.second"]
+    ok(run("restore-checked", stdin=json.dumps(applied["recovery"])))
+    assert batch_phone.raw == original
+
+
+@pytest.mark.parametrize("change", [
+    lambda request: request.update(checked_step_raw_sha256=["0" * 64, request["proposed_raw_sha256"]]),
+    lambda request: request.update(proposed_raw_sha256="0" * 64),
+    lambda request: request["insertions"][1].update(target_page=True),
+])
+def test_batch_apply_rejects_tampered_plan_without_write(batch_phone, monkeypatch, change):
+    request = checked_batch(device.parse_layout_state(batch_phone.raw))
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE", "1")
+    change(request)
+    assert "Not written" in failed(run("apply-library-batch-checked", stdin=json.dumps(request)))["error"]
+    assert not batch_phone.writes and not batch_phone.backups()
+
+
+def test_batch_apply_refuses_inventory_drift_before_backup(batch_phone, monkeypatch):
+    request = checked_batch(device.parse_layout_state(batch_phone.raw))
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE", "1")
+    inventory = device.read_installed_apps
+
+    def drift(lockdown, layout):
+        result = inventory(lockdown, layout)
+        batch_phone.raw["uniqueIdentifier"] = "drift during inventory"
+        return result
+
+    monkeypatch.setattr(device, "read_installed_apps", drift)
+    assert "changed while reading" in failed(run("apply-library-batch-checked", stdin=json.dumps(request)))["error"]
+    assert not batch_phone.writes and not batch_phone.backups()
+
+
+def test_batch_apply_journal_failure_keeps_backup_without_write(batch_phone, monkeypatch):
+    request = checked_batch(device.parse_layout_state(batch_phone.raw))
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE", "1")
+
+    def no_journal(*_args):
+        raise OSError("journal unavailable")
+
+    monkeypatch.setattr(safety, "checked_recovery_journal", no_journal)
+    assert "journal could not be saved" in failed(run("apply-library-batch-checked", stdin=json.dumps(request)))["error"]
+    assert not batch_phone.writes and len(batch_phone.backups()) == 1
+
+
+def test_batch_apply_readback_mismatch_keeps_recovery_candidate(batch_phone, monkeypatch):
+    request = checked_batch(device.parse_layout_state(batch_phone.raw))
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE", "1")
+
+    def normalized(raw):
+        changed = copy.deepcopy(raw)
+        changed["uniqueIdentifier"] = "iOS changed raw metadata"
+        return changed
+
+    batch_phone.keep = normalized
+    assert "verification failed" in failed(run("apply-library-batch-checked", stdin=json.dumps(request)))["error"]
+    assert len(batch_phone.writes) == 1
+    assert len(ok(run("pending-checked"))["records"]) == 1
+
+
 def test_batch_cli_rejects_bad_plan_before_connect_and_stale_state(monkeypatch):
     layout, _ = sample()
     monkeypatch.setattr(device, "connect", lambda: pytest.fail("invalid plan opened device"))

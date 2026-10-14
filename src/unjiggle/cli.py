@@ -2843,6 +2843,71 @@ def json_apply_library_checked():
                         proposed.raw, predicted_id, proposed_hash, 1)
 
 
+@json.command(name="apply-library-batch-checked")
+def json_apply_library_batch_checked():
+    """Experimental single raw-state write for checked library insertions.
+
+    Exact raw readback does not prove visible placement or physical recovery.
+    """
+    from unjiggle.device import connect, read_installed_apps, read_layout
+    from unjiggle.library_insertion import project_library_insertions
+
+    try:
+        request = _json.loads(_read_stdin())
+    except ValueError as error:
+        _json_err(f"Invalid JSON input: {error}")
+    if not isinstance(request, dict):
+        _json_err("Expected a checked library batch request object")
+    if (request.get("experimental_library_write") is not True
+            or os.environ.get("UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE") != "1"):
+        _json_err("Not written: experimental library insertion is disabled.")
+    insertions = request.get("insertions")
+    if not isinstance(insertions, list) or not 1 <= len(insertions) <= 50 or any(
+        not isinstance(entry, dict) or set(entry) != {"bundle_id", "target_page"}
+        or not isinstance(entry["bundle_id"], str) or not entry["bundle_id"].strip()
+        or isinstance(entry["target_page"], bool) or not isinstance(entry["target_page"], int)
+        for entry in insertions
+    ) or len({entry["bundle_id"] for entry in insertions}) != len(insertions):
+        _json_err("Not written: provide one to fifty unique bundle IDs and existing page indices.")
+    snapshot_id = request.get("snapshot_id")
+    proposed_id = request.get("proposed_snapshot_id")
+    source_hash = request.get("source_raw_sha256")
+    proposed_hash = request.get("proposed_raw_sha256")
+    step_hashes = request.get("checked_step_raw_sha256")
+    if any(not isinstance(value, str) or not value for value in (snapshot_id, proposed_id)):
+        _json_err("Not written: source and proposed snapshot IDs are required.")
+    def valid_hash(value):
+        return isinstance(value, str) and len(value) == 64 and all(
+            character in "0123456789abcdef" for character in value)
+    if (not valid_hash(source_hash) or not valid_hash(proposed_hash)
+            or not isinstance(step_hashes, list) or len(step_hashes) != len(insertions)
+            or any(not valid_hash(value) for value in step_hashes)
+            or step_hashes[-1] != proposed_hash):
+        _json_err("Not written: source, proposed, and every checked step raw-state SHA-256 are required.")
+
+    try:
+        lockdown, connected_device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+    source = read_layout(lockdown)
+    if _layout_signature(source) != snapshot_id or _raw_state_fingerprint(source) != source_hash:
+        _json_err("Not written: the source icon state changed since the check. Scan again.")
+    try:
+        inventory = read_installed_apps(lockdown, source)
+        steps = project_library_insertions(source, inventory, insertions)
+    except (ValueError, TypeError, KeyError) as error:
+        _json_err(f"Not written: insertions could not be verified: {error}.")
+    if (_layout_signature(steps[-1]) == snapshot_id
+            or _layout_signature(steps[-1]) != proposed_id
+            or [_raw_state_fingerprint(step) for step in steps] != step_hashes):
+        _json_err("Not written: the checked steps do not match the proposed icon state.")
+    after_inventory = read_layout(lockdown)
+    if _layout_signature(after_inventory) != snapshot_id or _raw_state_fingerprint(after_inventory) != source_hash:
+        _json_err("Not written: the icon state changed while reading installed apps. Scan again.")
+    _json_write_checked(lockdown, connected_device, source, snapshot_id, source_hash,
+                        steps[-1].raw, proposed_id, proposed_hash, len(insertions))
+
+
 @json.command(name="apply-checked")
 def json_apply_checked():
     """Apply only the exact, structure-preserving proposal previously checked.

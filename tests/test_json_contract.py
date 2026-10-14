@@ -328,7 +328,7 @@ def app_payload(operations: list[dict], snapshot_id: str | None = None) -> str:
 # --- each command -----------------------------------------------------------------------
 
 
-CONTRACT_COMMANDS = {"status", "scan", "inventory", "icon", "diagnose", "mirror", "obituary", "suggest", "presets", "restore", "render", "apply", "check-operations", "check-library-insertion", "check-library-insertions", "apply-library-checked", "apply-checked", "pending-checked", "check-recovery", "restore-checked"}
+CONTRACT_COMMANDS = {"status", "scan", "inventory", "icon", "diagnose", "mirror", "obituary", "suggest", "presets", "restore", "render", "apply", "check-operations", "check-library-insertion", "check-library-insertions", "apply-library-checked", "apply-library-batch-checked", "apply-checked", "pending-checked", "check-recovery", "restore-checked"}
 
 
 def test_the_contract_version_is_2():
