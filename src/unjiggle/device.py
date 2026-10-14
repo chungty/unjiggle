@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import Mapping
 
 from unjiggle.models import (
     AppItem,
@@ -260,6 +262,56 @@ def parse_layout_state(raw_state) -> HomeScreenLayout:
     raise RuntimeError(f"Unexpected icon state format: {type(raw_state)}")
 
 
+def layout_parse_integrity(layout: HomeScreenLayout) -> dict:
+    """Report whether the parsed scan kept every raw page and icon entry.
+
+    This checks structural preservation, not icon coordinates or whether the
+    device will render an edited layout as predicted. An incomplete read must
+    not be used as the basis for an exact visual preview.
+    """
+    raw = layout.raw
+    if isinstance(raw, list):
+        raw_dock, raw_pages = (raw[0] if raw else []), raw[1:]
+    elif isinstance(raw, dict):
+        raw_dock, raw_pages = raw.get("buttonBar"), raw.get("iconLists")
+    else:
+        raw_dock, raw_pages = None, None
+
+    if not isinstance(raw_dock, list) or not isinstance(raw_pages, list):
+        return {"structure_preserved": False, "raw_page_count": None,
+                "unparsed_items": None, "dropped_empty_pages": None}
+
+    raw_lists = [raw_dock, *raw_pages]
+    if any(not isinstance(items, list) for items in raw_lists):
+        return {"structure_preserved": False, "raw_page_count": len(raw_pages),
+                "unparsed_items": None, "dropped_empty_pages": None}
+
+    unparsed = sum(1 for items in raw_lists for item in items if _parse_item(item) is None)
+    dropped_empty_pages = sum(not page for page in raw_pages)
+    # A folder's iconLists are themselves pages. Account for unknown contents
+    # without including a title or an app identifier in this diagnostic.
+    for items in raw_lists:
+        for item in items:
+            if not is_folder_entry(item):
+                continue
+            folder_pages = item.get("iconLists")
+            if not isinstance(folder_pages, list):
+                unparsed += 1
+                continue
+            for page in folder_pages:
+                if not isinstance(page, list):
+                    unparsed += 1
+                else:
+                    unparsed += sum(entry_app_id(child) is None for child in page)
+
+    return {
+        "structure_preserved": not unparsed and not dropped_empty_pages,
+        "raw_page_count": len(raw_pages),
+        "unparsed_items": unparsed,
+        "dropped_empty_pages": dropped_empty_pages,
+    }
+
+
 def read_layout(lockdown) -> HomeScreenLayout:
     """Read the current home screen layout from the connected device."""
     from pymobiledevice3.services.springboard import SpringBoardServicesService
@@ -270,6 +322,99 @@ def read_layout(lockdown) -> HomeScreenLayout:
 
     raw_state = _run(_read())
     return parse_layout_state(raw_state)
+
+
+@dataclass(frozen=True)
+class InstalledApp:
+    """An installation-proxy result; absence from the Home Screen is provisional."""
+
+    bundle_id: str
+    display_name: str | None
+    on_home_screen: bool
+    application_type: str | None
+
+
+@dataclass(frozen=True)
+class InstalledAppInventory:
+    apps: tuple[InstalledApp, ...]
+    # May include pinned shortcuts and apps omitted by installation proxy.
+    unmatched_home_screen_ids: tuple[str, ...]
+    # A confirmed placeholder remains unmatched and is never an install candidate.
+    placeholder_home_screen_ids: tuple[str, ...] = ()
+
+
+def reconcile_installed_apps(
+    records: Mapping[str, dict], layout: HomeScreenLayout,
+    placeholder_records: Mapping[str, dict] | None = None,
+) -> InstalledAppInventory:
+    """Reconcile read-only installed-app records with a Home Screen snapshot.
+
+    Do not treat an unmatched ID as an uninstalled app: SpringBoard can expose
+    shortcuts and managed icons that installation proxy does not return.
+    """
+    if not isinstance(records, Mapping) or not records:
+        raise ValueError("Installed-app response is missing or empty")
+    visible = set(layout.all_bundle_ids)
+    apps = []
+    for bundle_id, data in records.items():
+        if not isinstance(bundle_id, str) or not bundle_id.strip() or not isinstance(data, dict):
+            raise ValueError("Installed-app response contains an invalid entry")
+        reported_id = data.get("CFBundleIdentifier")
+        if reported_id is not None and reported_id != bundle_id:
+            raise ValueError(f"Installed-app identifier does not match record key: {bundle_id}")
+        name = data.get("CFBundleDisplayName") or data.get("CFBundleName")
+        if name is not None and not isinstance(name, str):
+            raise ValueError(f"Installed-app display name is invalid: {bundle_id}")
+        app_type = data.get("ApplicationType")
+        if app_type is not None and not isinstance(app_type, str):
+            raise ValueError(f"Installed-app type is invalid: {bundle_id}")
+        apps.append(InstalledApp(bundle_id, name, bundle_id in visible, app_type))
+    apps.sort(key=lambda app: app.bundle_id)
+    unmatched = visible - records.keys()
+    confirmed_placeholders = []
+    for bundle_id, data in (placeholder_records or {}).items():
+        if bundle_id not in unmatched or not isinstance(data, dict):
+            raise ValueError("Placeholder response contains an unexpected entry")
+        if data.get("CFBundleIdentifier", bundle_id) != bundle_id:
+            raise ValueError("Placeholder identifier does not match record key")
+        marker = data.get("IsPlaceholder")
+        if not isinstance(marker, bool):
+            raise ValueError("Placeholder status is invalid")
+        if marker:
+            confirmed_placeholders.append(bundle_id)
+    return InstalledAppInventory(
+        apps=tuple(apps),
+        unmatched_home_screen_ids=tuple(sorted(unmatched)),
+        placeholder_home_screen_ids=tuple(sorted(confirmed_placeholders)),
+    )
+
+
+def read_installed_apps(lockdown, layout: HomeScreenLayout) -> InstalledAppInventory:
+    """Read a provisional installed-app inventory without changing device state.
+
+    An app absent from the supplied Home Screen snapshot is only a candidate for
+    App Library: validate the actual inventory and icon on a device before use.
+    """
+    from pymobiledevice3.services.installation_proxy import InstallationProxyService
+
+    async def _read():
+        async with InstallationProxyService(lockdown) as service:
+            records = await service.get_apps(application_type="Any")
+            # Query only IDs that the ordinary inventory omitted. A placeholder
+            # is an icon in the layout, not an installable App Library app.
+            if not isinstance(records, Mapping) or not records:
+                raise ValueError("Installed-app response is missing or empty")
+            unmatched = sorted(set(layout.all_bundle_ids) - records.keys())
+            placeholders = (
+                await service.get_apps(
+                    application_type="Any", bundle_identifiers=unmatched,
+                    show_placeholders=True,
+                ) if unmatched else {}
+            )
+            return records, placeholders
+
+    records, placeholders = _run(_read())
+    return reconcile_installed_apps(records, layout, placeholders)
 
 
 def write_layout(lockdown, state) -> None:

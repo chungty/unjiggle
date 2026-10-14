@@ -79,6 +79,47 @@ The interactive `restore` command requires an exact read-back match, including i
 
 `unjiggle json ...` exposes structured output for external clients.
 
+`unjiggle json inventory` reads installed app identifiers and names alongside a
+Home Screen snapshot. Each app includes `on_home_screen`; the response also lists
+Home Screen IDs missing from the installation lookup in `unmatched_home_screen_ids`.
+An app absent from the Home Screen is only a candidate for App Library: this read
+does not verify its icon or whether iOS can place it on a page. The command never
+writes to the device or sends the inventory to an AI provider.
+
+`unjiggle json check-library-insertion` accepts
+`{"bundle_id":"...","target_page":0,"snapshot_id":"...","source_raw_sha256":"..."}`
+or the same request with `"target_folder":"Existing Folder"` instead of
+`target_page`. Choose exactly one destination. For a folder, the command requires
+one uniquely named, structurally complete existing Home Screen folder. It fills
+the last folder page first and projects a new folder page after nine icons.
+The command checks one installed User app that occurs exactly once in a dict-format
+icon state's `ignored` list. It projects removal from that list and addition to
+the chosen destination, after checking the snapshot, installed identity, complete
+structure, and capacity. It rereads the icon state after the installed-app
+lookup. Its result always has `writable: false`: simulator state supports the
+offline projection, but physical iPhone insertion, grid location, and recovery
+remain unverified. This command does not write and cannot authorize `apply-checked`.
+
+An experimental `unjiggle json apply-library-checked` accepts the single-app check's exact request and its `proposed_snapshot_id` and `proposed_raw_sha256`. It only runs when the request also contains `"experimental_library_write": true` **and** the process explicitly sets `UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE=1`. It rechecks the installed User app, source and proposed raw state, saves a verified backup and recovery journal, writes once, and requires an exact raw-state readback before issuing a `recovery` receipt compatible with `restore-checked`. This has been exercised only with an in-memory device; the environment gate is for isolated experiments and does not mean insertion or restore is safe on a physical phone. Keep client Apply disabled until physical placement and recovery have been established.
+
+The read-only result includes `proposed_raw_sha256`, a fingerprint of the
+complete projected icon state; it is evidence for comparison, not write permission.
+
+`unjiggle json check-library-insertions` accepts the same snapshot and raw
+fingerprint with `"insertions":[{"bundle_id":"...","target_page":0}, ...]`.
+It returns a checked layout after each step, for up to fifty distinct installed
+User apps in `ignored`. Its projections are read-only, and neither this command
+nor `apply-checked` can use them to authorize writing these apps to an iPhone.
+Each step also has a `raw_sha256` fingerprint, and the final fingerprint is
+repeated in `proposed_raw_sha256` for exact-state comparison.
+
+`unjiggle json icon --bundle-id com.example.app` reads one icon from the connected
+iPhone. It returns `{"bundle_id": "...", "png_base64": "..."}` with PNG bytes
+encoded as base64, or `png_base64: null` when the icon is unavailable. It does
+not change the layout. An icon alone does not prove that the app is visible in
+App Library or can be added to the Home Screen. Icon images stay local unless
+you explicitly share the JSON output.
+
 Useful preset endpoints:
 - `unjiggle json suggest --preset focus|relax|minimal|beautiful` for one preset preview
 - `unjiggle json presets` for a batch of all built-in preset previews from one shared scan
@@ -88,6 +129,14 @@ In a transform preview, each entry of `changes` has `from_page` and `to_page` co
 `unjiggle.cli.JSON_CONTRACT` is the version of this contract (now 2). A client that bundles the engine can require a minimum version. Every `unjiggle json` command asks no question and writes exactly one JSON document to stdout. All other text goes to stderr. On failure, the document is `{"error": "..."}`, the message also goes to stderr, and the exit code is 1.
 
 `unjiggle json apply` reads `{"operations": [...], "snapshot_id": "..."}` from stdin and applies all operations together, as the preview of `json suggest` shows them. `snapshot_id` is optional. Send the `snapshot_id` of the preview (from `json suggest` or `json presets`): when the layout on the phone changed after the preview, apply writes nothing and returns an error that starts with `Not written:`. Before it writes, it checks the new icon state: when that state would differ from the preview, would remove an icon that no operation names, or would add an app that is not on the home screen, it writes nothing and returns an error that starts with `Not written:`. Then it makes a verified backup, writes, and reads the layout back to compare it with the preview. Neither this command nor `unjiggle suggest` performs a separate round-trip test before the requested write. In the output, `backup` is the path of the backup of the layout before the command, also when nothing changed (`"changed": false`). `unjiggle json restore <backup>` attempts to restore it; another device write is required. When the write or the read-back check fails, the error also has `backup`.
+
+For clients that need an exact reviewed destination, `unjiggle json check-operations` accepts operations and a required scan `snapshot_id`. It performs a read-only structural and transformation check and returns `proposed_snapshot_id` plus `source_raw_sha256` alongside the proposal. `unjiggle json apply-checked` requires those values with the same operations and source snapshot. It rereads the device, rejects a different raw source or projected destination, saves a verified backup, rereads once more before writing, and requires the full raw icon state to match the predicted write before returning a recovery receipt. It refuses App Library-only source apps. If iOS normalizes even unseen metadata, the write may have happened but the command reports failure and keeps the backup for manual review. The backup and read-back checks do not prove the icons' visible positions or that a subsequent restore will succeed. Both commands operate on the icon-state engine's supported transformations, not arbitrary installed-app placement.
+
+For a read-only step sequence, set `include_steps` to `true` in the `check-operations` request (up to 50 operations). The response includes each operation-prefix layout projected from one device read. These projections do not certify visible iOS icon positions.
+
+On successful `apply-checked`, the result also contains a `recovery` receipt. A client can pass that object on stdin to `unjiggle json restore-checked`. It verifies the original backup's bytes and complete source state, identifies the same phone by a hash of its device ID, refuses to overwrite any icon-state changes made after the apply, saves a new verified backup, checks again for drift, writes once, and requires the full raw source state on read-back. An incomplete or changed receipt fails without writing. A read-back mismatch after writing requires manual review; it does not trigger another write. This is an offline-checked safety boundary, not proof that a physical iPhone will render or recover its prior layout. Keep the receipt and both backup paths; a failed write never triggers an automatic retry. The older `json restore <backup>` remains available for manually reviewed recovery and does not provide these checked guards.
+
+Before `apply-checked` writes, it saves a private, flushed `checked-recovery-*.json` journal beside the verified backup. This records the expected destination and original backup even if the process stops before sending a result; failure to save it stops the write. `restore-checked` now saves a second, reverse recovery journal beside its own verified pre-restore backup before attempting its write. If interrupted, this record can be audited against the exact post-restore state; it is labeled `operation: restore` in the pending list. Failure to save either journal stops that write. `unjiggle json pending-checked` lists journal paths and candidate `recovery` receipts from disk without contacting the phone. Pass a receipt to `unjiggle json check-recovery` on stdin to check its backup, original device identity, and exact current icon state without writing or creating another backup. A successful check establishes eligibility for a restore attempt at that moment, not physical recovery; `restore-checked` repeats the checks before writing. A journal does not prove the write happened or succeeded. Successful checked apply and restore responses include their `journal` paths.
 
 `unjiggle json restore` refuses a backup with no apps on the home screen (an empty or damaged file), because it would take every icon off the home screen. Before it writes, it makes a verified backup of the layout on the phone, and returns its path as `undo_backup`. When the write or the read-back check fails, the error also has `undo_backup`. The restore writes each date of the backup (`iconModDate`) as a date, as the phone gave it, not as the text of the JSON file. It passes when the phone reads back as the backup. It accepts values of the icon state that SpringBoard changes on a write, when the dock, the pages, the folders and the widgets are the same.
 

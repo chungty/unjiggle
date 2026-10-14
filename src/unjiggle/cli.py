@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
+import hashlib
 import json as _json
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -1363,7 +1366,7 @@ def json_status():
 @json.command(name="scan")
 def json_scan():
     """Full layout data as JSON."""
-    from unjiggle.device import connect, read_layout
+    from unjiggle.device import connect, layout_parse_integrity, read_layout
     from unjiggle.itunes import enrich_layout
 
     try:
@@ -1380,10 +1383,81 @@ def json_scan():
         "page_count": layout.page_count,
         "folder_count": len(layout.all_folders()),
         "dock_items": len(layout.dock),
+        "dock": _layout_items_to_json(layout.dock, metadata),
         "pages": _layout_to_pages_json(layout, metadata),
+        "parse_integrity": layout_parse_integrity(layout),
+        # The layout signature alone omits SpringBoard's ignored list. Clients
+        # need this raw fingerprint to bind a read-only library projection to
+        # the same scan without making an unrelated move first.
+        "source_raw_sha256": _raw_state_fingerprint(layout),
     }
     payload.update(_snapshot_metadata(layout))
     _json_out(payload)
+
+
+@json.command(name="inventory")
+def json_inventory():
+    """Read installed app identities alongside a Home Screen snapshot; never write.
+
+    Apps missing from the Home Screen are candidates for App Library, not proof
+    that they are visible or addable there. Unknown Home Screen IDs are retained
+    for callers to review instead of silently treating them as removable apps.
+    """
+    from unjiggle.device import connect, read_installed_apps, read_layout
+
+    try:
+        lockdown, device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
+    inventory = read_installed_apps(lockdown, layout)
+    payload = {
+        "device": _device_dict(device),
+        "apps": [
+            {
+                "bundle_id": app.bundle_id,
+                "display_name": app.display_name,
+                "on_home_screen": app.on_home_screen,
+                "application_type": app.application_type,
+            }
+            for app in inventory.apps
+        ],
+        "unmatched_home_screen_ids": list(inventory.unmatched_home_screen_ids),
+        "placeholder_home_screen_ids": list(inventory.placeholder_home_screen_ids),
+    }
+    payload.update(_snapshot_metadata(layout))
+    _json_out(payload)
+
+
+@json.command(name="icon")
+@click.option("--bundle-id", required=True, help="Exact installed-app bundle identifier")
+def json_icon(bundle_id: str):
+    """Read one app icon from the connected iPhone as PNG; never change the layout.
+
+    A missing icon is reported explicitly. An icon response alone does not prove
+    that the app is visible in App Library or can be added to the Home Screen.
+    """
+    from unjiggle.device import connect, fetch_icon
+
+    if not bundle_id.strip() or len(bundle_id) > 512:
+        _json_err("Invalid app identifier")
+    try:
+        lockdown, _ = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    png = fetch_icon(lockdown, bundle_id)
+    if png is None:
+        _json_out({"bundle_id": bundle_id, "png_base64": None})
+        return
+    if (not isinstance(png, bytes) or len(png) < 24 or len(png) > 1_000_000
+            or not png.startswith(b"\x89PNG\r\n\x1a\n")
+            or png[12:16] != b"IHDR"
+            or int.from_bytes(png[16:20], "big") == 0
+            or int.from_bytes(png[20:24], "big") == 0):
+        _json_err("The iPhone returned an invalid or oversized app icon")
+    _json_out({"bundle_id": bundle_id, "png_base64": base64.b64encode(png).decode("ascii")})
 
 
 @json.command(name="diagnose")
@@ -1638,6 +1712,23 @@ def _layout_signature(layout) -> str:
         },
         sort_keys=True,
     )
+
+
+def _raw_state_fingerprint(layout) -> str:
+    """Bind a checked write to fields the parsed layout signature cannot see."""
+    return hashlib.sha256(_json.dumps(layout.raw, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _device_fingerprint(device) -> str | None:
+    """Bind a checked recovery to one identified handset without exposing its UDID."""
+    udid = getattr(device, "udid", None)
+    if not isinstance(udid, str) or not udid or udid == "Unknown":
+        return None
+    return hashlib.sha256(udid.encode()).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _read_back_check(read_back, expected, before=None, *, apps_of_before: bool = True) -> list[dict] | None:
@@ -2432,13 +2523,18 @@ def _read_apply_operations() -> tuple[list, str | None]:
     """The input of `json apply` from stdin: {"operations": [...], "snapshot_id": ...}.
     Returns the operations and the snapshot_id (None when the input has none). Stops the
     command with a JSON error when the input is not that."""
-    from unjiggle.analyzer import LayoutOperation
-
-    expected = 'Expected {"operations": [...]}'
     try:
         data = _json.loads(_read_stdin())
     except ValueError as e:  # also a JSONDecodeError or a UnicodeDecodeError
         _json_err(f"Invalid JSON input: {e}")
+    return _parse_apply_operations(data)
+
+
+def _parse_apply_operations(data) -> tuple[list, str | None]:
+    """Validate operations from an already decoded request (also used by checked apply)."""
+    from unjiggle.analyzer import LayoutOperation
+
+    expected = 'Expected {"operations": [...]}'
     if not isinstance(data, dict):
         _json_err(f"Invalid JSON input. {expected}")
     operations_data = data.get("operations")
@@ -2478,6 +2574,536 @@ def _json_verified_backup(lockdown, layout) -> Path:
         return safety.verified_backup(lockdown, layout, out=_err_console)
     except Exception as e:
         _json_err(f"Backup failed: {e}. No changes made.")
+
+
+@json.command(name="check-operations")
+def json_check_operations():
+    """Read-only, snapshot-bound preflight of the operations used by json apply.
+
+    A successful check certifies the engine's predicted icon-state transformation,
+    not iOS rendering or the safety of a subsequent physical-device write. The
+    caller must recheck the snapshot and backup immediately before any later write.
+    """
+    from unjiggle.device import connect, layout_parse_integrity, parse_layout_state, read_layout
+    from unjiggle import layout_engine
+
+    try:
+        request = _json.loads(_read_stdin())
+    except ValueError as e:
+        _json_err(f"Invalid JSON input: {e}")
+    ops, snapshot_id = _parse_apply_operations(request)
+    include_steps = request.get("include_steps", False)
+    if not isinstance(include_steps, bool):
+        _json_err('"include_steps" must be true or false.')
+    if include_steps and len(ops) > 50:
+        _json_err("Step preflight supports at most 50 operations per request.")
+    if not snapshot_id:
+        _json_err('A nonempty "snapshot_id" from json scan is required for preflight.')
+
+    try:
+        lockdown, _device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+
+    layout = read_layout(lockdown)
+    if snapshot_id != _layout_signature(layout):
+        _json_err("Not checked: the layout on the iPhone changed since the scan. Scan again.")
+    integrity = layout_parse_integrity(layout)
+    if not integrity["structure_preserved"] or not layout_engine.raw_state_matches(layout):
+        _json_err("Not checked: the scan did not preserve the complete icon-state structure.")
+
+    visible_ids = set(layout.all_bundle_ids)
+    for op in ops:
+        if op.action in ("move_to_page", "move_to_folder", "create_folder"):
+            absent = [bundle_id for bundle_id in op.bundle_ids if bundle_id not in visible_ids]
+            if absent:
+                _json_err("Not writable: a requested app is not on the home screen.")
+
+    _raw, predicted, problem = _prepare_write(layout, ops)
+    if problem:
+        _json_err(f"Not writable: {problem}.")
+    if _layout_signature(predicted) == snapshot_id:
+        _json_err("Not writable: the proposed operations make no change.")
+
+    steps = []
+    if include_steps:
+        for index in range(1, len(ops) + 1):
+            if index == len(ops):
+                step_layout = predicted
+            else:
+                _step_raw, step_layout, step_problem = _prepare_write(layout, ops[:index])
+                if step_problem:
+                    _json_err(f"Not writable at step {index}: {step_problem}.")
+                if _layout_signature(step_layout) == snapshot_id:
+                    _json_err(f"Not writable: step {index} makes no change.")
+            steps.append({"index": index, "snapshot_id": _layout_signature(step_layout),
+                          "layout": _layout_summary_to_json(step_layout, {})})
+
+    _json_out({
+        "writable": True,
+        "snapshot_id": snapshot_id,
+        "source_raw_sha256": _raw_state_fingerprint(layout),
+        "proposed_snapshot_id": _layout_signature(predicted),
+        "proposed_raw_sha256": _raw_state_fingerprint(parse_layout_state(_raw)),
+        "operations": [_operation_to_json(op) for op in ops],
+        "proposed_layout": _layout_summary_to_json(predicted, {}),
+        "steps": steps,
+        "parse_integrity": integrity,
+        "warning": "Engine preflight only; physical iOS placement and undo are not verified.",
+    })
+
+
+@json.command(name="check-library-insertion")
+def json_check_library_insertion():
+    """Read-only projection of one ignored User app onto a page or into a folder.
+
+    The successful result deliberately cannot be sent to apply-checked: physical
+    insertion and recovery have not been established.
+    """
+    from unjiggle.device import connect, layout_parse_integrity, read_installed_apps, read_layout
+    from unjiggle.library_insertion import project_library_folder_insertion, project_library_insertion
+
+    try:
+        request = _json.loads(_read_stdin())
+    except ValueError as error:
+        _json_err(f"Invalid JSON input: {error}")
+    if not isinstance(request, dict):
+        _json_err("Expected a library insertion request object")
+    bundle_id = request.get("bundle_id")
+    target_page = request.get("target_page")
+    target_folder = request.get("target_folder")
+    snapshot_id = request.get("snapshot_id")
+    source_hash = request.get("source_raw_sha256")
+    if not isinstance(snapshot_id, str) or not snapshot_id or not isinstance(source_hash, str) or len(source_hash) != 64 or any(c not in "0123456789abcdef" for c in source_hash):
+        _json_err("A current scan snapshot ID and raw-state SHA-256 are required")
+    if not isinstance(bundle_id, str) or not bundle_id.strip():
+        _json_err("A bundle ID is required")
+    if ("target_page" in request) == ("target_folder" in request):
+        _json_err("Choose exactly one existing page or folder destination")
+    if "target_page" in request and (isinstance(target_page, bool) or not isinstance(target_page, int)):
+        _json_err("An existing page index is required")
+    if "target_folder" in request and (not isinstance(target_folder, str) or not target_folder.strip()):
+        _json_err("An existing folder name is required")
+
+    try:
+        lockdown, _device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+    source = read_layout(lockdown)
+    if _layout_signature(source) != snapshot_id or _raw_state_fingerprint(source) != source_hash:
+        _json_err("The source icon state changed since the scan. Scan again.")
+    try:
+        inventory = read_installed_apps(lockdown, source)
+        if "target_folder" in request:
+            proposed = project_library_folder_insertion(source, inventory, bundle_id, target_folder)
+        else:
+            proposed = project_library_insertion(source, inventory, bundle_id, target_page)
+    except (ValueError, TypeError, KeyError) as error:
+        _json_err(f"Insertion not checked: {error}")
+    # Installation-proxy and SpringBoard reads are separate; refuse a result
+    # if the layout drifted while the inventory request was in progress.
+    if _raw_state_fingerprint(read_layout(lockdown)) != source_hash:
+        _json_err("The icon state changed while reading installed apps. Scan again.")
+    destination = {"target_folder": target_folder} if "target_folder" in request else {"target_page": target_page}
+    _json_out({
+        "writable": False,
+        "bundle_id": bundle_id,
+        **destination,
+        "snapshot_id": snapshot_id,
+        "source_raw_sha256": source_hash,
+        "proposed_snapshot_id": _layout_signature(proposed),
+        "proposed_raw_sha256": _raw_state_fingerprint(proposed),
+        "proposed_layout": _layout_summary_to_json(proposed, {}),
+        "parse_integrity": layout_parse_integrity(proposed),
+        "warning": "Offline page-membership projection only; physical placement and recovery are unverified.",
+    })
+
+
+@json.command(name="check-library-insertions")
+def json_check_library_insertions():
+    """Read-only prefix projections for up to fifty App Library-only User apps."""
+    from unjiggle.device import connect, layout_parse_integrity, read_installed_apps, read_layout
+    from unjiggle.library_insertion import project_library_insertions
+
+    try:
+        request = _json.loads(_read_stdin())
+    except ValueError as error:
+        _json_err(f"Invalid JSON input: {error}")
+    if not isinstance(request, dict):
+        _json_err("Expected a library insertion request object")
+    insertions = request.get("insertions")
+    snapshot_id = request.get("snapshot_id")
+    source_hash = request.get("source_raw_sha256")
+    if not isinstance(snapshot_id, str) or not snapshot_id or not isinstance(source_hash, str) or len(source_hash) != 64 or any(c not in "0123456789abcdef" for c in source_hash):
+        _json_err("A current scan snapshot ID and raw-state SHA-256 are required")
+    if not isinstance(insertions, list) or not 1 <= len(insertions) <= 50 or any(
+        not isinstance(entry, dict) or set(entry) != {"bundle_id", "target_page"}
+        or not isinstance(entry["bundle_id"], str) or not entry["bundle_id"].strip()
+        or isinstance(entry["target_page"], bool) or not isinstance(entry["target_page"], int)
+        for entry in insertions
+    ) or len({entry["bundle_id"] for entry in insertions}) != len(insertions):
+        _json_err("Provide one to fifty unique bundle IDs and existing page indices")
+
+    try:
+        lockdown, _device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+    source = read_layout(lockdown)
+    if _layout_signature(source) != snapshot_id or _raw_state_fingerprint(source) != source_hash:
+        _json_err("The source icon state changed since the scan. Scan again.")
+    try:
+        inventory = read_installed_apps(lockdown, source)
+        steps = project_library_insertions(source, inventory, insertions)
+    except (ValueError, TypeError, KeyError) as error:
+        _json_err(f"Insertions not checked: {error}")
+    if _raw_state_fingerprint(read_layout(lockdown)) != source_hash:
+        _json_err("The icon state changed while reading installed apps. Scan again.")
+    _json_out({
+        "writable": False,
+        "insertions": insertions,
+        "snapshot_id": snapshot_id,
+        "source_raw_sha256": source_hash,
+        "proposed_snapshot_id": _layout_signature(steps[-1]),
+        "proposed_raw_sha256": _raw_state_fingerprint(steps[-1]),
+        "proposed_layout": _layout_summary_to_json(steps[-1], {}),
+        "steps": [{"index": index, "snapshot_id": _layout_signature(step),
+                   "raw_sha256": _raw_state_fingerprint(step),
+                   "layout": _layout_summary_to_json(step, {})}
+                  for index, step in enumerate(steps, 1)],
+        "parse_integrity": layout_parse_integrity(steps[-1]),
+        "warning": "Offline page-membership projections only; physical placement and recovery are unverified.",
+    })
+
+
+@json.command(name="apply-library-checked")
+def json_apply_library_checked():
+    """Experimental, explicitly opted-in checked insertion of one ignored User app.
+
+    A raw readback does not certify visible icon placement or a physical undo.
+    Clients must keep this path disabled until device recovery is verified.
+    """
+    from unjiggle.device import connect, read_installed_apps, read_layout
+    from unjiggle.library_insertion import project_library_folder_insertion, project_library_insertion
+
+    try:
+        request = _json.loads(_read_stdin())
+    except ValueError as error:
+        _json_err(f"Invalid JSON input: {error}")
+    if not isinstance(request, dict):
+        _json_err("Expected a checked library insertion request object")
+    # A separate environment gate prevents an ordinary checked preview from
+    # becoming a device write through a mismatched or prematurely wired client.
+    if (request.get("experimental_library_write") is not True
+            or os.environ.get("UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE") != "1"):
+        _json_err("Not written: experimental library insertion is disabled.")
+    bundle_id = request.get("bundle_id")
+    target_page = request.get("target_page")
+    target_folder = request.get("target_folder")
+    if not isinstance(bundle_id, str) or not bundle_id.strip():
+        _json_err("Not written: a bundle ID is required.")
+    if ("target_page" in request) == ("target_folder" in request):
+        _json_err("Not written: choose exactly one existing page or folder.")
+    if "target_page" in request and (isinstance(target_page, bool) or not isinstance(target_page, int)):
+        _json_err("Not written: an existing page index is required.")
+    if "target_folder" in request and (not isinstance(target_folder, str) or not target_folder.strip()):
+        _json_err("Not written: an existing folder name is required.")
+    snapshot_id = request.get("snapshot_id")
+    proposed_id = request.get("proposed_snapshot_id")
+    source_hash = request.get("source_raw_sha256")
+    proposed_hash = request.get("proposed_raw_sha256")
+    if not isinstance(snapshot_id, str) or not snapshot_id or not isinstance(proposed_id, str) or not proposed_id:
+        _json_err("Not written: source and proposed snapshot IDs are required.")
+    if any(not isinstance(value, str) or len(value) != 64 or any(c not in "0123456789abcdef" for c in value)
+           for value in (source_hash, proposed_hash)):
+        _json_err("Not written: source and proposed raw-state SHA-256 values are required.")
+
+    try:
+        lockdown, connected_device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+    source = read_layout(lockdown)
+    if _layout_signature(source) != snapshot_id or _raw_state_fingerprint(source) != source_hash:
+        _json_err("Not written: the source icon state changed since the check. Scan again.")
+    try:
+        inventory = read_installed_apps(lockdown, source)
+        if "target_folder" in request:
+            proposed = project_library_folder_insertion(source, inventory, bundle_id, target_folder)
+        else:
+            proposed = project_library_insertion(source, inventory, bundle_id, target_page)
+    except (ValueError, TypeError, KeyError) as error:
+        _json_err(f"Not written: insertion could not be verified: {error}.")
+    predicted_id = _layout_signature(proposed)
+    if (predicted_id == snapshot_id or predicted_id != proposed_id
+            or _raw_state_fingerprint(proposed) != proposed_hash):
+        _json_err("Not written: the checked destination does not match the proposed icon state.")
+    after_inventory = read_layout(lockdown)
+    if _layout_signature(after_inventory) != snapshot_id or _raw_state_fingerprint(after_inventory) != source_hash:
+        _json_err("Not written: the icon state changed while reading installed apps. Scan again.")
+    _json_write_checked(lockdown, connected_device, source, snapshot_id, source_hash,
+                        proposed.raw, predicted_id, proposed_hash, 1)
+
+
+@json.command(name="apply-checked")
+def json_apply_checked():
+    """Apply only the exact, structure-preserving proposal previously checked.
+
+    This command cannot guarantee SpringBoard's visible positions or restoration.
+    """
+    from unjiggle.device import connect, layout_parse_integrity, parse_layout_state, read_layout, write_layout
+    from unjiggle import layout_engine
+
+    # The extra field binds the write to the whole destination, including
+    # unchanged apps and widgets. A missing or altered identity fails before
+    # connecting to the phone, creating a backup, or writing.
+    try:
+        request = _json.loads(_read_stdin())
+    except ValueError as exc:
+        _json_err(f"Invalid JSON input: {exc}")
+    ops, snapshot_id = _parse_apply_operations(request)
+    if not snapshot_id:
+        _json_err('Checked apply requires a nonempty "snapshot_id" from the scan.')
+    expected_id = request.get("proposed_snapshot_id")
+    if not isinstance(expected_id, str) or not expected_id:
+        _json_err('Checked apply requires a nonempty "proposed_snapshot_id" from check-operations.')
+    expected_raw = request.get("source_raw_sha256")
+    if not isinstance(expected_raw, str) or len(expected_raw) != 64 or any(c not in "0123456789abcdef" for c in expected_raw):
+        _json_err('Checked apply requires "source_raw_sha256" from check-operations.')
+    expected_destination_raw = request.get("proposed_raw_sha256")
+    if not isinstance(expected_destination_raw, str) or len(expected_destination_raw) != 64 or any(c not in "0123456789abcdef" for c in expected_destination_raw):
+        _json_err('Checked apply requires "proposed_raw_sha256" from check-operations.')
+
+    try:
+        lockdown, device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+    layout = read_layout(lockdown)
+    if _layout_signature(layout) != snapshot_id:
+        _json_err("Not written: the iPhone layout changed since the check. Scan again.")
+    if _raw_state_fingerprint(layout) != expected_raw:
+        _json_err("Not written: the iPhone icon state changed since the check. Scan again.")
+    integrity = layout_parse_integrity(layout)
+    if not integrity["structure_preserved"] or not layout_engine.raw_state_matches(layout):
+        _json_err("Not written: the scan did not preserve the complete icon-state structure.")
+    visible_ids = set(layout.all_bundle_ids)
+    for op in ops:
+        if op.action in ("move_to_page", "move_to_folder", "create_folder"):
+            if any(bundle_id not in visible_ids for bundle_id in op.bundle_ids):
+                _json_err("Not written: a requested app is not on the home screen.")
+    modified_raw, predicted, problem = _prepare_write(layout, ops)
+    if problem:
+        _json_err(f"Not written: {problem}.")
+    predicted_id = _layout_signature(predicted)
+    if predicted_id == snapshot_id or predicted_id != expected_id:
+        _json_err("Not written: the proposed layout does not match the checked destination.")
+    actual_destination_raw = _raw_state_fingerprint(parse_layout_state(modified_raw))
+    if actual_destination_raw != expected_destination_raw:
+        _json_err("Not written: the proposed raw icon state does not match the checked destination.")
+
+    _json_write_checked(lockdown, device, layout, snapshot_id, expected_raw,
+                        modified_raw, predicted_id, actual_destination_raw, len(ops))
+
+
+def _json_write_checked(lockdown, device, layout, snapshot_id, expected_raw,
+                        modified_raw, predicted_id, actual_destination_raw, requested):
+    """One backup, durable recovery candidate, one write and exact raw readback."""
+    from unjiggle.device import read_layout, write_layout
+
+    device_id = _device_fingerprint(device)
+    if device_id is None:
+        _json_err("Not written: the connected iPhone has no reliable device identifier.")
+
+    backup_path = _json_verified_backup(lockdown, layout)
+    try:
+        backup_sha256 = _sha256_file(backup_path)
+    except Exception as exc:
+        _json_err(f"Not written: verified backup could not be reopened: {exc}.", backup=str(backup_path))
+    # The backup helper rereads the device, but the device can change again
+    # before the actual write. Stop if either the parsed or raw state drifted.
+    try:
+        fresh = read_layout(lockdown)
+    except Exception as exc:
+        _json_err(f"Not written: the iPhone could not be reread after the backup: {exc}.",
+                  backup=str(backup_path))
+    if _layout_signature(fresh) != snapshot_id or _raw_state_fingerprint(fresh) != expected_raw:
+        _json_err("Not written: the iPhone changed after the backup. Scan again.", backup=str(backup_path))
+    # Persist a candidate recovery receipt before the write. An interrupted
+    # process cannot print or save a receipt after SpringBoard accepts it.
+    from unjiggle import safety
+
+    recovery = {
+        "backup": str(backup_path),
+        "backup_sha256": backup_sha256,
+        "source_raw_sha256": expected_raw,
+        "applied_raw_sha256": actual_destination_raw,
+        "applied_snapshot_id": predicted_id,
+        "device_id_sha256": device_id,
+    }
+    try:
+        journal = safety.checked_recovery_journal(backup_path, recovery)
+    except Exception as exc:
+        _json_err(f"Not written: checked recovery journal could not be saved: {exc}.",
+                  backup=str(backup_path))
+    undo = f"Backup saved at {backup_path}; review the current state before attempting recovery."
+    try:
+        write_layout(lockdown, modified_raw)
+        verify = read_layout(lockdown)
+    except Exception as exc:
+        _json_err(f"Write failed: {exc}. {undo}", backup=str(backup_path), journal=str(journal))
+    # The checked contract binds the complete raw state. A matching parsed
+    # page list can still hide changes to icon metadata or unsupported fields.
+    # Do not issue a recovery receipt for a state other than the one written.
+    if _raw_state_fingerprint(verify) != recovery["applied_raw_sha256"]:
+        _json_err(f"Write verification failed: the iPhone raw icon state does not match the checked destination. {undo}",
+                  backup=str(backup_path), journal=str(journal))
+    result = {
+        "requested": requested, "applied": requested, "backup": str(backup_path),
+        "changed": True, "journal": str(journal), **_snapshot_metadata(verify),
+        "verified_raw_sha256": _raw_state_fingerprint(verify),
+        "result": {"page_count": verify.page_count, "total_apps": verify.total_apps},
+        "recovery": recovery,
+    }
+    _json_out(result)
+
+
+@json.command(name="pending-checked")
+def json_pending_checked():
+    """Show pre-write recovery candidates, including interrupted writes and restores.
+
+    This is a disk-only read. A journal does not establish that the write
+    happened; restore-checked must still verify the connected phone exactly.
+    """
+    from unjiggle import safety
+
+    try:
+        records = safety.checked_recovery_journals()
+    except Exception as exc:
+        _json_err(f"Checked recovery journals could not be read: {exc}.")
+    _json_out({"records": records})
+
+
+def _checked_recovery_preflight(request, label: str):
+    """Read-only checks common to a recovery audit and the actual restore.
+
+    Eligibility is momentary: restore must run these checks again immediately
+    before its own verified backup and write.
+    """
+    from unjiggle.device import connect, layout_parse_integrity, parse_layout_state, read_layout, restore_layout_from_file
+    from unjiggle import layout_engine
+
+    fields = ("backup_sha256", "source_raw_sha256", "applied_raw_sha256", "device_id_sha256")
+    if not isinstance(request, dict) or any(
+        not isinstance(request.get(key), str) or len(request[key]) != 64
+        or any(char not in "0123456789abcdef" for char in request[key]) for key in fields
+    ) or not isinstance(request.get("applied_snapshot_id"), str) or not request["applied_snapshot_id"]:
+        _json_err(f"{label}: incomplete checked recovery receipt. No changes made.")
+    backup_name = request.get("backup")
+    if not isinstance(backup_name, str) or not backup_name or not Path(backup_name).is_file():
+        _json_err(f"{label}: checked backup is missing. No changes made.")
+    backup_path = Path(backup_name)
+    try:
+        if _sha256_file(backup_path) != request["backup_sha256"]:
+            _json_err(f"{label}: checked backup changed. No changes made.")
+        raw_state = restore_layout_from_file(backup_path)
+        expected = parse_layout_state(raw_state)
+    except Exception as exc:
+        _json_err(f"{label}: checked backup could not be read: {exc}. No changes made.")
+    if (expected.page_count == 0 or expected.total_apps == 0
+            or not layout_parse_integrity(expected)["structure_preserved"]
+            or not layout_engine.raw_state_matches(expected)
+            or _raw_state_fingerprint(expected) != request["source_raw_sha256"]):
+        _json_err(f"{label}: checked backup does not match a complete source layout. No changes made.")
+
+    try:
+        lockdown, device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+    if _device_fingerprint(device) != request["device_id_sha256"]:
+        _json_err(f"{label}: a different or unidentified iPhone is connected. No changes made.")
+    try:
+        current = read_layout(lockdown)
+    except Exception as exc:
+        _json_err(f"{label}: could not read the iPhone: {exc}. No changes made.")
+    if (_layout_signature(current) != request["applied_snapshot_id"]
+            or _raw_state_fingerprint(current) != request["applied_raw_sha256"]):
+        _json_err(f"{label}: the iPhone changed after the checked apply. No changes made.")
+    return lockdown, backup_path, raw_state, current
+
+
+@json.command(name="check-recovery")
+def json_check_recovery():
+    """Check a candidate recovery receipt against the live phone without writing.
+
+    Takes the recovery object from pending-checked or apply-checked on stdin.
+    An eligible result does not establish that SpringBoard will accept a restore.
+    """
+    try:
+        request = _json.loads(_read_stdin())
+    except ValueError as exc:
+        _json_err(f"Invalid JSON input: {exc}")
+    _lockdown, backup_path, _raw_state, _current = _checked_recovery_preflight(request, "Not eligible")
+    _json_out({
+        "eligible_for_restore_attempt": True,
+        "backup": str(backup_path),
+        "warning": "Read-only check only. Recheck immediately before a consented restore; physical recovery is unverified.",
+    })
+
+
+@json.command(name="restore-checked")
+def json_restore_checked():
+    """Restore an apply-checked backup only on its original unchanged device.
+
+    Takes the exact ``recovery`` object returned by apply-checked on stdin. A
+    successful in-memory check is not a guarantee of physical SpringBoard recovery.
+    A failed write is never automatically retried.
+    """
+    from unjiggle.device import parse_layout_state, read_layout, write_layout
+
+    try:
+        request = _json.loads(_read_stdin())
+    except ValueError as exc:
+        _json_err(f"Invalid JSON input: {exc}")
+    lockdown, backup_path, raw_state, current = _checked_recovery_preflight(request, "Not restored")
+
+    undo_backup = _json_verified_backup(lockdown, current)
+    try:
+        fresh = read_layout(lockdown)
+    except Exception as exc:
+        _json_err(f"Not restored: could not reread the iPhone after backup: {exc}. No changes made.", undo_backup=str(undo_backup))
+    if (_layout_signature(fresh) != request["applied_snapshot_id"]
+            or _raw_state_fingerprint(fresh) != request["applied_raw_sha256"]):
+        _json_err("Not restored: the iPhone changed after backup. No changes made.", undo_backup=str(undo_backup))
+    from unjiggle import safety
+
+    reverse_recovery = {
+        "backup": str(undo_backup),
+        "backup_sha256": _sha256_file(undo_backup),
+        "source_raw_sha256": request["applied_raw_sha256"],
+        "applied_raw_sha256": request["source_raw_sha256"],
+        "applied_snapshot_id": _layout_signature(parse_layout_state(raw_state)),
+        "device_id_sha256": request["device_id_sha256"],
+    }
+    try:
+        journal = safety.checked_recovery_journal(undo_backup, reverse_recovery, operation="restore")
+    except Exception as exc:
+        _json_err(f"Not restored: restore recovery journal could not be saved: {exc}. No changes made.",
+                  undo_backup=str(undo_backup))
+    try:
+        write_layout(lockdown, raw_state)
+        verify = read_layout(lockdown)
+    except Exception as exc:
+        _json_err(f"Checked restore failed: {exc}. Recovery requires manual review.", undo_backup=str(undo_backup), journal=str(journal))
+    # A checked restore succeeds only if the full source state returned. A
+    # cosmetic-looking normalization still needs manual review on the device.
+    if _raw_state_fingerprint(verify) != request["source_raw_sha256"]:
+        _json_err("Checked restore verification failed: raw icon state differs. Recovery requires manual review.",
+                  undo_backup=str(undo_backup), journal=str(journal))
+    result = {
+        "restored": True, "backup": str(backup_path), "undo_backup": str(undo_backup), "journal": str(journal),
+        "restored_raw_sha256": _raw_state_fingerprint(verify),
+        **_snapshot_metadata(verify),
+        "result": {"page_count": verify.page_count, "total_apps": verify.total_apps},
+    }
+    _json_out(result)
 
 
 @json.command(name="apply")

@@ -387,6 +387,10 @@ def test_json_scan_and_diagnose_include_snapshot_identity(monkeypatch, clean_lay
     scan_payload = json.loads(scan_result.output)
     diagnose_payload = json.loads(diagnose_result.output)
     assert scan_payload["layout_signature"] == scan_payload["snapshot_id"]
+    assert scan_payload["dock_items"] == len(scan_payload["dock"])
+    assert [item["app"]["bundle_id"] for item in scan_payload["dock"]] == [
+        item.app.bundle_id for item in clean_layout.dock
+    ]
     assert diagnose_payload["layout_signature"] == diagnose_payload["snapshot_id"]
 
 

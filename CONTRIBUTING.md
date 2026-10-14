@@ -38,6 +38,11 @@ If you cannot explain the boundary cleanly, do not publish yet.
 
 ## Device-write safety checks
 
+An installed-app lookup is a read-only capability. A record missing from the
+Home Screen is only an App Library candidate; do not infer that iOS can display
+its icon or accept it in a new layout without real-device proof. Keep unknown
+Home Screen IDs visible to callers instead of treating them as deletions.
+
 Run `pytest -q tests/test_write_consent.py tests/test_safety.py` when changing backup,
 restore, or write consent. These tests use a simulated phone. Default diagnostics
 and pre-write backups must make zero device writes; explicit write tests must

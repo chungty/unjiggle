@@ -21,6 +21,7 @@ that such text goes to stderr.
 from __future__ import annotations
 
 import builtins
+import base64
 import copy
 import json
 import os
@@ -77,9 +78,15 @@ WIDGET_INFO = {"container_bundle_id": str, "grid_size": str}
 LAYOUT_ITEM_CASES = {"app": APP_INFO, "folder": FOLDER_INFO, "widget": WIDGET_INFO}
 
 DEVICE_INFO = {"name": str, "model": str, "ios_version": str}
+PARSE_INTEGRITY = {
+    "structure_preserved": bool, "raw_page_count": Opt(int),
+    "unparsed_items": Opt(int), "dropped_empty_pages": Opt(int),
+}
 PHONE_DATA = {
     "device": DEVICE_INFO, "total_apps": int, "page_count": int, "folder_count": int,
-    "dock_items": int, "pages": ArrayOf(ArrayOf(LAYOUT_ITEM)),
+    "dock_items": int, "dock": ArrayOf(LAYOUT_ITEM), "pages": ArrayOf(ArrayOf(LAYOUT_ITEM)),
+    "parse_integrity": PARSE_INTEGRITY,
+    "source_raw_sha256": str,
 }
 
 SCORE_BREAKDOWN = {
@@ -146,6 +153,20 @@ RESTORED_LAYOUT = {
 }
 RENDERED_CARD = {"success": bool, "action": str, "card": str, "html_path": str, "path": Opt(str)}
 DEVICE_STATUS = {"connected": bool, "device_name": Opt(str), "model": Opt(str), "ios_version": Opt(str)}
+INSTALLED_APP = {
+    "bundle_id": str, "display_name": Opt(str), "application_type": Opt(str), "on_home_screen": bool,
+}
+INSTALLED_INVENTORY = {
+    "device": DEVICE_INFO, "snapshot_id": str, "apps": ArrayOf(INSTALLED_APP),
+    "unmatched_home_screen_ids": ArrayOf(str),
+}
+APP_ICON = {"bundle_id": str, "png_base64": Opt(str)}
+LIBRARY_INSERTION = {
+    "writable": bool, "bundle_id": str, "target_page": int,
+    "snapshot_id": str, "source_raw_sha256": str, "proposed_snapshot_id": str,
+    "proposed_layout": TRANSFORM_LAYOUT, "parse_integrity": PARSE_INTEGRITY,
+    "warning": str,
+}
 
 
 def decodes(value, kind, path="$"):
@@ -307,7 +328,7 @@ def app_payload(operations: list[dict], snapshot_id: str | None = None) -> str:
 # --- each command -----------------------------------------------------------------------
 
 
-CONTRACT_COMMANDS = {"status", "scan", "diagnose", "mirror", "obituary", "suggest", "presets", "restore", "render", "apply"}
+CONTRACT_COMMANDS = {"status", "scan", "inventory", "icon", "diagnose", "mirror", "obituary", "suggest", "presets", "restore", "render", "apply", "check-operations", "check-library-insertion", "check-library-insertions", "apply-library-checked", "apply-checked", "pending-checked", "check-recovery", "restore-checked"}
 
 
 def test_the_contract_version_is_2():
@@ -360,6 +381,98 @@ def test_scan(phone):
     payload = ok(run("scan"), PHONE_DATA)
 
     assert payload["total_apps"] > 0
+    assert payload["parse_integrity"]["structure_preserved"] is True
+    assert payload["source_raw_sha256"] == cli._raw_state_fingerprint(phone.read_layout("LOCKDOWN"))
+    assert phone.writes == []
+
+
+@pytest.mark.parametrize("mutate,expected", [
+    (lambda raw: raw.append([]), {"dropped_empty_pages": 1, "unparsed_items": 0}),
+    (lambda raw: raw[1].append({"iconType": "unknown"}), {"dropped_empty_pages": 0, "unparsed_items": 1}),
+    (lambda raw: next(item for page in raw[1:] for item in page if device.is_folder_entry(item))["iconLists"][0].append(
+        {"iconType": "unknown"}), {"dropped_empty_pages": 0, "unparsed_items": 1}),
+], ids=["empty-page", "unknown-icon", "unknown-folder-child"])
+def test_scan_reports_unparsed_structure_without_writing(phone, mutate, expected):
+    mutate(phone.raw)
+    payload = ok(run("scan"), PHONE_DATA)
+    integrity = payload["parse_integrity"]
+    assert integrity["structure_preserved"] is False
+    for key, value in expected.items():
+        assert integrity[key] == value
+    assert phone.writes == []
+
+
+def test_inventory_contract_is_read_only(phone, monkeypatch):
+    def fake_inventory(lockdown, layout):
+        assert lockdown == "LOCKDOWN"
+        return device.reconcile_installed_apps(
+            {"com.example.library": {"CFBundleDisplayName": "Library", "ApplicationType": "User"}},
+            layout,
+        )
+
+    monkeypatch.setattr(device, "read_installed_apps", fake_inventory)
+    payload = ok(run("inventory"), INSTALLED_INVENTORY)
+
+    assert payload["apps"][0]["on_home_screen"] is False
+    assert payload["snapshot_id"]
+    assert phone.writes == []
+
+
+def test_library_insertion_contract_is_read_only(phone, monkeypatch):
+    phone.raw = {"buttonBar": [], "iconLists": [["org.example.visible"]],
+                 "ignored": ["org.example.library"]}
+    monkeypatch.setattr(device, "read_installed_apps", lambda lockdown, layout:
+                        device.reconcile_installed_apps({"org.example.library": {"ApplicationType": "User"}}, layout))
+    source = device.parse_layout_state(phone.raw)
+    request = {"bundle_id": "org.example.library", "target_page": 0,
+               "snapshot_id": cli._layout_signature(source),
+               "source_raw_sha256": cli._raw_state_fingerprint(source)}
+    payload = ok(run("check-library-insertion", stdin=json.dumps(request)), LIBRARY_INSERTION)
+    assert payload["writable"] is False
+    assert payload["proposed_layout"]["pages"][0][-1]["app"]["bundle_id"] == request["bundle_id"]
+    assert phone.writes == []
+    assert phone.backups() == []
+
+
+def test_library_insertions_contract_returns_checked_prefixes_without_writing(phone, monkeypatch):
+    phone.raw = {"buttonBar": [], "iconLists": [["org.example.visible"]],
+                 "ignored": ["org.example.library", "org.example.second"]}
+    monkeypatch.setattr(device, "read_installed_apps", lambda lockdown, layout:
+                        device.reconcile_installed_apps({
+                            "org.example.library": {"ApplicationType": "User"},
+                            "org.example.second": {"ApplicationType": "User"}}, layout))
+    source = device.parse_layout_state(phone.raw)
+    request = {"insertions": [{"bundle_id": name, "target_page": 0} for name in
+                              ("org.example.library", "org.example.second")],
+               "snapshot_id": cli._layout_signature(source),
+               "source_raw_sha256": cli._raw_state_fingerprint(source)}
+    payload = ok(run("check-library-insertions", stdin=json.dumps(request)))
+    assert payload["writable"] is False
+    assert len(payload["steps"]) == 2
+    assert len(payload["steps"][0]["layout"]["pages"][0]) == 2
+    assert payload["steps"][-1]["layout"] == payload["proposed_layout"]
+    assert phone.writes == []
+    assert phone.backups() == []
+
+
+def test_icon_contract_returns_device_bytes_without_writing(phone, monkeypatch):
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScL/nwAAAABJRU5ErkJggg==")
+    monkeypatch.setattr(device, "fetch_icon", lambda lockdown, bundle_id: png if bundle_id == "com.example.notes" else None)
+
+    payload = ok(run("icon", "--bundle-id", "com.example.notes"), APP_ICON)
+    assert base64.b64decode(payload["png_base64"]) == png
+    assert ok(run("icon", "--bundle-id", "com.example.missing"), APP_ICON)["png_base64"] is None
+    assert phone.writes == []
+
+
+def test_icon_rejects_invalid_or_oversized_device_data(phone, monkeypatch):
+    monkeypatch.setattr(device, "fetch_icon", lambda *_: b"not png")
+    assert "invalid or oversized" in failed(run("icon", "--bundle-id", "com.example.notes"))["error"]
+    monkeypatch.setattr(device, "fetch_icon", lambda *_: b"\x89PNG\r\n\x1a\n" + b"test-icon")
+    assert "invalid or oversized" in failed(run("icon", "--bundle-id", "com.example.notes"))["error"]
+    monkeypatch.setattr(device, "fetch_icon", lambda *_: b"\x89PNG\r\n\x1a\n" + b"a" * 1_000_000)
+    failed(run("icon", "--bundle-id", "com.example.notes"))
+    assert phone.writes == []
 
 
 def test_diagnose(phone):
@@ -431,6 +544,478 @@ def test_render_transform_with_a_missing_backup(phone):
 
 def _focus_preview() -> dict:
     return ok(run("suggest", "--preset", "focus"), TRANSFORM_PREVIEW)
+
+
+def test_check_operations_predicts_a_write_without_backup_or_mutation(phone):
+    preview = _focus_preview()
+    before = copy.deepcopy(phone.raw)
+
+    payload = ok(run("check-operations", stdin=app_payload(preview["operations"], preview["snapshot_id"])))
+
+    assert payload["writable"] is True
+    assert payload["snapshot_id"] == preview["snapshot_id"]
+    def identities(pages):
+        return [[item["app"]["bundle_id"] if item["type"] == "app"
+                 else (item["folder"]["display_name"] if item["type"] == "folder"
+                       else item["widget"]["container_bundle_id"])
+                 for item in page] for page in pages]
+
+    assert identities(payload["proposed_layout"]["pages"]) == identities(preview["proposed_layout"]["pages"])
+    assert payload["parse_integrity"]["structure_preserved"] is True
+    assert len(payload["source_raw_sha256"]) == 64
+    assert payload["proposed_snapshot_id"] != payload["snapshot_id"]
+    assert "physical iOS" in payload["warning"]
+    assert phone.raw == before
+    assert phone.writes == []
+    assert phone.backups() == []
+
+
+def test_check_operations_projects_every_prefix_from_one_read_only_source(phone, monkeypatch):
+    preview = _focus_preview()
+    assert len(preview["operations"]) >= 2
+    operations = preview["operations"][:2]
+    before = copy.deepcopy(phone.raw)
+    reads = []
+    original_read = phone.read_layout
+
+    def counted_read(lockdown):
+        reads.append(1)
+        return original_read(lockdown)
+
+    monkeypatch.setattr(device, "read_layout", counted_read)
+    request = json.loads(app_payload(operations, preview["snapshot_id"]))
+    request["include_steps"] = True
+    result = ok(run("check-operations", stdin=json.dumps(request)))
+    assert len(reads) == 1
+    assert len(result["steps"]) == len(operations)
+    assert result["steps"][-1]["layout"] == result["proposed_layout"]
+    assert result["steps"][-1]["snapshot_id"] == result["proposed_snapshot_id"]
+    for count, step in enumerate(result["steps"], 1):
+        assert step["index"] == count
+        independent = ok(run("check-operations", stdin=app_payload(operations[:count], preview["snapshot_id"])))
+        assert step["layout"] == independent["proposed_layout"]
+        assert step["snapshot_id"] == independent["proposed_snapshot_id"]
+        assert result["source_raw_sha256"] == independent["source_raw_sha256"]
+    assert phone.raw == before and not phone.writes and not phone.backups()
+
+
+def test_check_operations_rejects_malformed_or_oversized_step_requests_before_device_read(phone, monkeypatch):
+    preview = _focus_preview()
+    monkeypatch.setattr(device, "read_layout", lambda _: pytest.fail("device should not be read"))
+    request = json.loads(app_payload(preview["operations"], preview["snapshot_id"]))
+    for flag in ("true", 1, None):
+        request["include_steps"] = flag
+        assert "include_steps" in failed(run("check-operations", stdin=json.dumps(request)))["error"]
+    request["include_steps"] = True
+    request["operations"] = preview["operations"] * 51
+    assert "at most 50" in failed(run("check-operations", stdin=json.dumps(request)))["error"]
+    assert not phone.writes and not phone.backups()
+
+
+def test_check_operations_rejects_stale_or_missing_snapshot_without_write(phone):
+    preview = _focus_preview()
+    absent = failed(run("check-operations", stdin=app_payload(preview["operations"])))
+    _remove_app(phone.raw, _first_moved_app(preview))
+    stale = failed(run("check-operations", stdin=app_payload(preview["operations"], preview["snapshot_id"])))
+
+    assert "snapshot_id" in absent["error"]
+    assert "changed since the scan" in stale["error"]
+    assert phone.writes == []
+    assert phone.backups() == []
+
+
+def test_check_operations_rejects_unparsed_icon_state_without_write(phone):
+    phone.raw[-1].append({"listType": "unsupported"})
+    snapshot = ok(run("scan"), PHONE_DATA)["snapshot_id"]
+    operations = _focus_preview()["operations"]
+
+    payload = failed(run("check-operations", stdin=app_payload(operations, snapshot)))
+
+    assert "complete icon-state structure" in payload["error"]
+    assert phone.writes == []
+    assert phone.backups() == []
+
+
+def test_check_operations_rejects_app_library_addition_without_write(phone):
+    snapshot = ok(run("scan"), PHONE_DATA)["snapshot_id"]
+    operations = [{"action": "move_to_page", "bundle_ids": ["com.example.library-only"], "target_page": 1}]
+
+    payload = failed(run("check-operations", stdin=app_payload(operations, snapshot)))
+
+    assert "not on the home screen" in payload["error"]
+    assert phone.writes == []
+    assert phone.backups() == []
+
+
+def _checked_request(preview=None):
+    preview = preview or _focus_preview()
+    proposal = ok(run("check-operations", stdin=app_payload(preview["operations"], preview["snapshot_id"])))
+    request = json.loads(app_payload(preview["operations"], preview["snapshot_id"]))
+    request["proposed_snapshot_id"] = proposal["proposed_snapshot_id"]
+    request["source_raw_sha256"] = proposal["source_raw_sha256"]
+    request["proposed_raw_sha256"] = proposal["proposed_raw_sha256"]
+    return request
+
+
+def test_checked_apply_writes_once_after_verified_backup_and_exact_proposal(phone):
+    before = copy.deepcopy(phone.raw)
+    request = _checked_request()
+    result = ok(run("apply-checked", stdin=json.dumps(request)), APPLIED_TRANSFORM)
+
+    assert result["changed"] is True
+    assert len(phone.writes) == 1
+    assert json.loads(Path(result["backup"]).read_text()) == json.loads(json.dumps(before, default=str))
+    assert result["snapshot_id"] == request["proposed_snapshot_id"]
+    assert result["recovery"]["applied_raw_sha256"] == request["proposed_raw_sha256"]
+    assert result["verified_raw_sha256"] == request["proposed_raw_sha256"]
+    assert result["verified_raw_sha256"] == cli._raw_state_fingerprint(phone.read_layout("LOCKDOWN"))
+    assert Path(result["journal"]).is_file()
+    records = ok(run("pending-checked"))["records"]
+    assert records == [{"journal": result["journal"], "recovery": result["recovery"]}]
+
+
+def test_checked_apply_fails_closed_when_journal_cannot_be_saved(phone, monkeypatch):
+    request = _checked_request()
+
+    def no_journal(*_args):
+        raise OSError("storage full")
+
+    monkeypatch.setattr(safety, "checked_recovery_journal", no_journal)
+    result = failed(run("apply-checked", stdin=json.dumps(request)))
+    assert "journal could not be saved" in result["error"]
+    assert phone.writes == [] and len(phone.backups()) == 1
+
+
+def test_interrupted_checked_apply_retains_recoverable_candidate(phone, monkeypatch):
+    before = copy.deepcopy(phone.raw)
+    request = _checked_request()
+    original_write = phone.write_layout
+
+    def applied_then_disconnected(lockdown, state):
+        original_write(lockdown, state)
+        raise OSError("connection lost after SpringBoard accepted write")
+
+    monkeypatch.setattr(device, "write_layout", applied_then_disconnected)
+    failure = failed(run("apply-checked", stdin=json.dumps(request)))
+    records = ok(run("pending-checked"))["records"]
+    assert len(phone.writes) == 1 and len(records) == 1
+    assert records[0]["journal"] == failure["journal"]
+    monkeypatch.setattr(device, "write_layout", original_write)
+    ok(run("restore-checked", stdin=json.dumps(records[0]["recovery"])), RESTORED_LAYOUT)
+    assert json.loads(json.dumps(phone.raw, default=str)) == json.loads(json.dumps(before, default=str))
+
+
+def test_checked_journal_survives_process_failure_before_any_response(phone, monkeypatch):
+    before = copy.deepcopy(phone.raw)
+    request = _checked_request()
+    original_output = cli._json_out
+
+    def process_stopped_before_response(payload, *args, **kwargs):
+        if payload.get("changed") and payload.get("journal"):
+            raise SystemExit(137)
+        return original_output(payload, *args, **kwargs)
+
+    monkeypatch.setattr(cli, "_json_out", process_stopped_before_response)
+    stopped = run("apply-checked", stdin=json.dumps(request))
+    assert stopped.exit_code == 137
+    assert not stopped.stdout
+    monkeypatch.setattr(cli, "_json_out", original_output)
+
+    assert len(phone.writes) == 1
+    records = ok(run("pending-checked"))["records"]
+    assert len(records) == 1
+    ok(run("restore-checked", stdin=json.dumps(records[0]["recovery"])), RESTORED_LAYOUT)
+    assert json.loads(json.dumps(phone.raw, default=str)) == json.loads(json.dumps(before, default=str))
+
+
+def test_checked_journal_does_not_allow_restore_if_write_never_happened(phone):
+    phone.write_error = OSError("USB disconnected before write")
+    failed(run("apply-checked", stdin=json.dumps(_checked_request())))
+    records = ok(run("pending-checked"))["records"]
+    assert len(records) == 1
+    assert "changed after" in failed(run("restore-checked", stdin=json.dumps(records[0]["recovery"])))["error"]
+    assert phone.writes == []
+
+
+def test_check_recovery_only_reads_and_requires_exact_live_state(phone):
+    applied = ok(run("apply-checked", stdin=json.dumps(_checked_request())))
+    receipt = ok(run("pending-checked"))["records"][0]["recovery"]
+    backups_before = len(phone.backups())
+    result = ok(run("check-recovery", stdin=json.dumps(receipt)))
+    assert result["eligible_for_restore_attempt"] is True
+    assert "physical recovery is unverified" in result["warning"]
+    assert len(phone.writes) == 1 and len(phone.backups()) == backups_before
+    phone.raw[1][0]["unused_metadata"] = "changed since checked apply"
+    assert "changed after" in failed(run("check-recovery", stdin=json.dumps(receipt)))["error"]
+    assert len(phone.writes) == 1 and len(phone.backups()) == backups_before
+
+
+def test_check_recovery_rejects_unapplied_or_tampered_candidate(phone):
+    phone.write_error = OSError("USB disconnected before write")
+    failed(run("apply-checked", stdin=json.dumps(_checked_request())))
+    receipt = ok(run("pending-checked"))["records"][0]["recovery"]
+    assert "changed after" in failed(run("check-recovery", stdin=json.dumps(receipt)))["error"]
+    assert phone.writes == []
+    phone.write_error = None
+    applied = ok(run("apply-checked", stdin=json.dumps(_checked_request())))
+    receipt = applied["recovery"]
+    receipt["backup_sha256"] = "0" * 64
+    assert "backup changed" in failed(run("check-recovery", stdin=json.dumps(receipt)))["error"]
+    assert len(phone.writes) == 1
+
+
+def test_pending_checked_rejects_corrupted_journal(phone):
+    result = ok(run("apply-checked", stdin=json.dumps(_checked_request())))
+    Path(result["journal"]).write_text("{broken")
+    assert "could not be read" in failed(run("pending-checked"))["error"]
+
+
+def test_checked_apply_backup_can_restore_original_in_memory_layout(phone):
+    before = copy.deepcopy(phone.raw)
+    request = _checked_request()
+    applied = ok(run("apply-checked", stdin=json.dumps(request)), APPLIED_TRANSFORM)
+    assert len(phone.writes) == 1
+
+    restored = ok(run("restore", applied["backup"]), RESTORED_LAYOUT)
+    assert restored["restored"] is True
+    assert len(phone.writes) == 2
+    assert json.loads(json.dumps(phone.raw, default=str)) == json.loads(json.dumps(before, default=str))
+    assert Path(restored["undo_backup"]).is_file()
+
+
+def test_checked_restore_recovers_only_the_verified_applied_layout(phone):
+    before = copy.deepcopy(phone.raw)
+    applied = ok(run("apply-checked", stdin=json.dumps(_checked_request())), APPLIED_TRANSFORM)
+    receipt = applied["recovery"]
+    assert receipt["device_id_sha256"] != "FAKE"
+    restored = ok(run("restore-checked", stdin=json.dumps(receipt)), RESTORED_LAYOUT)
+    assert restored["restored_raw_sha256"] == receipt["source_raw_sha256"]
+    assert len(phone.writes) == 2
+    assert json.loads(json.dumps(phone.raw, default=str)) == json.loads(json.dumps(before, default=str))
+    assert Path(restored["undo_backup"]).is_file()
+    reverse = next(record for record in ok(run("pending-checked"))["records"]
+                   if record.get("operation") == "restore")
+    assert reverse["journal"] == restored["journal"]
+    assert reverse["recovery"]["backup"] == restored["undo_backup"]
+    assert ok(run("check-recovery", stdin=json.dumps(reverse["recovery"])))["eligible_for_restore_attempt"] is True
+    assert "changed after" in failed(run("restore-checked", stdin=json.dumps(receipt)))["error"]
+    assert len(phone.writes) == 2
+
+
+def test_checked_restore_requires_a_durable_reverse_journal_before_write(phone, monkeypatch):
+    receipt = ok(run("apply-checked", stdin=json.dumps(_checked_request())))["recovery"]
+    original = safety.checked_recovery_journal
+
+    def reject_restore_journal(path, data, *, operation="apply"):
+        if operation == "restore":
+            raise OSError("disk full")
+        return original(path, data, operation=operation)
+
+    monkeypatch.setattr(safety, "checked_recovery_journal", reject_restore_journal)
+    result = failed(run("restore-checked", stdin=json.dumps(receipt)))
+    assert "restore recovery journal could not be saved" in result["error"]
+    assert len(phone.writes) == 1
+    assert Path(result["undo_backup"]).is_file()
+
+
+def test_interrupted_checked_restore_keeps_reverse_candidate(phone, monkeypatch):
+    receipt = ok(run("apply-checked", stdin=json.dumps(_checked_request())))["recovery"]
+    original_write = phone.write_layout
+
+    def restored_then_disconnected(lockdown, state):
+        original_write(lockdown, state)
+        raise OSError("USB disconnected after restore")
+
+    monkeypatch.setattr(device, "write_layout", restored_then_disconnected)
+    failure = failed(run("restore-checked", stdin=json.dumps(receipt)))
+    assert "Checked restore failed" in failure["error"]
+    reverse = next(record for record in ok(run("pending-checked"))["records"]
+                   if record.get("operation") == "restore")
+    assert reverse["journal"] == failure["journal"]
+    assert ok(run("check-recovery", stdin=json.dumps(reverse["recovery"])))["eligible_for_restore_attempt"] is True
+    assert len(phone.writes) == 2
+
+
+@pytest.mark.parametrize("tamper", ["missing", "hash", "source", "device", "applied", "backup_bytes", "current_state"])
+def test_checked_restore_refuses_tampering_before_a_second_backup(phone, tamper):
+    receipt = ok(run("apply-checked", stdin=json.dumps(_checked_request())), APPLIED_TRANSFORM)["recovery"]
+    if tamper == "missing":
+        del receipt["device_id_sha256"]
+    elif tamper == "hash":
+        receipt["backup_sha256"] = "0" * 64
+    elif tamper == "source":
+        receipt["source_raw_sha256"] = "0" * 64
+    elif tamper == "device":
+        receipt["device_id_sha256"] = "0" * 64
+    elif tamper == "applied":
+        receipt["applied_raw_sha256"] = "0" * 64
+    elif tamper == "backup_bytes":
+        Path(receipt["backup"]).write_text(Path(receipt["backup"]).read_text() + " ")
+    elif tamper == "current_state":
+        phone.raw[1][0]["unused_metadata"] = "after apply"
+    result = failed(run("restore-checked", stdin=json.dumps(receipt)))
+    assert "Not restored" in result["error"]
+    assert len(phone.writes) == 1
+    assert len(phone.backups()) == 1
+
+
+def test_checked_restore_refuses_drift_after_backup(phone, monkeypatch):
+    receipt = ok(run("apply-checked", stdin=json.dumps(_checked_request())), APPLIED_TRANSFORM)["recovery"]
+    reads = []
+
+    def drifting_read(lockdown):
+        reads.append(1)
+        if len(reads) == 3:
+            phone.raw[1][0]["unused_metadata"] = "after backup"
+        return phone.read_layout(lockdown)
+
+    monkeypatch.setattr(device, "read_layout", drifting_read)
+    result = failed(run("restore-checked", stdin=json.dumps(receipt)))
+    assert "after backup" in result["error"]
+    assert len(phone.backups()) == 2
+    assert len(phone.writes) == 1
+
+
+def test_checked_restore_refuses_an_actual_device_swap(phone, monkeypatch):
+    receipt = ok(run("apply-checked", stdin=json.dumps(_checked_request())), APPLIED_TRANSFORM)["recovery"]
+    monkeypatch.setattr(device, "connect", lambda: (
+        "LOCKDOWN", DeviceInfo(name="Other iPhone", model="iPhone18,4", ios_version="26.0", udid="OTHER")
+    ))
+    result = failed(run("restore-checked", stdin=json.dumps(receipt)))
+    assert "different or unidentified iPhone" in result["error"]
+    assert len(phone.writes) == 1 and len(phone.backups()) == 1
+
+
+def test_checked_restore_write_failure_retains_recovery_backup_without_retry(phone):
+    receipt = ok(run("apply-checked", stdin=json.dumps(_checked_request())), APPLIED_TRANSFORM)["recovery"]
+    phone.write_error = RuntimeError("USB disconnected")
+    result = failed(run("restore-checked", stdin=json.dumps(receipt)))
+    assert "Checked restore failed" in result["error"]
+    assert Path(result["undo_backup"]).is_file()
+    assert len(phone.writes) == 1
+
+
+def test_checked_restore_rejects_raw_only_readback_drift_without_retry(phone):
+    receipt = ok(run("apply-checked", stdin=json.dumps(_checked_request())), APPLIED_TRANSFORM)["recovery"]
+
+    def add_unreviewed_metadata(state):
+        changed = copy.deepcopy(state)
+        changed[1][0]["unused_metadata"] = "normalized after restore"
+        return changed
+
+    phone.keep = add_unreviewed_metadata
+    result = failed(run("restore-checked", stdin=json.dumps(receipt)))
+    assert "raw icon state differs" in result["error"]
+    assert Path(result["undo_backup"]).is_file()
+    assert len(phone.writes) == 2
+
+
+@pytest.mark.parametrize("tamper", ["missing_proposal", "wrong_proposal", "missing_raw", "wrong_raw", "missing_destination_raw", "wrong_destination_raw", "changed_operation", "stale_scan", "raw_only_drift"])
+def test_checked_apply_refuses_unreviewed_or_stale_input_before_backup(phone, tamper):
+    request = _checked_request()
+    if tamper == "missing_proposal":
+        del request["proposed_snapshot_id"]
+    elif tamper == "wrong_proposal":
+        request["proposed_snapshot_id"] = "not the checked layout"
+    elif tamper == "missing_raw":
+        del request["source_raw_sha256"]
+    elif tamper == "wrong_raw":
+        request["source_raw_sha256"] = "0" * 64
+    elif tamper == "missing_destination_raw":
+        del request["proposed_raw_sha256"]
+    elif tamper == "wrong_destination_raw":
+        request["proposed_raw_sha256"] = "0" * 64
+    elif tamper == "changed_operation":
+        request["operations"][0]["target_page"] = 42
+    elif tamper == "stale_scan":
+        _remove_app(phone.raw, _first_moved_app(_focus_preview()))
+    elif tamper == "raw_only_drift":
+        phone.raw[1][0]["unused_metadata"] = "new"
+
+    failed(run("apply-checked", stdin=json.dumps(request)))
+    assert phone.writes == []
+    assert phone.backups() == []
+
+
+def test_checked_apply_rejects_unreviewed_destination_metadata_before_backup(phone, monkeypatch):
+    request = _checked_request()
+    prepare = cli._prepare_write
+
+    def altered_destination(layout, operations):
+        raw, predicted, problem = prepare(layout, operations)
+        raw[1][0]["unused_metadata"] = "unreviewed destination"
+        return raw, predicted, problem
+
+    monkeypatch.setattr(cli, "_prepare_write", altered_destination)
+    result = failed(run("apply-checked", stdin=json.dumps(request)))
+    assert "proposed raw icon state" in result["error"]
+    assert phone.writes == [] and phone.backups() == []
+
+
+def test_checked_apply_refuses_drift_after_backup(phone, monkeypatch):
+    request = _checked_request()
+    before = copy.deepcopy(phone.raw)
+    reads = []
+
+    def drifting_read(lockdown):
+        reads.append(1)
+        if len(reads) == 3:
+            phone.raw[1][0]["unused_metadata"] = "changed after backup"
+        return phone.read_layout(lockdown)
+
+    monkeypatch.setattr(device, "read_layout", drifting_read)
+    result = failed(run("apply-checked", stdin=json.dumps(request)))
+
+    assert "after the backup" in result["error"]
+    assert len(phone.backups()) == 1
+    assert json.loads(phone.backups()[0].read_text()) == json.loads(json.dumps(before, default=str))
+    assert phone.writes == []
+
+
+def test_checked_apply_refuses_unparsed_state(phone):
+    phone.raw[-1].append({"listType": "unsupported"})
+    snapshot = ok(run("scan"), PHONE_DATA)["snapshot_id"]
+    request = {"operations": [{"action": "move_to_page", "bundle_ids": ["com.example.library-only"], "target_page": 1}],
+               "snapshot_id": snapshot, "source_raw_sha256": cli._raw_state_fingerprint(phone.read_layout("LOCKDOWN")),
+               "proposed_snapshot_id": "some destination", "proposed_raw_sha256": "0" * 64}
+    result = failed(run("apply-checked", stdin=json.dumps(request)))
+    assert "complete icon-state structure" in result["error"]
+    assert phone.writes == [] and phone.backups() == []
+
+
+def test_checked_apply_refuses_app_library_source(phone):
+    snapshot = ok(run("scan"), PHONE_DATA)["snapshot_id"]
+    request = {"operations": [{"action": "move_to_page", "bundle_ids": ["com.example.library-only"], "target_page": 1}],
+               "snapshot_id": snapshot, "source_raw_sha256": cli._raw_state_fingerprint(phone.read_layout("LOCKDOWN")),
+               "proposed_snapshot_id": "some destination", "proposed_raw_sha256": "0" * 64}
+    result = failed(run("apply-checked", stdin=json.dumps(request)))
+    assert "not on the home screen" in result["error"]
+    assert phone.writes == [] and phone.backups() == []
+
+
+def test_checked_apply_preserves_backup_on_readback_mismatch(phone):
+    request = _checked_request()
+    phone.keep = lambda state: state[:1] + [list(reversed(state[1]))] + state[2:]
+    result = failed(run("apply-checked", stdin=json.dumps(request)))
+    assert "verification failed" in result["error"]
+    assert len(phone.writes) == 1 and len(phone.backups()) == 1
+    assert result["backup"] == str(phone.backups()[0])
+
+
+def test_checked_apply_rejects_raw_only_readback_drift_without_receipt(phone):
+    request = _checked_request()
+
+    def add_unreviewed_metadata(state):
+        changed = copy.deepcopy(state)
+        changed[1][0]["unused_metadata"] = "normalized after apply"
+        return changed
+
+    phone.keep = add_unreviewed_metadata
+    result = failed(run("apply-checked", stdin=json.dumps(request)))
+    assert "raw icon state does not match" in result["error"]
+    assert "recovery" not in result
+    assert Path(result["backup"]).is_file()
+    assert len(phone.writes) == 1
 
 
 def test_apply_writes_once_and_returns_the_backup(phone):
