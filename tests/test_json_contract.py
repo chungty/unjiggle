@@ -328,7 +328,7 @@ def app_payload(operations: list[dict], snapshot_id: str | None = None) -> str:
 # --- each command -----------------------------------------------------------------------
 
 
-CONTRACT_COMMANDS = {"status", "scan", "inventory", "icon", "diagnose", "mirror", "obituary", "suggest", "presets", "restore", "render", "apply", "check-operations", "check-library-insertion", "check-library-insertions", "check-mixed-operations", "apply-mixed-checked", "apply-library-checked", "apply-library-batch-checked", "apply-checked", "pending-checked", "check-recovery", "restore-checked"}
+CONTRACT_COMMANDS = {"status", "scan", "inventory", "app-context", "icon", "diagnose", "mirror", "obituary", "suggest", "presets", "restore", "render", "apply", "check-operations", "check-library-insertion", "check-library-insertions", "check-mixed-operations", "apply-mixed-checked", "apply-library-checked", "apply-library-batch-checked", "apply-checked", "pending-checked", "check-recovery", "restore-checked"}
 
 
 def test_the_contract_version_is_2():
@@ -415,6 +415,22 @@ def test_inventory_contract_is_read_only(phone, monkeypatch):
 
     assert payload["apps"][0]["on_home_screen"] is False
     assert payload["snapshot_id"]
+    assert phone.writes == []
+
+
+def test_app_context_contract_is_optional_and_never_reads_or_writes_phone(phone, monkeypatch):
+    monkeypatch.setattr(itunes, "_load_cache", lambda: {})
+    monkeypatch.setattr(itunes, "_save_cache", lambda _: None)
+    monkeypatch.setattr(itunes, "lookup_app", lambda bundle_id, cache, client: {
+        "bundle_id": bundle_id, "genre": "Books", "description": "Read novels"
+    } if bundle_id == "org.example.reader" else None)
+    result = CliRunner().invoke(cli.main, ["json", "app-context"],
+                                input=json.dumps({"bundle_ids": ["org.example.reader", "org.example.unknown"]}))
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output) == {"apps": {
+        "org.example.reader": {"category": "Books", "description": "Read novels"},
+        "org.example.unknown": None,
+    }}
     assert phone.writes == []
 
 

@@ -1430,6 +1430,59 @@ def json_inventory():
     _json_out(payload)
 
 
+@json.command(name="app-context")
+def json_app_context():
+    """Look up optional App Store context for IDs supplied on stdin.
+
+    This contacts Apple's lookup API for third-party IDs. Callers must obtain
+    network consent; inventory and other offline commands never invoke it.
+    No phone connection or device write is involved.
+    """
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    import httpx
+
+    from unjiggle.itunes import _load_cache, _save_cache, lookup_app
+
+    try:
+        request = _json.load(sys.stdin)
+        ids = request["bundle_ids"]
+        if (not isinstance(ids, list) or not 1 <= len(ids) <= 400
+                or any(not isinstance(item, str) or not 1 <= len(item) <= 512 for item in ids)
+                or len(set(ids)) != len(ids) or set(request) != {"bundle_ids"}):
+            raise ValueError("Invalid app IDs")
+    except (ValueError, TypeError, KeyError, _json.JSONDecodeError):
+        _json_err("Expected 1–400 unique app IDs in bundle_ids")
+
+    cache = _load_cache()
+    result = {bundle_id: None for bundle_id in ids}
+    deadline = time.monotonic() + 45  # The Mac read command has a 60-second limit.
+    with httpx.Client(timeout=2.0) as client:
+        def fetch(bundle_id):
+            # lookup_app mutates its cache. Keep work on separate dictionaries
+            # so concurrent lookups cannot race on a shared cache.
+            local = {bundle_id: cache[bundle_id]} if cache.get(bundle_id) is not None else {}
+            metadata = lookup_app(bundle_id, local, client)
+            return bundle_id, metadata
+
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            for start in range(0, len(ids), 16):
+                if time.monotonic() >= deadline:
+                    break  # Unchecked apps stay unknown; never infer a purpose.
+                for bundle_id, metadata in pool.map(fetch, ids[start:start + 16]):
+                    if metadata and metadata.get("bundle_id") == bundle_id:
+                        cache[bundle_id] = metadata
+                        result[bundle_id] = {
+                            "category": metadata["genre"],
+                            "description": metadata["description"],
+                        }
+                    # Don't persist a failed or unavailable lookup as a
+                    # permanent negative result (for example an offline Mac).
+    _save_cache(cache)
+    _json_out({"apps": result})
+
+
 @json.command(name="icon")
 @click.option("--bundle-id", required=True, help="Exact installed-app bundle identifier")
 def json_icon(bundle_id: str):
