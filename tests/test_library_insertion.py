@@ -508,6 +508,92 @@ def checked_batch(layout):
             "experimental_library_write": True}
 
 
+def checked_mixed(layout):
+    operations = [
+        {"action": "move_to_folder", "bundle_ids": ["org.example.visible"], "folder_name": "Other"},
+        {"action": "insert_from_library", "bundle_id": APP, "target_page": 0},
+    ]
+    request = {"operations": operations, "snapshot_id": cli._layout_signature(layout),
+               "source_raw_sha256": cli._raw_state_fingerprint(layout)}
+    checked = ok(run("check-mixed-operations", stdin=json.dumps(request)))
+    return {**request, "proposed_snapshot_id": checked["proposed_snapshot_id"],
+            "proposed_raw_sha256": checked["proposed_raw_sha256"],
+            "checked_step_raw_sha256": [step["raw_sha256"] for step in checked["steps"]],
+            "experimental_mixed_write": True}
+
+
+def test_mixed_apply_requires_own_gate_and_restores_exact_original(insertion_phone, monkeypatch):
+    original = copy.deepcopy(insertion_phone.raw)
+    request = checked_mixed(device.parse_layout_state(original))
+    assert "disabled" in failed(run("apply-mixed-checked", stdin=json.dumps(request)))["error"]
+    assert not insertion_phone.backups() and not insertion_phone.writes
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_LIBRARY_WRITE", "1")
+    assert "disabled" in failed(run("apply-mixed-checked", stdin=json.dumps(request)))["error"]
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_MIXED_WRITE", "1")
+    assert "disabled" in failed(run("apply-mixed-checked", stdin=json.dumps({
+        **request, "experimental_mixed_write": False})))["error"]
+    applied = ok(run("apply-mixed-checked", stdin=json.dumps(request)))
+    assert len(insertion_phone.writes) == len(insertion_phone.backups()) == 1
+    assert json.loads(insertion_phone.backups()[0].read_text()) == original
+    assert applied["recovery"]["applied_raw_sha256"] == request["proposed_raw_sha256"]
+    assert len(ok(run("pending-checked"))["records"]) == 1
+    assert insertion_phone.raw["iconLists"][0][-1] == APP
+    ok(run("restore-checked", stdin=json.dumps(applied["recovery"])))
+    assert insertion_phone.raw == original
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda request: request.update(checked_step_raw_sha256=["0" * 64, request["proposed_raw_sha256"]]),
+    lambda request: request.update(proposed_raw_sha256="0" * 64),
+    lambda request: request["operations"][1].update(target_page=True),
+    lambda request: request.update(checked_step_raw_sha256=[request["proposed_raw_sha256"]]),
+])
+def test_mixed_apply_rejects_tampering_before_backup(insertion_phone, monkeypatch, mutation):
+    request = checked_mixed(device.parse_layout_state(insertion_phone.raw))
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_MIXED_WRITE", "1")
+    mutation(request)
+    assert "Not written" in failed(run("apply-mixed-checked", stdin=json.dumps(request)))["error"]
+    assert not insertion_phone.writes and not insertion_phone.backups()
+
+
+def test_mixed_apply_rejects_inventory_drift_before_backup(insertion_phone, monkeypatch):
+    request = checked_mixed(device.parse_layout_state(insertion_phone.raw))
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_MIXED_WRITE", "1")
+    inventory = device.read_installed_apps
+
+    def drift(lockdown, layout):
+        result = inventory(lockdown, layout)
+        insertion_phone.raw["uniqueIdentifier"] = "drift during inventory"
+        return result
+
+    monkeypatch.setattr(device, "read_installed_apps", drift)
+    assert "changed while reading" in failed(run("apply-mixed-checked", stdin=json.dumps(request)))["error"]
+    assert not insertion_phone.writes and not insertion_phone.backups()
+
+
+def test_mixed_apply_failed_journal_never_writes(insertion_phone, monkeypatch):
+    request = checked_mixed(device.parse_layout_state(insertion_phone.raw))
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_MIXED_WRITE", "1")
+    monkeypatch.setattr(safety, "checked_recovery_journal", lambda *_: (_ for _ in ()).throw(OSError("unavailable")))
+    assert "journal could not be saved" in failed(run("apply-mixed-checked", stdin=json.dumps(request)))["error"]
+    assert not insertion_phone.writes and len(insertion_phone.backups()) == 1
+
+
+def test_mixed_apply_readback_mismatch_leaves_recovery_candidate(insertion_phone, monkeypatch):
+    request = checked_mixed(device.parse_layout_state(insertion_phone.raw))
+    monkeypatch.setenv("UNJIGGLE_EXPERIMENTAL_MIXED_WRITE", "1")
+
+    def normalized(raw):
+        changed = copy.deepcopy(raw)
+        changed["uniqueIdentifier"] = "iOS normalized metadata"
+        return changed
+
+    insertion_phone.keep = normalized
+    assert "verification failed" in failed(run("apply-mixed-checked", stdin=json.dumps(request)))["error"]
+    assert len(insertion_phone.writes) == 1
+    assert len(ok(run("pending-checked"))["records"]) == 1
+
+
 def test_batch_apply_one_write_one_backup_journal_and_exact_restore(batch_phone, monkeypatch):
     original = copy.deepcopy(batch_phone.raw)
     request = checked_batch(device.parse_layout_state(original))

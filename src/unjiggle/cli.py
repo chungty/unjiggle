@@ -2830,6 +2830,70 @@ def json_check_mixed_operations():
     })
 
 
+@json.command(name="apply-mixed-checked")
+def json_apply_mixed_checked():
+    """Experimental single checked write for an ordered mixed plan.
+
+    Disabled independently of the library-only transport. A raw readback does
+    not establish visible placement or a recoverable physical device.
+    """
+    from unjiggle.device import connect, read_installed_apps, read_layout
+    from unjiggle.library_insertion import project_mixed_operations
+
+    try:
+        request = _json.loads(_read_stdin())
+    except ValueError as error:
+        _json_err(f"Invalid JSON input: {error}")
+    if not isinstance(request, dict):
+        _json_err("Not written: expected a checked mixed request object.")
+    if (request.get("experimental_mixed_write") is not True
+            or os.environ.get("UNJIGGLE_EXPERIMENTAL_MIXED_WRITE") != "1"):
+        _json_err("Not written: experimental mixed Apply is disabled.")
+    if set(request) != {"experimental_mixed_write", "operations", "snapshot_id",
+                        "source_raw_sha256", "proposed_snapshot_id", "proposed_raw_sha256",
+                        "checked_step_raw_sha256"}:
+        _json_err("Not written: the checked mixed request is incomplete or has unexpected fields.")
+    operations = request["operations"]
+    if not isinstance(operations, list) or not 1 <= len(operations) <= 50:
+        _json_err("Not written: provide one to fifty ordered operations.")
+    source_id, proposed_id = request["snapshot_id"], request["proposed_snapshot_id"]
+    source_hash, proposed_hash = request["source_raw_sha256"], request["proposed_raw_sha256"]
+    step_hashes = request["checked_step_raw_sha256"]
+    def valid_hash(value):
+        return isinstance(value, str) and len(value) == 64 and all(
+            character in "0123456789abcdef" for character in value)
+    if (not isinstance(source_id, str) or not source_id
+            or not isinstance(proposed_id, str) or not proposed_id
+            or not valid_hash(source_hash) or not valid_hash(proposed_hash)
+            or not isinstance(step_hashes, list) or len(step_hashes) != len(operations)
+            or any(not valid_hash(value) for value in step_hashes)
+            or step_hashes[-1] != proposed_hash):
+        _json_err("Not written: source, proposed, and every checked step fingerprint are required.")
+
+    try:
+        lockdown, connected_device = connect()
+    except Exception:
+        _json_err("No iPhone detected")
+    source = read_layout(lockdown)
+    if _layout_signature(source) != source_id or _raw_state_fingerprint(source) != source_hash:
+        _json_err("Not written: the source icon state changed since the check. Scan again.")
+    try:
+        inventory = read_installed_apps(lockdown, source)
+        steps = project_mixed_operations(source, inventory, operations)
+    except (ValueError, TypeError, KeyError, AttributeError) as error:
+        _json_err(f"Not written: operations could not be verified: {error}.")
+    if (_layout_signature(steps[-1]) == source_id
+            or _layout_signature(steps[-1]) != proposed_id
+            or [_raw_state_fingerprint(step) for step in steps] != step_hashes):
+        _json_err("Not written: the checked steps do not match the proposed icon state.")
+    after_inventory = read_layout(lockdown)
+    if (_layout_signature(after_inventory) != source_id
+            or _raw_state_fingerprint(after_inventory) != source_hash):
+        _json_err("Not written: the icon state changed while reading installed apps. Scan again.")
+    _json_write_checked(lockdown, connected_device, source, source_id, source_hash,
+                        steps[-1].raw, proposed_id, proposed_hash, len(operations))
+
+
 @json.command(name="apply-library-checked")
 def json_apply_library_checked():
     """Experimental, explicitly opted-in checked insertion of one ignored User app.

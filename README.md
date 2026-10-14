@@ -124,8 +124,20 @@ checks each move and Library addition against the preceding projected raw state,
 then returns `steps` with the layout, snapshot ID, and raw SHA-256 after every
 operation. The result includes the final layout and fingerprints and always has
 `writable: false`. The command only reads the phone and installed inventory; its
-projections do not establish physical placement or recovery and cannot authorize
-any checked-write command.
+projections do not establish physical placement or recovery and cannot alone
+authorize a write.
+
+Experimental `unjiggle json apply-mixed-checked` takes the same `operations`,
+`snapshot_id`, and `source_raw_sha256`, plus that check's
+`proposed_snapshot_id`, `proposed_raw_sha256`, and an ordered
+`checked_step_raw_sha256` for every step. It requires both
+`"experimental_mixed_write": true` and `UNJIGGLE_EXPERIMENTAL_MIXED_WRITE=1`,
+independently of the Library-only gate. It rereads the source and installed
+inventory, recomputes the full sequence and fingerprints, verifies a backup,
+persists a recovery journal, makes one write, and requires exact raw readback.
+The recovery receipt is usable by `restore-checked` if its live safety checks
+pass. Offline tests do not establish visible placement or physical recovery;
+clients must keep this opt-in disabled until those are independently proved.
 
 An experimental `unjiggle json apply-library-batch-checked` accepts that check's
 `insertions`, source snapshot and raw fingerprint, proposed snapshot and raw

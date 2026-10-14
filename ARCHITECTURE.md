@@ -68,6 +68,7 @@ Public:
 - `json check-mixed-operations`: read-only, source-snapshot and raw-fingerprint-bound ordered projections for page/folder moves and installed ignored User app additions to existing pages/folders. Each step is checked from the preceding raw state; results are never write authorization.
 - `json apply-library-checked`: experimental single-app checked insertion behind both an explicit request opt-in and an environment gate. Rechecks installed identity and source/destination fingerprints, then uses the same verified backup, recovery journal, single write and exact raw readback as `apply-checked`. Offline tests exercise it; no physical icon placement or recovery is certified. Clients must not enable the gate from a preview alone.
 - `json apply-library-batch-checked`: experimental generic batch of up to fifty checked insertions, bound to each prefix raw fingerprint and the final source/destination state. Uses one verified backup, recovery journal, raw write and exact readback; offline tests cannot certify physical placement or recovery. It shares the explicit request and environment gates above.
+- `json apply-mixed-checked`: experimental ordered Home Screen moves and installed Library additions; independently gated by an explicit request opt-in and a separate process environment setting. Rechecks every prefix and the final raw state, then uses one verified backup, a recovery journal, one write and exact raw readback. Offline success cannot certify visible placement or physical recovery.
 
 Private:
 - "One-Page Challenge"
