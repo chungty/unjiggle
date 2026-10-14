@@ -738,7 +738,7 @@ def test_checked_journal_does_not_allow_restore_if_write_never_happened(phone):
 
 
 def test_check_recovery_only_reads_and_requires_exact_live_state(phone):
-    applied = ok(run("apply-checked", stdin=json.dumps(_checked_request())))
+    ok(run("apply-checked", stdin=json.dumps(_checked_request())))
     receipt = ok(run("pending-checked"))["records"][0]["recovery"]
     backups_before = len(phone.backups())
     result = ok(run("check-recovery", stdin=json.dumps(receipt)))

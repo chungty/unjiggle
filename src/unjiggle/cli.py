@@ -2849,7 +2849,7 @@ def json_apply_checked():
 
     This command cannot guarantee SpringBoard's visible positions or restoration.
     """
-    from unjiggle.device import connect, layout_parse_integrity, parse_layout_state, read_layout, write_layout
+    from unjiggle.device import connect, layout_parse_integrity, parse_layout_state, read_layout
     from unjiggle import layout_engine
 
     # The extra field binds the write to the whole destination, including
