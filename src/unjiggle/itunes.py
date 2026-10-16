@@ -93,7 +93,13 @@ def _is_system_app(bundle_id: str) -> bool:
 def lookup_app(bundle_id: str, cache: dict, client: httpx.Client) -> dict | None:
     """Look up a single app by bundle ID. Returns metadata dict or None."""
     if bundle_id in cache:
-        return cache[bundle_id]
+        cached = cache[bundle_id]
+        # Older caches did not record which App Store ID supplied the result.
+        # Recheck those entries instead of attributing unverifiable metadata.
+        if cached is None or _is_system_app(bundle_id) or (
+            isinstance(cached, dict) and cached.get("bundle_id") == bundle_id
+        ):
+            return cached
 
     if _is_system_app(bundle_id):
         # Apple system apps aren't on the iTunes Search API
@@ -124,9 +130,18 @@ def lookup_app(bundle_id: str, cache: dict, client: httpx.Client) -> dict | None
         cache[bundle_id] = None
         return None
 
-    app = results[0]
+    # The lookup endpoint may return several results, or a result for a
+    # different bundle ID. Never attach another app's description or icon.
+    app = next(
+        (item for item in results if isinstance(item, dict) and item.get("bundleId") == bundle_id),
+        None,
+    )
+    if app is None:
+        cache[bundle_id] = None
+        return None
     genre = app.get("primaryGenreName", "Other")
     result = {
+        "bundle_id": bundle_id,
         "name": app.get("trackName", bundle_id.split(".")[-1]),
         "genre": genre,
         "super_category": GENRE_MAP.get(genre, "Other"),

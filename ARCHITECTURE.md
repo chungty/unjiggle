@@ -11,6 +11,9 @@ It owns:
 - safe transforms, backup, restore, and verification
 - share cards for single-snapshot diagnostics and before/after transforms
 - the public JSON contract under `unjiggle json`
+- read-only installed-app identity lookup and reconciliation with a Home Screen snapshot
+- read-only lookup of a single app's PNG icon by exact bundle identifier
+- read-only projection of one installed, ignored User app onto one existing page
 
 Diagnostics must not test the device write path implicitly. `safety-test` reads and
 backs up by default; its write-roundtrip mode requires explicit confirmation.
@@ -56,7 +59,16 @@ Public:
 - `mirror`, `obituary`, `swipetax`
 - `suggest`, `backup`, `restore`
 - `json suggest`, `json apply`, `json restore`, `json render`
+- `json check-operations`, `json apply-checked`, `json pending-checked`, `json check-recovery`, `json restore-checked`: generic snapshot-bound preflight, verified write, recovery-journal lookup, read-only recovery eligibility, and device/state-bound restore; none guarantees visible iOS placement or physical recovery
 - `compact_to_single_page`
+- `json inventory`: provisional installed-app names and IDs; no icon, placement, or write guarantee
+- `json icon`: one local device icon, or an explicit missing result; no App Library or placement guarantee
+- `json check-library-insertion`: strict raw-snapshot-bound, read-only projection onto one existing page or into one unambiguous existing folder for one ignored User app; always non-writable, with no physical-placement guarantee
+- `json check-library-insertions`: read-only, scan-bound prefix projections for up to fifty distinct ignored User apps; always non-writable, with no physical-placement guarantee
+- `json check-mixed-operations`: read-only, source-snapshot and raw-fingerprint-bound ordered projections for page/folder moves and installed ignored User app additions to existing pages/folders. Each step is checked from the preceding raw state; results are never write authorization.
+- `json apply-library-checked`: experimental single-app checked insertion behind both an explicit request opt-in and an environment gate. Rechecks installed identity and source/destination fingerprints, then uses the same verified backup, recovery journal, single write and exact raw readback as `apply-checked`. Offline tests exercise it; no physical icon placement or recovery is certified. Clients must not enable the gate from a preview alone.
+- `json apply-library-batch-checked`: experimental generic batch of up to fifty checked insertions, bound to each prefix raw fingerprint and the final source/destination state. Uses one verified backup, recovery journal, raw write and exact readback; offline tests cannot certify physical placement or recovery. It shares the explicit request and environment gates above.
+- `json apply-mixed-checked`: experimental ordered Home Screen moves and installed Library additions; independently gated by an explicit request opt-in and a separate process environment setting. Rechecks every prefix and the final raw state, then uses one verified backup, a recovery journal, one write and exact raw readback. Offline success cannot certify visible placement or physical recovery.
 
 Private:
 - "One-Page Challenge"
