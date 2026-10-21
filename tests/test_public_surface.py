@@ -25,6 +25,33 @@ def test_public_json_api_exposes_batch_preset_previews():
     assert "presets" in json_group.commands
 
 
+def test_public_inventory_is_documented_as_read_only_and_provisional():
+    assert "inventory" in json_group.commands
+    readme = (REPO_ROOT / "README.md").read_text()
+    architecture = (REPO_ROOT / "ARCHITECTURE.md").read_text()
+    assert "`unjiggle json inventory`" in readme
+    assert "candidate for App Library" in readme
+    assert "read-only installed-app identity lookup" in architecture
+
+
+def test_public_icon_is_documented_as_read_only_without_placement_guarantee():
+    assert "icon" in json_group.commands
+    readme = (REPO_ROOT / "README.md").read_text()
+    architecture = (REPO_ROOT / "ARCHITECTURE.md").read_text()
+    assert "`unjiggle json icon --bundle-id" in readme
+    assert "does not prove" in readme
+    assert "`json icon`" in architecture
+
+
+def test_library_insertion_projection_is_documented_as_non_writable():
+    assert "check-library-insertion" in json_group.commands
+    readme = (REPO_ROOT / "README.md").read_text()
+    architecture = (REPO_ROOT / "ARCHITECTURE.md").read_text()
+    assert "`unjiggle json check-library-insertion`" in readme
+    assert "writable: false" in readme
+    assert "`json check-library-insertion`" in architecture
+
+
 def test_first_run_help_uses_public_boundary_language():
     result = CliRunner().invoke(main, [])
 

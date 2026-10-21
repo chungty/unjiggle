@@ -10,6 +10,9 @@ Trust architecture:
 from __future__ import annotations
 
 import json
+import os
+import stat
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -19,6 +22,79 @@ from unjiggle.models import HomeScreenLayout
 
 console = Console()
 BACKUP_DIR = Path.home() / ".unjiggle" / "backups"
+
+
+def _sync_directory(path: Path) -> None:
+    """Make newly created recovery files discoverable after a process crash."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def checked_recovery_journal(backup_path: Path, receipt: dict, *, operation: str = "apply") -> Path:
+    """Durably record the expected post-write state *before* a checked write.
+
+    A journal is a candidate for recovery, never proof that the device changed.
+    restore-checked still verifies its backup, device identity, and exact live state.
+    """
+    directory = backup_path.parent
+    if not stat.S_ISDIR(directory.lstat().st_mode):
+        raise RuntimeError("Backup directory is not a real directory")
+    if operation not in ("apply", "restore"):
+        raise ValueError("Unknown checked recovery operation")
+    # A restore can itself be interrupted after SpringBoard accepts the write.
+    # Its backup then becomes the source of a reverse, read-only-auditable receipt.
+    record = {**receipt, **({"operation": "restore"} if operation == "restore" else {})}
+    contents = json.dumps(record, sort_keys=True, separators=(",", ":")).encode()
+    if len(contents) > 64_000:
+        raise RuntimeError("Checked recovery receipt is too large")
+    path = directory / f"checked-recovery-{uuid.uuid4().hex}.json"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(contents)
+            output.flush()
+            os.fsync(output.fileno())
+        _sync_directory(directory)
+        if path.read_bytes() != contents:
+            raise RuntimeError("Checked recovery journal read-back mismatch")
+    except Exception:
+        # Preserve any successfully created record for manual inspection.
+        raise
+    return path
+
+
+def checked_recovery_journals() -> list[dict]:
+    """List candidate receipts without connecting to or writing to the phone."""
+    if not BACKUP_DIR.exists():
+        return []
+    if not stat.S_ISDIR(BACKUP_DIR.lstat().st_mode):
+        raise RuntimeError("Backup directory is not a real directory")
+    records = []
+    for path in sorted(BACKUP_DIR.glob("checked-recovery-*.json")):
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 64_000:
+            raise RuntimeError(f"Invalid checked recovery journal: {path}")
+        receipt = json.loads(path.read_bytes())
+        fields = ("backup_sha256", "source_raw_sha256", "applied_raw_sha256", "device_id_sha256")
+        if (not isinstance(receipt, dict)
+                or any(not isinstance(receipt.get(key), str) or len(receipt[key]) != 64
+                       or any(ch not in "0123456789abcdef" for ch in receipt[key]) for key in fields)
+                or not isinstance(receipt.get("applied_snapshot_id"), str)
+                or not receipt["applied_snapshot_id"]
+                or not isinstance(receipt.get("backup"), str)
+                or Path(receipt["backup"]).parent != BACKUP_DIR
+                or receipt.get("operation", "apply") not in ("apply", "restore")):
+            raise RuntimeError(f"Invalid checked recovery journal: {path}")
+        operation = receipt.pop("operation", "apply")
+        record = {"journal": str(path), "recovery": receipt}
+        if operation == "restore":
+            record["operation"] = operation
+        records.append(record)
+    return records
 
 
 def verified_backup(lockdown, layout: HomeScreenLayout, out: Console | None = None) -> Path:
@@ -31,7 +107,7 @@ def verified_backup(lockdown, layout: HomeScreenLayout, out: Console | None = No
     from unjiggle.device import read_layout
 
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     # Save (default=str handles datetime objects from pymobiledevice3)
     raw_json = json.dumps(layout.raw, indent=2, default=str)
@@ -41,7 +117,11 @@ def verified_backup(lockdown, layout: HomeScreenLayout, out: Console | None = No
         path = BACKUP_DIR / f"layout-{timestamp}{suffix}.json"
         try:
             with path.open("x") as backup:
+                os.chmod(path, 0o600)
                 backup.write(raw_json)
+                backup.flush()
+                os.fsync(backup.fileno())
+            _sync_directory(BACKUP_DIR)
             break
         except FileExistsError:
             number += 1
